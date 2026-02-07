@@ -21,6 +21,20 @@ const ICONS = {
         <path d="M12 8v8"/>
         <path d="M8 12h8"/>
     </svg>`,
+    gltf: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="9"/>
+        <path d="M12 3v18"/>
+        <path d="M3 12h18"/>
+        <path d="M12 3c4 3.5 4 14.5 0 18"/>
+        <path d="M12 3c-4 3.5-4 14.5 0 18"/>
+    </svg>`,
+    glb: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="9"/>
+        <path d="M12 3v18"/>
+        <path d="M3 12h18"/>
+        <path d="M12 3c4 3.5 4 14.5 0 18"/>
+        <path d="M12 3c-4 3.5-4 14.5 0 18"/>
+    </svg>`,
     archive: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <rect x="2" y="4" width="20" height="16" rx="2"/>
         <path d="M12 4v16"/>
@@ -44,6 +58,13 @@ export class FileBrowser {
         this._currentPath = null;
         this._parentPath = null;
         this._selectedElement = null;
+        // Cached data for filtering
+        this._currentFolders = [];
+        this._currentAssets = [];
+        // View mode: 'list' or 'grid'
+        this._viewMode = localStorage.getItem("meshvault_viewMode") || "list";
+        // Current search filter
+        this._filterText = "";
     }
 
     /** Get the current browsing path */
@@ -73,12 +94,20 @@ export class FileBrowser {
             this._currentPath = data.current_path;
             this._parentPath = data.parent_path;
 
+            // Cache data for filtering
+            this._currentFolders = data.folders;
+            this._currentAssets = data.assets;
+
+            // Clear filter on navigation
+            this._filterText = "";
+            if (this._filterInput) this._filterInput.value = "";
+
             // Update the path display
             this._pathDisplay.textContent = this._currentPath;
             this._pathDisplay.title = this._currentPath;
 
             // Render the file list
-            this._render(data.folders, data.assets);
+            this._renderFiltered();
 
             const assetCount = data.assets.length;
             const folderCount = data.folders.length;
@@ -117,11 +146,57 @@ export class FileBrowser {
     }
 
     /**
+     * Set a reference to the filter input element (called by App after DOM init).
+     */
+    setFilterInput(input) {
+        this._filterInput = input;
+        input.addEventListener("input", () => {
+            this._filterText = input.value.trim().toLowerCase();
+            this._renderFiltered();
+        });
+    }
+
+    /** Set the view mode ('list' or 'grid'). */
+    setViewMode(mode) {
+        this._viewMode = mode;
+        localStorage.setItem("meshvault_viewMode", mode);
+        this._renderFiltered();
+    }
+
+    /** Get the current view mode. */
+    getViewMode() {
+        return this._viewMode;
+    }
+
+    /**
+     * Re-render with current filter applied.
+     */
+    _renderFiltered() {
+        const filter = this._filterText;
+        let folders = this._currentFolders;
+        let assets = this._currentAssets;
+
+        if (filter) {
+            folders = folders.filter((f) =>
+                f.name.toLowerCase().includes(filter)
+            );
+            assets = assets.filter((a) =>
+                a.name.toLowerCase().includes(filter)
+            );
+        }
+
+        this._render(folders, assets);
+    }
+
+    /**
      * Render the file list from folders and assets data.
      */
     _render(folders, assets) {
         this._container.innerHTML = "";
         this._selectedElement = null;
+
+        const isGrid = this._viewMode === "grid";
+        this._container.classList.toggle("grid-view", isGrid);
 
         // Folders section
         if (folders.length > 0) {
@@ -142,15 +217,27 @@ export class FileBrowser {
             label.textContent = "3D Assets";
             this._container.appendChild(label);
 
-            for (const asset of assets) {
-                this._container.appendChild(this._createAssetItem(asset));
+            if (isGrid) {
+                const grid = document.createElement("div");
+                grid.className = "asset-grid";
+                for (const asset of assets) {
+                    grid.appendChild(this._createAssetCard(asset));
+                }
+                this._container.appendChild(grid);
+            } else {
+                for (const asset of assets) {
+                    this._container.appendChild(this._createAssetItem(asset));
+                }
             }
         }
 
         // Empty state
         if (folders.length === 0 && assets.length === 0) {
+            const msg = this._filterText
+                ? "No results matching filter"
+                : "No folders or 3D assets found";
             this._container.innerHTML = `
-                <div class="empty-state">No folders or 3D assets found</div>
+                <div class="empty-state">${msg}</div>
             `;
         }
     }
@@ -230,6 +317,33 @@ export class FileBrowser {
         });
 
         return item;
+    }
+
+    /**
+     * Create an asset card element (for grid view).
+     */
+    _createAssetCard(asset) {
+        const card = document.createElement("div");
+        card.className = "asset-card";
+        card.dataset.type = "asset";
+
+        const ext = asset.extension.replace(".", "").toLowerCase();
+        const icon = ICONS[ext] || ICONS.obj;
+        const badgeClass = asset.is_in_archive ? "badge-archive" : `badge-${ext}`;
+        const badgeText = asset.is_in_archive ? `${ext} 📦` : ext;
+
+        card.innerHTML = `
+            <div class="asset-card-icon asset-${ext}">${icon}</div>
+            <div class="asset-card-name">${this._escapeHtml(asset.name)}</div>
+            <span class="file-item-badge ${badgeClass}">${badgeText}</span>
+        `;
+
+        card.addEventListener("click", () => {
+            this._setSelected(card);
+            this._onAssetSelect(asset);
+        });
+
+        return card;
     }
 
     /**

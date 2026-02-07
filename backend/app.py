@@ -36,6 +36,8 @@ DEFAULT_ROOT = str(Path.home())
 mimetypes.add_type("model/obj", ".obj")
 mimetypes.add_type("model/fbx", ".fbx")
 mimetypes.add_type("model/mtl", ".mtl")
+mimetypes.add_type("model/gltf+json", ".gltf")
+mimetypes.add_type("model/gltf-binary", ".glb")
 
 
 # --- Pydantic models for API ---

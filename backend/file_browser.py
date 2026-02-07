@@ -16,7 +16,7 @@ from backend.archive_inspector import ArchiveInspector
 
 
 # Supported 3D asset extensions
-SUPPORTED_3D_EXTENSIONS = {".obj", ".fbx"}
+SUPPORTED_3D_EXTENSIONS = {".obj", ".fbx", ".gltf", ".glb"}
 
 # Supported archive extensions
 SUPPORTED_ARCHIVE_EXTENSIONS = {".zip", ".rar"}

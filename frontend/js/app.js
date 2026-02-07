@@ -69,11 +69,15 @@ class App {
         // --- Sidebar Resize ---
         this._initSidebarResize();
 
-        // --- Nav Mode Toggle ---
-        this._initNavModeToggle();
+        // --- Sidebar Controls ---
+        this._initSearchFilter();
+        this._initViewModeToggle();
 
-        // --- Light Controls ---
+        // --- Viewer Toolbar ---
+        this._initNavModeToggle();
+        this._initWireframeToggle();
         this._initLightControls();
+        this._initBackgroundSwatches();
 
         // --- Scale Control ---
         this._initScaleControl();
@@ -206,6 +210,35 @@ class App {
     }
 
     /**
+     * Initialize the sidebar search/filter input.
+     */
+    _initSearchFilter() {
+        const input = document.getElementById("search-filter");
+        this._fileBrowser.setFilterInput(input);
+    }
+
+    /**
+     * Initialize the list/grid view mode toggle.
+     */
+    _initViewModeToggle() {
+        const btnList = document.getElementById("btn-view-list");
+        const btnGrid = document.getElementById("btn-view-grid");
+
+        const update = (mode) => {
+            this._fileBrowser.setViewMode(mode);
+            btnList.classList.toggle("active", mode === "list");
+            btnGrid.classList.toggle("active", mode === "grid");
+        };
+
+        btnList.addEventListener("click", () => update("list"));
+        btnGrid.addEventListener("click", () => update("grid"));
+
+        // Restore saved preference
+        const saved = this._fileBrowser.getViewMode();
+        if (saved === "grid") update("grid");
+    }
+
+    /**
      * Initialize the Orbit / FPV navigation mode toggle.
      */
     _initNavModeToggle() {
@@ -243,6 +276,33 @@ class App {
         // Listen for programmatic mode changes (e.g., spacebar reset)
         this._elements.viewerContainer.addEventListener("navmodechange", (e) => {
             updateIcon(e.detail.mode);
+        });
+    }
+
+    /**
+     * Initialize the wireframe toggle button.
+     */
+    _initWireframeToggle() {
+        const btn = document.getElementById("wireframe-toggle");
+        btn.addEventListener("click", () => {
+            const current = this._viewer.getWireframe();
+            this._viewer.setWireframe(!current);
+            btn.classList.toggle("active", !current);
+        });
+    }
+
+    /**
+     * Initialize the background color swatches.
+     */
+    _initBackgroundSwatches() {
+        const swatches = document.querySelectorAll("#bg-swatches .bg-swatch");
+        swatches.forEach((swatch) => {
+            swatch.addEventListener("click", () => {
+                const color = swatch.dataset.color;
+                this._viewer.setBackground(color);
+                swatches.forEach((s) => s.classList.remove("active"));
+                swatch.classList.add("active");
+            });
         });
     }
 

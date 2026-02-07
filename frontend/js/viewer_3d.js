@@ -17,6 +17,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import { MTLLoader } from "three/addons/loaders/MTLLoader.js";
 import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { SSAOPass } from "three/addons/postprocessing/SSAOPass.js";
@@ -88,6 +89,8 @@ export class Viewer3D {
                 object = await this._loadOBJ(url, options);
             } else if (ext === ".fbx") {
                 object = await this._loadFBX(url, options);
+            } else if (ext === ".gltf" || ext === ".glb") {
+                object = await this._loadGLTF(url, options);
             } else {
                 throw new Error(`Unsupported format: ${ext}`);
             }
@@ -760,6 +763,38 @@ export class Viewer3D {
         });
     }
 
+    _loadGLTF(url) {
+        return new Promise((resolve, reject) => {
+            const loader = new GLTFLoader();
+            loader.load(
+                url,
+                (gltf) => {
+                    try {
+                        const object = gltf.scene;
+                        // Handle GLTF animations
+                        if (gltf.animations && gltf.animations.length > 0) {
+                            const mixer = new THREE.AnimationMixer(object);
+                            const action = mixer.clipAction(gltf.animations[0]);
+                            action.play();
+                            this._mixers.push(mixer);
+                        }
+                        resolve(object);
+                    } catch (err) {
+                        console.error("GLTF post-load error:", err);
+                        resolve(gltf.scene);
+                    }
+                },
+                undefined,
+                (err) => {
+                    console.error("GLTF loader error:", err);
+                    reject(new Error(
+                        `GLTF loading failed: ${err?.message || err || "Unknown error"}`
+                    ));
+                }
+            );
+        });
+    }
+
     /**
      * Rewrite texture file paths in an MTL file to use our API endpoint.
      */
@@ -1001,6 +1036,40 @@ export class Viewer3D {
         if (this._currentModel) {
             this._currentModel.scale.setScalar(scale);
         }
+    }
+
+    /**
+     * Toggle wireframe rendering on all meshes.
+     * @param {boolean} enabled - Whether to show wireframe
+     */
+    setWireframe(enabled) {
+        if (this._currentModel) {
+            this._currentModel.traverse((child) => {
+                if (child.isMesh && child.material) {
+                    const mats = Array.isArray(child.material)
+                        ? child.material
+                        : [child.material];
+                    mats.forEach((m) => { m.wireframe = enabled; });
+                }
+            });
+        }
+        this._wireframeEnabled = enabled;
+    }
+
+    /** Get wireframe state. */
+    getWireframe() {
+        return this._wireframeEnabled || false;
+    }
+
+    /**
+     * Set the viewer background color.
+     * Also updates fog to match for visual consistency.
+     * @param {string} hex - CSS hex color (e.g. "#1a1a1a")
+     */
+    setBackground(hex) {
+        const color = new THREE.Color(hex);
+        this._scene.background = color;
+        this._scene.fog.color.copy(color);
     }
 
     /** Get current light settings for UI synchronization. */
