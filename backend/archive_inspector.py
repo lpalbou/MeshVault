@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 # Supported 3D extensions (duplicated here to avoid circular imports)
-SUPPORTED_3D_EXTENSIONS = {".obj", ".fbx", ".gltf", ".glb"}
+SUPPORTED_3D_EXTENSIONS = {".obj", ".fbx", ".gltf", ".glb", ".stl"}
 
 # Texture and related file extensions
 RELATED_EXTENSIONS = {".mtl", ".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tiff"}

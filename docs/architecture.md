@@ -52,7 +52,7 @@ This document describes the system design, component breakdown, and key design d
 
 ### `file_browser.py` — FileBrowser
 
-- List directory contents (folders + 3D assets: `.obj`, `.fbx`, `.gltf`, `.glb`)
+- List directory contents (folders + 3D assets: `.obj`, `.fbx`, `.gltf`, `.glb`, `.stl`)
 - Detect related files (`.mtl`, textures) for each asset
 - Delegate archive inspection to `ArchiveInspector`
 - Optional root path constraint for security
@@ -91,7 +91,7 @@ This document describes the system design, component breakdown, and key design d
 
 - Fetch and render directory contents (list view + grid view)
 - Real-time search/filter (case-insensitive, client-side)
-- Color-coded badges: OBJ (green), FBX (orange), GLTF/GLB (cyan), archived (purple)
+- Color-coded badges: OBJ (green), FBX (orange), GLTF/GLB (cyan), STL (violet), archived (purple)
 - View mode persistence via `localStorage`
 
 ### `viewer_3d.js` — Viewer3D
@@ -99,7 +99,7 @@ This document describes the system design, component breakdown, and key design d
 The most complex frontend component:
 
 - **Rendering**: PBR materials, 5-light setup, SSAO, ACES tone mapping, soft shadows
-- **Loaders**: OBJLoader + MTLLoader, FBXLoader, GLTFLoader
+- **Loaders**: OBJLoader + MTLLoader, FBXLoader, GLTFLoader, STLLoader
 - **Navigation**: Orbit mode (OrbitControls) and FPV drone mode (keyboard + mouse look)
 - **Scene helpers**: Toggleable grid (scales to model, adapts to background), XYZ axes with labels
 - **Model transforms**: Center at origin, ground on Y=0, PCA auto-orient, reset to original

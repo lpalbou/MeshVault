@@ -11,6 +11,7 @@ Frequently asked questions, troubleshooting tips, and common issues.
 - **`.obj`** (Wavefront OBJ) — with `.mtl` materials and textures
 - **`.fbx`** (Autodesk FBX) — version 7000+ natively, version < 7000 auto-converted to OBJ
 - **`.gltf`** / **`.glb`** (GL Transmission Format) — the modern standard
+- **`.stl`** (Stereolithography) — common in 3D printing workflows
 
 ### What archive formats are supported?
 

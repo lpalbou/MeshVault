@@ -24,7 +24,7 @@ RAR archive scanning requires one of the following CLI tools. The application au
 | `7z` | `brew install p7zip` | `sudo apt install p7zip-full` |
 | `unar` | `brew install unar` | `sudo apt install unar` |
 
-Without any of these, the tool still works for `.obj`, `.fbx`, `.gltf`, `.glb`, and `.zip` files. RAR archives will simply be skipped.
+Without any of these, the tool still works for `.obj`, `.fbx`, `.gltf`, `.glb`, `.stl`, and `.zip` files. RAR archives will simply be skipped.
 
 ---
 
@@ -105,7 +105,8 @@ Assets are color-coded in the file list:
 | 🟢 Green | `.obj` file |
 | 🟠 Orange | `.fbx` file |
 | 🔵 Cyan | `.gltf` / `.glb` file |
-| 🟣 Purple | Asset inside a `.zip` or `.rar` archive |
+| 🟣 Purple (violet) | `.stl` file |
+| 🟣 Purple (dark) | Asset inside a `.zip` or `.rar` archive |
 
 ### Viewing a 3D Model
 

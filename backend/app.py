@@ -38,6 +38,7 @@ mimetypes.add_type("model/fbx", ".fbx")
 mimetypes.add_type("model/mtl", ".mtl")
 mimetypes.add_type("model/gltf+json", ".gltf")
 mimetypes.add_type("model/gltf-binary", ".glb")
+mimetypes.add_type("model/stl", ".stl")
 
 
 # --- Pydantic models for API ---

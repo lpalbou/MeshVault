@@ -21,8 +21,8 @@ MeshVault is a lightweight local tool designed for 3D artists, game developers, 
 - Filesystem navigation with a clean sidebar tree (go up, go home, double-click to enter folders)
 - **List / grid view** toggle with `localStorage` persistence
 - **Real-time search/filter** by name across folders and assets
-- Automatic detection of `.obj`, `.fbx`, `.gltf`, `.glb` files with related file discovery (`.mtl`, textures)
-- Color-coded badges: OBJ (green), FBX (orange), GLTF/GLB (cyan), archived (purple)
+- Automatic detection of `.obj`, `.fbx`, `.gltf`, `.glb`, `.stl` files with related file discovery (`.mtl`, textures)
+- Color-coded badges: OBJ (green), FBX (orange), GLTF/GLB (cyan), STL (violet), archived (purple)
 - Archive scanning: inspect `.zip` and `.rar` archives for 3D assets without manual extraction
 - Multi-tool RAR extraction fallback chain (`rarfile`, `bsdtar`, `unrar`, `7z`, `unar`) with auto-detection
 
@@ -31,6 +31,7 @@ MeshVault is a lightweight local tool designed for 3D artists, game developers, 
 - OBJ loading with full MTL material and texture support
 - FBX loading (version 7000+) with animation playback
 - **GLTF / GLB loading** with animation support
+- **STL loading** (Stereolithography) for 3D printing workflows
 - Built-in FBX 6100 binary parser for automatic conversion of old FBX files to OBJ
 - Auto-framing: camera automatically positions to fit any model size
 - Material auto-upgrade: basic materials converted to `MeshStandardMaterial` for PBR rendering
@@ -88,6 +89,7 @@ MeshVault is a lightweight local tool designed for 3D artists, game developers, 
 - NPM wrapper (`bin/meshvault.js`) for `npx meshvault`
 - 12 unit tests for backend file browsing logic
 - Full documentation suite: getting started, architecture, API reference, FAQ
+- **GitHub Actions CI** — automated tests on push/PR (Python 3.10–3.13, Ubuntu + macOS)
 - Backlog tracking (`docs/backlog/completed/`)
 
 [0.1.0]: https://github.com/lpalbou/meshvault/releases/tag/v0.1.0

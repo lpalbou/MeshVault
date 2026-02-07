@@ -1,7 +1,8 @@
 # MeshVault
 
-A professional, local web-based tool for rapidly browsing, previewing, and managing 3D assets (`.obj`, `.fbx`, `.gltf`, `.glb`) across your filesystem — including assets buried inside `.zip` and `.rar` archives.
+A professional, local web-based tool for rapidly browsing, previewing, and managing 3D assets (`.obj`, `.fbx`, `.gltf`, `.glb`, `.stl`) across your filesystem — including assets buried inside `.zip` and `.rar` archives.
 
+[![CI](https://github.com/lpalbou/meshvault/actions/workflows/ci.yml/badge.svg)](https://github.com/lpalbou/meshvault/actions)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688)](https://fastapi.tiangolo.com)
 [![Three.js](https://img.shields.io/badge/3D-Three.js%20r170-black)](https://threejs.org)
@@ -17,7 +18,7 @@ A professional, local web-based tool for rapidly browsing, previewing, and manag
 |---------|-------------|
 | **Folder Browsing** | Navigate your filesystem with a clean sidebar tree. Go up, go home, double-click to enter. List/grid view toggle. |
 | **Search & Filter** | Real-time search input to filter folders and assets in the current directory. |
-| **3D Asset Detection** | Finds `.obj`, `.fbx`, `.gltf`, `.glb` files — including inside `.zip` and `.rar` archives. |
+| **3D Asset Detection** | Finds `.obj`, `.fbx`, `.gltf`, `.glb`, `.stl` files — including inside `.zip` and `.rar` archives. |
 | **Interactive 3D Viewer** | Click an asset to load it with high-quality PBR rendering, SSAO, soft shadows, tone mapping. |
 | **Orbit / FPV Toggle** | Orbit mode (mouse orbit/zoom/pan, right-click pivot) and FPV drone mode (WASD fly, A/D yaw, mouse look). |
 | **Viewer Toolbar** | Toggle grid, XYZ axes (colored + labeled), wireframe, and light controls from the top-right toolbar. |
@@ -64,7 +65,7 @@ npx meshvault
 ## Usage
 
 1. **Browse**: Navigate folders in the sidebar. Toggle list/grid view. Filter by name.
-2. **Preview**: Click any 3D asset to load it in the viewer (green=OBJ, orange=FBX, cyan=GLTF, purple=archived).
+2. **Preview**: Click any 3D asset to load it in the viewer (green=OBJ, orange=FBX, cyan=GLTF, purple=STL/archived).
 3. **Navigate**: Orbit mode (left-drag orbit, scroll zoom, right-drag pan, right-click pivot) or FPV drone mode (W/Shift forward, S/Ctrl backward, A/D yaw, E/Q altitude). Spacebar resets camera.
 4. **Scene tools**: Toggle grid, axes (XYZ), wireframe, and lighting from the toolbar. Pick background color from swatches.
 5. **Transform**: Center model at origin, ground it on Y=0, or auto-orient via PCA. Reset undoes all transforms.

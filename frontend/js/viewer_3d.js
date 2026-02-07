@@ -18,6 +18,7 @@ import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import { MTLLoader } from "three/addons/loaders/MTLLoader.js";
 import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { STLLoader } from "three/addons/loaders/STLLoader.js";
 import { OBJExporter } from "three/addons/exporters/OBJExporter.js";
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
@@ -92,6 +93,8 @@ export class Viewer3D {
                 object = await this._loadFBX(url, options);
             } else if (ext === ".gltf" || ext === ".glb") {
                 object = await this._loadGLTF(url, options);
+            } else if (ext === ".stl") {
+                object = await this._loadSTL(url);
             } else {
                 throw new Error(`Unsupported format: ${ext}`);
             }
@@ -903,6 +906,37 @@ export class Viewer3D {
                     console.error("FBX loader error:", err);
                     reject(new Error(
                         `FBX loading failed: ${err?.message || err || "Unknown error. The file may use an unsupported FBX version."}`
+                    ));
+                }
+            );
+        });
+    }
+
+    _loadSTL(url) {
+        return new Promise((resolve, reject) => {
+            const loader = new STLLoader();
+            loader.load(
+                url,
+                (geometry) => {
+                    // STLLoader returns a BufferGeometry, not a mesh
+                    // Wrap it in a mesh with a default material
+                    geometry.computeVertexNormals();
+                    const material = new THREE.MeshStandardMaterial({
+                        color: 0x808080,
+                        roughness: 0.6,
+                        metalness: 0.1,
+                        side: THREE.DoubleSide,
+                    });
+                    const mesh = new THREE.Mesh(geometry, material);
+                    const group = new THREE.Group();
+                    group.add(mesh);
+                    resolve(group);
+                },
+                undefined,
+                (err) => {
+                    console.error("STL loader error:", err);
+                    reject(new Error(
+                        `STL loading failed: ${err?.message || err || "Unknown error"}`
                     ));
                 }
             );

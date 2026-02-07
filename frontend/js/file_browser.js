@@ -35,6 +35,12 @@ const ICONS = {
         <path d="M12 3c4 3.5 4 14.5 0 18"/>
         <path d="M12 3c-4 3.5-4 14.5 0 18"/>
     </svg>`,
+    stl: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5"/>
+        <line x1="12" y1="22" x2="12" y2="15.5"/>
+        <line x1="22" y1="8.5" x2="12" y2="15.5"/>
+        <line x1="2" y1="8.5" x2="12" y2="15.5"/>
+    </svg>`,
     archive: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <rect x="2" y="4" width="20" height="16" rx="2"/>
         <path d="M12 4v16"/>
