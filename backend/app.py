@@ -93,7 +93,17 @@ app = FastAPI(
 )
 
 # Serve frontend static files
-frontend_dir = Path(__file__).parent.parent / "frontend"
+# Works both in development (project root) and when installed via pip
+# (frontend/ is installed alongside backend/ in site-packages parent)
+_project_root = Path(__file__).parent.parent
+frontend_dir = _project_root / "frontend"
+if not frontend_dir.exists():
+    # Fallback: check if installed as a package (site-packages layout)
+    import importlib.resources
+    try:
+        frontend_dir = Path(importlib.resources.files("frontend"))
+    except Exception:
+        pass
 app.mount(
     "/static",
     StaticFiles(directory=str(frontend_dir)),

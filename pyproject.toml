@@ -26,7 +26,10 @@ classifiers = [
     "Topic :: Multimedia :: Graphics :: Viewers",
 ]
 packages = [{include = "backend"}]
-include = ["frontend/**/*"]
+include = [
+    { path = "frontend/**/*", format = ["sdist", "wheel"] },
+]
+exclude = [".DS_Store", "frontend/.DS_Store"]
 
 [tool.poetry.dependencies]
 python = "^3.10"

@@ -28,7 +28,7 @@
   },
   "files": [
     "bin/",
-    "backend/",
+    "backend/*.py",
     "frontend/",
     "README.md",
     "LICENSE"
