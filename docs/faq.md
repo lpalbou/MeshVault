@@ -8,59 +8,46 @@ Frequently asked questions, troubleshooting tips, and common issues.
 
 ### What 3D formats are supported?
 
-Currently **`.obj`** (Wavefront OBJ) and **`.fbx`** (Autodesk FBX) are supported. OBJ files with accompanying `.mtl` material files and textures (`.png`, `.jpg`, `.tga`, etc.) are fully supported — materials and textures are loaded automatically.
-
-Old FBX files (version < 7000, pre-2011) are automatically converted to OBJ by the backend's built-in binary parser before serving.
+- **`.obj`** (Wavefront OBJ) — with `.mtl` materials and textures
+- **`.fbx`** (Autodesk FBX) — version 7000+ natively, version < 7000 auto-converted to OBJ
+- **`.gltf`** / **`.glb`** (GL Transmission Format) — the modern standard
 
 ### What archive formats are supported?
 
-- **`.zip`** — Fully supported out of the box (Python's built-in `zipfile` module)
-- **`.rar`** — Supported via a multi-tool fallback chain. The application auto-detects and uses whichever of these is available: `bsdtar`, `unrar`, `7z`, `7za`, `unar`. It also searches common non-PATH locations (homebrew, anaconda).
+- **`.zip`** — Built-in support (Python `zipfile`)
+- **`.rar`** — Via multi-tool fallback: `bsdtar`, `unrar`, `7z`, `7za`, `unar` (auto-detected)
 
 ### Can I browse any directory on my machine?
 
-Yes. By default, the file browser starts at your home directory and you can navigate anywhere your user account has read access. Hidden files and directories (starting with `.`) are excluded from the listing for cleanliness.
+Yes. The file browser starts at your home directory and can navigate anywhere your user has read access. Hidden files (starting with `.`) are excluded.
 
 ### Is there network access or cloud functionality?
 
-No. This is a **purely local tool**. The backend serves on `localhost` only for your browser. No data leaves your machine. No cloud services are used (except the Three.js CDN for the JavaScript library).
+No. MeshVault is a **purely local tool**. The backend serves on `localhost` only. No data leaves your machine (except Three.js loaded from CDN).
 
 ---
 
 ## Installation
 
-### I don't have Poetry installed. What do I do?
-
-Install Poetry with:
+### I don't have Poetry installed
 
 ```bash
 curl -sSL https://install.python-poetry.org | python3 -
 ```
 
-Then restart your terminal and verify with `poetry --version`. See the [official Poetry docs](https://python-poetry.org/docs/#installation) for more options.
+Restart your terminal and verify with `poetry --version`.
 
-### The server starts but `.rar` files are not being scanned
+### RAR files are not being scanned
 
-You need at least one of these CLI tools installed:
+Install at least one of: `bsdtar`, `unrar`, `7z`, or `unar`. See the [Getting Started](getting_started.md) guide for install commands per platform.
 
-| Tool | macOS | Linux |
-|------|-------|-------|
-| `bsdtar` | Often pre-installed (Xcode, Anaconda) | `sudo apt install libarchive-tools` |
-| `unrar` | `brew install unrar` | `sudo apt install unrar` |
-| `7z` | `brew install p7zip` | `sudo apt install p7zip-full` |
-| `unar` | `brew install unar` | `sudo apt install unar` |
+### "Module not found" errors when starting
 
-The application auto-detects which tool is available. Without any of them, `.rar` archives are simply skipped — everything else still works.
-
-### I get "Module not found" errors when starting
-
-Make sure you're running inside the Poetry virtualenv:
+Run inside the Poetry virtualenv:
 
 ```bash
-# Correct way to run
 poetry run meshvault
-
-# Or activate the virtualenv first
+# or
 poetry shell
 meshvault
 ```
@@ -69,54 +56,74 @@ meshvault
 
 ## Usage
 
-### The 3D model loads but looks dark / flat
-
-This can happen with models that use very dark vertex colors or non-standard materials. The viewer automatically upgrades materials to PBR (`MeshStandardMaterial`), but some models may need different roughness/metalness values. The default values (roughness: 0.6, metalness: 0.1) work well for most models. You can also try adjusting the **light controls** (☀ icon) to increase light intensity or exposure.
-
-### The model appears very small or very large
-
-The viewer automatically **auto-frames** every model: it computes the bounding box and positions the camera to fit the entire model in view. If a model has outlier vertices far from the main geometry, the camera may appear too far away. You can scroll to zoom in, use WASD keys to fly closer, or press **Spacebar** to reset back to the framed view.
-
-### OBJ file loads but has no textures
-
-For textures to load, the `.mtl` file must be in the **same directory** as the `.obj` file and must share the **same stem name** (e.g., `model.obj` + `model.mtl`). The textures referenced in the `.mtl` must also be accessible. The viewer auto-detects and loads these related files.
-
 ### How do I navigate around the model?
 
-The viewer has two distinct modes, toggled with the **🛤/✈ button** in the top-right toolbar:
+Two modes, toggled with the **orbit/FPV button** (top-right toolbar):
 
-- **Orbit mode** (default): Left-drag to orbit, scroll to zoom, right-drag to pan, right-click on model to set a new pivot point.
-- **FPV mode** (drone): W/Shift fly forward, S/Ctrl fly backward along the camera's actual look direction, A/D yaw left/right, arrow keys for pitch/yaw, E/Q for altitude up/down, left-click drag for mouse look.
+- **Orbit mode**: Left-drag to orbit, scroll to zoom, right-drag to pan. Right-click on model to set a new orbit pivot.
+- **FPV mode**: W/Shift forward, S/Ctrl backward, A/D yaw, arrows for pitch/yaw, E/Q altitude, left-drag for mouse look.
 
-Press **Spacebar** to reset everything (camera position + orbit pivot) and switch back to Orbit mode.
+**Spacebar** resets the camera to the initial auto-framed position. It does NOT affect the model.
+
+### How do I center or reorient a model?
+
+Use the **transform buttons** in the top bar:
+
+| Button | Effect |
+|--------|--------|
+| **Reset** | Undo all transforms (restore original geometry) |
+| **Center** | Move model center to (0, 0, 0) |
+| **Ground** | Center X/Z, place lowest point at Y=0 |
+| **Orient** | PCA auto-orient (smallest variance axis → Y) |
+
+These modify the **model only** — the camera stays where it is.
+
+### How do I toggle the grid / axes / wireframe?
+
+Use the **viewer toolbar** buttons (top-right, vertical stack):
+
+1. Orbit/FPV toggle
+2. **Grid** — floor grid that scales to model and adapts colors to background
+3. **Axes** — XYZ axis helper (X=red, Y=green, Z=blue) with labels
+4. **Wireframe** — toggle wireframe rendering on all meshes
+5. **Light (☀)** — collapsible lighting panel
+
+These settings **persist across model loads**.
 
 ### How do I adjust the lighting?
 
-Click the **☀ sun icon** in the top-right corner of the viewer. A panel appears with sliders for:
-- Key light direction (horizontal and vertical angles)
-- Key light, fill light, and ambient intensity
-- Overall exposure
+Click the **☀** button to open the light panel with sliders for key light direction, fill/ambient intensity, and exposure. Click **Reset** in the panel to restore defaults.
 
-Click **Reset** in the panel to restore defaults.
+### How do I change the background color?
+
+Click any of the **12 color swatches** in the bottom-left of the viewer. Includes dark, gray, light, white, and tinted options. The grid adapts its colors to contrast with the background.
+
+### The model looks dark or flat
+
+Try increasing the **Key Light** or **Exposure** in the light panel. Some models with dark vertex colors may need higher intensity. You can also try a lighter background.
+
+### OBJ file loads but has no textures
+
+The `.mtl` file must be in the same directory as the `.obj` and share the same stem name (e.g., `model.obj` + `model.mtl`).
 
 ### I get "FBX version not supported"
 
-This means the FBX file uses a version older than 7000 (pre-2011). MeshVault includes a built-in FBX binary parser that auto-converts these files to OBJ. If you see this error, make sure you're using the latest version — the auto-conversion should be seamless.
+MeshVault auto-converts old FBX (version < 7000) to OBJ. If you see this error, make sure you're on the latest version.
 
-### Can I view animated FBX files?
+### Can I view animated FBX / GLTF files?
 
-Yes. If the `.fbx` file contains animations (version 7000+), the viewer will automatically play the first animation clip using a Three.js `AnimationMixer`. The animation loops continuously.
+Yes. Animations are auto-played via Three.js `AnimationMixer`.
 
-### What happens when I export an asset?
+### What happens when I export?
 
-- The asset is **copied** (never moved or deleted) to the target directory
-- If the asset has related files (`.mtl`, textures), they're all exported into a **subfolder** named after the asset
-- If the asset is a single file with no related files, it's exported as a single renamed file
-- The source files are never modified
+- **Unmodified model**: Copies the original file(s) with the new name
+- **Modified model** (after Center/Ground/Orient/Scale): Exports as OBJ with all transforms baked into the vertices
+- **With related files**: Exported into a subfolder
+- Source files are **never modified or deleted**
 
 ### Can I export to a directory that doesn't exist?
 
-Yes. The export manager automatically creates the target directory (and any necessary parent directories) if they don't exist.
+Yes. MeshVault auto-creates the target directory.
 
 ---
 
@@ -124,60 +131,48 @@ Yes. The export manager automatically creates the target directory (and any nece
 
 ### Port 8420 is already in use
 
-Set a custom port:
-
 ```bash
 PORT=9000 poetry run meshvault
 ```
 
 ### "Access denied" error when browsing
 
-You're trying to access a directory your user account doesn't have read permissions for. The tool can only access files and directories that your OS user can read.
+Your user doesn't have read permissions for that directory.
 
 ### The browser shows a blank page
 
-1. Check that the server is running (look for "Uvicorn running on..." in the terminal)
-2. Make sure you're accessing `http://localhost:8420` (not `https`)
-3. Open the browser's developer console (F12) to check for JavaScript errors
-4. Ensure your browser supports ES module import maps (Chrome 89+, Firefox 108+, Safari 16.4+, Edge 89+)
+1. Check the server is running ("Uvicorn running on..." in terminal)
+2. Use `http://localhost:8420` (not `https`)
+3. Check browser console (F12) for JS errors
+4. Requires ES module import maps: Chrome 89+, Firefox 108+, Safari 16.4+, Edge 89+
 
 ### Model takes a long time to load
 
-Large 3D files (>50MB) may take several seconds to transfer and parse. The loading spinner indicates progress. For archived assets, additional time is needed for extraction. Very complex models (>1M triangles) may also cause the SSAO postprocessing pass to slow down.
-
-### "Failed to load" error for an OBJ file
-
-Common causes:
-1. The `.obj` file is malformed or corrupted
-2. The `.mtl` file references textures that don't exist at the expected paths
-3. The file uses unsupported OBJ features (rare)
-
-Try checking the browser's developer console (F12 → Console tab) for more detailed error messages from the Three.js loaders.
+Large files (>50MB) may take seconds to transfer and parse. SSAO postprocessing can slow down on very complex models (>1M triangles).
 
 ---
 
 ## Development
 
-### How do I run the tests?
+### Running tests
 
 ```bash
 poetry run pytest tests/ -v
 ```
 
-### Where is the FastAPI auto-generated API documentation?
+### Auto-generated API docs
 
-When the server is running:
 - **Swagger UI**: http://localhost:8420/docs
 - **ReDoc**: http://localhost:8420/redoc
 
-### Can I modify the frontend without rebuilding?
+### Frontend changes — no build step needed
 
-Yes! The frontend uses **no build step**. Edit any file in `frontend/` and simply refresh the browser. Three.js is loaded directly from CDN via import maps.
+Edit any file in `frontend/` and refresh the browser. Three.js is loaded from CDN via import maps.
 
-### How do I add support for a new 3D format?
+### Adding a new 3D format
 
-1. Add the extension to `SUPPORTED_3D_EXTENSIONS` in `backend/file_browser.py`
-2. Add the same extension to `SUPPORTED_3D_EXTENSIONS` in `backend/archive_inspector.py`
-3. Add a Three.js loader in `frontend/js/viewer_3d.js` (e.g., `GLTFLoader` for `.gltf`/`.glb`)
-4. Add a loader method (e.g., `_loadGLTF()`) and wire it in the `loadModel()` switch
-5. Register the MIME type in `backend/app.py`
+1. Add extension to `SUPPORTED_3D_EXTENSIONS` in `file_browser.py` and `archive_inspector.py`
+2. Add a Three.js loader + method in `viewer_3d.js`
+3. Wire it in the `loadModel()` switch
+4. Register the MIME type in `app.py`
+5. Add badge color in CSS and icon in `file_browser.js`

@@ -6,6 +6,7 @@
  * - Displaying the current asset name for editing
  * - Export path input
  * - Export button click -> API call
+ * - Modified model export (OBJ from viewer) when model has been transformed
  * - Toast notifications for success/error
  */
 
@@ -17,13 +18,15 @@ export class ExportPanel {
      * @param {HTMLInputElement} elements.pathInput - Export path input
      * @param {HTMLButtonElement} elements.exportBtn - Export button
      * @param {Function} showToast - Function to show toast messages
+     * @param {Function} getModifiedOBJ - Returns OBJ string if model is modified, null otherwise
      */
-    constructor(elements, showToast) {
+    constructor(elements, showToast, getModifiedOBJ) {
         this._controls = elements.controls;
         this._nameInput = elements.nameInput;
         this._pathInput = elements.pathInput;
         this._exportBtn = elements.exportBtn;
         this._showToast = showToast;
+        this._getModifiedOBJ = getModifiedOBJ || (() => null);
 
         this._currentAsset = null;
 
@@ -41,18 +44,11 @@ export class ExportPanel {
     /**
      * Set the current asset for the export panel.
      * Shows the controls and populates the name field.
-     *
-     * @param {object} asset - The asset data from the API
-     * @param {string} currentBrowsePath - Current browse directory path
      */
     setAsset(asset, currentBrowsePath) {
         this._currentAsset = asset;
         this._controls.style.display = "flex";
-
-        // Set the name input to the asset's current name
         this._nameInput.value = asset.name;
-
-        // Set default export path to current browse directory
         if (!this._pathInput.value) {
             this._pathInput.value = currentBrowsePath || "";
         }
@@ -66,7 +62,9 @@ export class ExportPanel {
 
     /**
      * Handle export button click.
-     * Validates inputs and calls the export API.
+     *
+     * If the model has been modified (recentered, oriented, scaled),
+     * exports the modified OBJ from the viewer instead of the source file.
      */
     async _onExport() {
         if (!this._currentAsset) {
@@ -88,25 +86,42 @@ export class ExportPanel {
             return;
         }
 
-        // Disable the button during export
         this._exportBtn.disabled = true;
         this._exportBtn.textContent = "Exporting...";
 
         try {
-            const asset = this._currentAsset;
-            const response = await fetch("/api/export", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    source_path: asset.path,
-                    target_dir: targetDir,
-                    new_name: newName,
-                    is_in_archive: asset.is_in_archive || false,
-                    archive_path: asset.archive_path || null,
-                    inner_path: asset.inner_path || null,
-                    related_files: asset.related_files || [],
-                }),
-            });
+            // Check if model has been modified — export modified OBJ instead
+            const modifiedOBJ = this._getModifiedOBJ();
+            let response;
+
+            if (modifiedOBJ) {
+                // Export the modified geometry as OBJ
+                response = await fetch("/api/export_modified", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        target_dir: targetDir,
+                        new_name: newName,
+                        obj_content: modifiedOBJ,
+                    }),
+                });
+            } else {
+                // Export original source file(s)
+                const asset = this._currentAsset;
+                response = await fetch("/api/export", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        source_path: asset.path,
+                        target_dir: targetDir,
+                        new_name: newName,
+                        is_in_archive: asset.is_in_archive || false,
+                        archive_path: asset.archive_path || null,
+                        inner_path: asset.inner_path || null,
+                        related_files: asset.related_files || [],
+                    }),
+                });
+            }
 
             if (!response.ok) {
                 const error = await response.json();
@@ -114,8 +129,9 @@ export class ExportPanel {
             }
 
             const result = await response.json();
+            const suffix = modifiedOBJ ? " (modified)" : "";
             this._showToast(
-                `Exported ${result.files_exported.length} file(s) to ${result.output_path}`,
+                `Exported${suffix} ${result.files_exported.length} file(s) to ${result.output_path}`,
                 "success"
             );
         } catch (err) {

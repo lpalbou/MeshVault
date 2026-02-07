@@ -55,8 +55,40 @@ class App {
                 pathInput: this._elements.exportPathInput,
                 exportBtn: this._elements.exportBtn,
             },
-            (msg, type) => this._showToast(msg, type)
+            (msg, type) => this._showToast(msg, type),
+            // Modified OBJ getter: returns OBJ text if model was modified
+            () => {
+                if (this._viewer.isModelModified) {
+                    return this._viewer.exportAsOBJ();
+                }
+                return null;
+            }
         );
+
+        // --- Reset Model Button (undo all transforms, not camera) ---
+        document.getElementById("btn-reset-view").addEventListener("click", () => {
+            this._viewer.resetModel();
+            this._resetScaleControl();
+            this._showToast("Model transforms reset", "info");
+        });
+
+        // --- Recenter (model only, not camera) ---
+        document.getElementById("btn-recenter").addEventListener("click", () => {
+            this._viewer.recenterModel();
+            this._showToast("Model centered at (0, 0, 0)", "info");
+        });
+
+        // --- Ground (model only, not camera) ---
+        document.getElementById("btn-ground").addEventListener("click", () => {
+            this._viewer.groundModel();
+            this._showToast("Model grounded at Y=0", "info");
+        });
+
+        // --- Auto-Orient (model only, not camera) ---
+        document.getElementById("btn-auto-orient").addEventListener("click", () => {
+            this._viewer.autoOrientModel();
+            this._showToast("Model oriented (Y = up)", "info");
+        });
 
         // --- Bind Navigation Buttons ---
         this._elements.btnGoUp.addEventListener("click", () => {
@@ -75,6 +107,8 @@ class App {
 
         // --- Viewer Toolbar ---
         this._initNavModeToggle();
+        this._initGridToggle();
+        this._initAxisToggle();
         this._initWireframeToggle();
         this._initLightControls();
         this._initBackgroundSwatches();
@@ -276,6 +310,30 @@ class App {
         // Listen for programmatic mode changes (e.g., spacebar reset)
         this._elements.viewerContainer.addEventListener("navmodechange", (e) => {
             updateIcon(e.detail.mode);
+        });
+    }
+
+    /**
+     * Initialize the grid visibility toggle.
+     */
+    _initGridToggle() {
+        const btn = document.getElementById("grid-toggle");
+        btn.addEventListener("click", () => {
+            const current = this._viewer.getGridVisible();
+            this._viewer.setGridVisible(!current);
+            btn.classList.toggle("active", !current);
+        });
+    }
+
+    /**
+     * Initialize the axis helper toggle.
+     */
+    _initAxisToggle() {
+        const btn = document.getElementById("axis-toggle");
+        btn.addEventListener("click", () => {
+            const current = this._viewer.getAxisVisible();
+            this._viewer.setAxisVisible(!current);
+            btn.classList.toggle("active", !current);
         });
     }
 

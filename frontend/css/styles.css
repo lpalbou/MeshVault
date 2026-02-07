@@ -203,6 +203,13 @@ html, body {
     border-color: #3a8dee;
 }
 
+.top-bar-sep {
+    width: 1px;
+    height: 24px;
+    background: var(--border-color);
+    flex-shrink: 0;
+}
+
 .btn-icon {
     width: 32px;
     height: 32px;
@@ -600,6 +607,14 @@ html, body {
     border-color: var(--accent-primary);
 }
 
+.bg-swatch-sep {
+    width: 1px;
+    height: 14px;
+    background: var(--border-color);
+    align-self: center;
+    flex-shrink: 0;
+}
+
 /* --- Scale Control (bottom-right of viewer) --- */
 #scale-control {
     position: absolute;
@@ -727,7 +742,7 @@ html, body {
 /* --- Light Control Panel --- */
 .light-panel {
     position: absolute;
-    top: 86px;
+    top: 168px;
     right: 12px;
     width: 240px;
     background: rgba(22, 33, 62, 0.92);

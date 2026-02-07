@@ -1,6 +1,6 @@
 # MeshVault
 
-A professional, local web-based tool for rapidly browsing, previewing, and managing 3D assets (`.obj`, `.fbx`) across your filesystem — including assets buried inside `.zip` and `.rar` archives.
+A professional, local web-based tool for rapidly browsing, previewing, and managing 3D assets (`.obj`, `.fbx`, `.gltf`, `.glb`) across your filesystem — including assets buried inside `.zip` and `.rar` archives.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688)](https://fastapi.tiangolo.com)
@@ -15,19 +15,19 @@ A professional, local web-based tool for rapidly browsing, previewing, and manag
 
 | Feature | Description |
 |---------|-------------|
-| **Folder Browsing** | Navigate your filesystem with a clean sidebar tree. Go up, go home, double-click to enter. |
-| **3D Asset Detection** | Automatically finds `.obj` and `.fbx` files in each folder. |
-| **Archive Scanning** | Looks inside `.zip` and `.rar` archives to detect 3D assets without extracting. Uses a multi-tool fallback chain (`rarfile`, `bsdtar`, `unrar`, `7z`, `unar`). |
-| **Interactive 3D Viewer** | Click an asset to load it in a high-quality Three.js viewer with orbit, FPV drone navigation, and pivot picking. |
-| **High-Quality Rendering** | PBR materials, 5-light setup, soft shadows, SSAO ambient occlusion, ACES tone mapping. |
-| **Light Controls** | Adjustable key/fill/ambient light intensity, directional orientation (azimuth/elevation), and exposure. |
-| **Orbit / FPV Toggle** | Clear mode switch between Orbit (mouse orbit/zoom/pan) and FPV drone (WASD fly, A/D yaw, mouse look). |
-| **FPV Navigation** | True drone controls: W/Shift forward, S/Ctrl backward along look direction, A/D yaw, E/Q altitude, mouse drag to look. |
-| **Right-Click Pivot** | In Orbit mode, right-click on the model surface to set a new orbit center for detailed inspection. |
-| **FBX Auto-Conversion** | Old FBX files (version < 7000) are automatically converted to OBJ via a built-in binary parser. |
-| **Model Scaling** | Real-time scale slider (0.25×–2.0×) to resize the model in the viewer. |
-| **Rename & Export** | Rename assets and export them (with all derivatives: `.mtl`, textures) to any folder. |
-| **Related File Handling** | Automatically detects `.mtl` materials and texture files associated with each asset. |
+| **Folder Browsing** | Navigate your filesystem with a clean sidebar tree. Go up, go home, double-click to enter. List/grid view toggle. |
+| **Search & Filter** | Real-time search input to filter folders and assets in the current directory. |
+| **3D Asset Detection** | Finds `.obj`, `.fbx`, `.gltf`, `.glb` files — including inside `.zip` and `.rar` archives. |
+| **Interactive 3D Viewer** | Click an asset to load it with high-quality PBR rendering, SSAO, soft shadows, tone mapping. |
+| **Orbit / FPV Toggle** | Orbit mode (mouse orbit/zoom/pan, right-click pivot) and FPV drone mode (WASD fly, A/D yaw, mouse look). |
+| **Viewer Toolbar** | Toggle grid, XYZ axes (colored + labeled), wireframe, and light controls from the top-right toolbar. |
+| **Light Controls** | Adjustable key/fill/ambient intensity, light direction (azimuth/elevation), and exposure. |
+| **Background Presets** | 12 background color swatches (dark, gray, light, tinted) for evaluating models on any backdrop. |
+| **Model Transforms** | Center at origin, ground on Y=0, auto-orient via PCA, reset to original. All without moving the camera. |
+| **Model Scaling** | Real-time scale slider (0.25×–2.0×). |
+| **Modified Export** | Export applies all transforms (center, ground, orient, scale) — saves modified OBJ via Three.js OBJExporter. |
+| **FBX Auto-Conversion** | Old FBX files (version < 7000) are auto-converted to OBJ via a built-in binary parser. |
+| **Persistent Settings** | Scene settings (wireframe, grid, axes, background) persist across model loads. |
 
 ## Quick Start
 
@@ -35,19 +35,14 @@ A professional, local web-based tool for rapidly browsing, previewing, and manag
 
 - **Python 3.10+**
 - **Poetry** ([install guide](https://python-poetry.org/docs/#installation))
-- For `.rar` support, one of: `bsdtar`, `unrar`, `7z`, or `unar` (the tool auto-detects what's available)
+- For `.rar` support, one of: `bsdtar`, `unrar`, `7z`, or `unar` (auto-detected)
 
 ### Install & Run
 
 ```bash
-# Clone the repository
 git clone https://github.com/lpalbou/meshvault.git
 cd meshvault
-
-# Install dependencies
 poetry install --no-root
-
-# Start the server
 poetry run meshvault
 ```
 
@@ -66,19 +61,14 @@ meshvault
 npx meshvault
 ```
 
-### Custom Port
-
-```bash
-PORT=9000 poetry run meshvault
-```
-
 ## Usage
 
-1. **Browse**: The left sidebar shows your home directory. Double-click folders to navigate, use the ◀ and 🏠 buttons to go up or home.
-2. **Preview**: Click any 3D asset (green = `.obj`, orange = `.fbx`, purple = archived) to load it in the viewer.
-3. **Navigate**: Toggle Orbit ↔ FPV mode (top-right button). Orbit: mouse to orbit/zoom/pan, right-click to set pivot. FPV: W/Shift forward, S/Ctrl backward, A/D yaw, E/Q altitude, mouse drag to look. Spacebar resets view.
-4. **Light**: Click the ☀ icon (top-right of viewer) to adjust light direction, intensity, and exposure.
-5. **Export**: Edit the name in the top bar, set an export path, and click **Export**. Single assets export as a file; assets with derivatives (`.mtl`, textures) export as a folder.
+1. **Browse**: Navigate folders in the sidebar. Toggle list/grid view. Filter by name.
+2. **Preview**: Click any 3D asset to load it in the viewer (green=OBJ, orange=FBX, cyan=GLTF, purple=archived).
+3. **Navigate**: Orbit mode (left-drag orbit, scroll zoom, right-drag pan, right-click pivot) or FPV drone mode (W/Shift forward, S/Ctrl backward, A/D yaw, E/Q altitude). Spacebar resets camera.
+4. **Scene tools**: Toggle grid, axes (XYZ), wireframe, and lighting from the toolbar. Pick background color from swatches.
+5. **Transform**: Center model at origin, ground it on Y=0, or auto-orient via PCA. Reset undoes all transforms.
+6. **Export**: Set name and path in the top bar, click Export. Modified models (centered/oriented/scaled) are exported as OBJ with baked transforms.
 
 ## Project Structure
 
@@ -95,7 +85,7 @@ meshvault/
 │   ├── css/styles.css         # Dark professional theme
 │   └── js/
 │       ├── app.js             # Main orchestrator
-│       ├── file_browser.js    # File browser component
+│       ├── file_browser.js    # File browser + search + grid/list
 │       ├── viewer_3d.js       # Three.js 3D viewer
 │       └── export_panel.js    # Rename/export controls
 ├── tests/

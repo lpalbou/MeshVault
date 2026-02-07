@@ -18,6 +18,7 @@ import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import { MTLLoader } from "three/addons/loaders/MTLLoader.js";
 import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { OBJExporter } from "three/addons/exporters/OBJExporter.js";
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { SSAOPass } from "three/addons/postprocessing/SSAOPass.js";
@@ -106,6 +107,12 @@ export class Viewer3D {
         this._scene.add(object);
         this._currentModel = object;
 
+        // Save a snapshot of the original geometry for Reset
+        this._saveOriginalGeometry();
+
+        // Re-apply persistent scene settings to the new model
+        this._applySceneSettings();
+
         // Auto-frame the model
         this._frameModel(object);
 
@@ -148,10 +155,29 @@ export class Viewer3D {
         this._fpvYaw = 0;
         this._fpvPitch = 0;
 
+        // Reset modified flag
+        this._modelModified = false;
+
         // Reset camera to default position (will be overridden by _frameModel)
         this._camera.position.set(3, 2.5, 4);
         this._controls.target.set(0, 0.5, 0);
         this._controls.update();
+    }
+
+    /**
+     * Re-apply persistent scene settings (wireframe, grid, axis, background)
+     * to the newly loaded model. These settings survive across model loads.
+     */
+    _applySceneSettings() {
+        // Wireframe: apply current state to the new model's meshes
+        if (this._wireframeEnabled) {
+            this.setWireframe(true);
+        }
+
+        // Grid and axis visibility are already preserved on their scene objects
+        // (they aren't cleared on model load), so nothing to do there.
+
+        // Background is also already preserved on the scene.
     }
 
     /** Dispose of an object and its children recursively */
@@ -271,13 +297,133 @@ export class Viewer3D {
         this._scene.add(ground);
         this._ground = ground;
 
-        // Grid helper for spatial reference
-        const grid = new THREE.GridHelper(20, 40, 0x1a1a3e, 0x151530);
-        grid.position.y = 0.001; // Slightly above ground to avoid z-fighting
-        grid.material.opacity = 0.4;
+        // Grid helper — created dynamically in _rebuildGrid(), scaled to model
+        this._gridVisible = false;
+        this._grid = null;
+        this._currentBgHex = "#0d0d1a";
+
+        // Axis helper (starts hidden, toggled via UI)
+        this._axisVisible = false;
+        this._axisGroup = new THREE.Group();
+        this._axisGroup.visible = false;
+        this._scene.add(this._axisGroup);
+        this._buildAxisHelper(2);
+    }
+
+    /**
+     * Rebuild the grid to match the current model size and background.
+     *
+     * SOTA practice: grid extends ~8x the model footprint with cell
+     * size proportional to model dimensions. This ensures the grid
+     * is always visible and provides meaningful spatial reference
+     * regardless of model scale.
+     */
+    _rebuildGrid(modelMaxDim, groundY) {
+        // Remove existing grid
+        if (this._grid) {
+            this._scene.remove(this._grid);
+            this._grid.dispose();
+            this._grid = null;
+        }
+
+        // Grid size: 8x the largest model dimension, minimum 10 units
+        const gridSize = Math.max(modelMaxDim * 8, 10);
+
+        // Divisions: aim for cells roughly 1/20th of model size
+        // with a minimum of 20 and maximum of 200 divisions
+        const cellSize = Math.max(modelMaxDim / 10, 0.01);
+        const divisions = Math.min(200, Math.max(20, Math.round(gridSize / cellSize)));
+
+        // Choose colors based on background luminance
+        const bgColor = new THREE.Color(this._currentBgHex);
+        const lum = bgColor.r * 0.299 + bgColor.g * 0.587 + bgColor.b * 0.114;
+        const isDark = lum < 0.4;
+
+        const mainColor = isDark ? 0x5577bb : 0x666688;
+        const subColor = isDark ? 0x334466 : 0x9999aa;
+        const opacity = isDark ? 0.5 : 0.4;
+
+        const grid = new THREE.GridHelper(gridSize, divisions, mainColor, subColor);
+        grid.position.y = groundY + 0.001;
+        grid.position.x = this._modelCenter.x;
+        grid.position.z = this._modelCenter.z;
+        grid.material.opacity = opacity;
         grid.material.transparent = true;
+        grid.visible = this._gridVisible;
         this._scene.add(grid);
         this._grid = grid;
+    }
+
+    /**
+     * Build the axis helper with colored lines and text labels.
+     * X = red, Y = green, Z = blue (standard convention).
+     */
+    _buildAxisHelper(size) {
+        // Clear previous
+        while (this._axisGroup.children.length > 0) {
+            const c = this._axisGroup.children[0];
+            if (c.geometry) c.geometry.dispose();
+            if (c.material) c.material.dispose();
+            this._axisGroup.remove(c);
+        }
+
+        const axes = [
+            { dir: new THREE.Vector3(1, 0, 0), color: 0xff4444, label: "X" },
+            { dir: new THREE.Vector3(0, 1, 0), color: 0x44dd44, label: "Y" },
+            { dir: new THREE.Vector3(0, 0, 1), color: 0x4488ff, label: "Z" },
+        ];
+
+        for (const axis of axes) {
+            // Line
+            const points = [
+                new THREE.Vector3(0, 0, 0),
+                axis.dir.clone().multiplyScalar(size),
+            ];
+            const geo = new THREE.BufferGeometry().setFromPoints(points);
+            const mat = new THREE.LineBasicMaterial({
+                color: axis.color,
+                linewidth: 2,
+                depthTest: false,
+            });
+            const line = new THREE.Line(geo, mat);
+            line.renderOrder = 999;
+            this._axisGroup.add(line);
+
+            // Label sprite
+            const sprite = this._makeTextSprite(
+                axis.label, axis.color, size
+            );
+            sprite.position.copy(axis.dir.clone().multiplyScalar(size * 1.15));
+            sprite.renderOrder = 1000;
+            this._axisGroup.add(sprite);
+        }
+    }
+
+    /**
+     * Create a text sprite for axis labels.
+     */
+    _makeTextSprite(text, color, size) {
+        const canvas = document.createElement("canvas");
+        canvas.width = 64;
+        canvas.height = 64;
+        const ctx = canvas.getContext("2d");
+        ctx.font = "bold 48px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = "#" + new THREE.Color(color).getHexString();
+        ctx.fillText(text, 32, 32);
+
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.needsUpdate = true;
+
+        const mat = new THREE.SpriteMaterial({
+            map: texture,
+            transparent: true,
+            depthTest: false,
+        });
+        const sprite = new THREE.Sprite(mat);
+        sprite.scale.setScalar(size * 0.3);
+        return sprite;
     }
 
     _initRenderer() {
@@ -917,10 +1063,18 @@ export class Viewer3D {
         const maxDim = Math.max(size.x, size.y, size.z);
         this._keyLightRadius = maxDim * 3;
 
+        // Update axis helper scale + position to match model
+        const axisSize = maxDim * 0.5;
+        this._buildAxisHelper(axisSize);
+        this._axisGroup.position.copy(center);
+        this._axisGroup.position.y = box.min.y;
+
         // Position ground at the bottom of the model
         const minY = box.min.y;
         this._ground.position.y = minY;
-        this._grid.position.y = minY + 0.001;
+
+        // Rebuild grid scaled to model (SOTA: extends well beyond footprint)
+        this._rebuildGrid(maxDim, minY);
 
         // Calculate optimal camera distance
         const fov = this._camera.fov * (Math.PI / 180);
@@ -1063,13 +1217,355 @@ export class Viewer3D {
 
     /**
      * Set the viewer background color.
-     * Also updates fog to match for visual consistency.
+     * Also updates fog and grid colors to match for visual consistency.
+     * Grid adapts: light grid lines on dark backgrounds, dark on light.
      * @param {string} hex - CSS hex color (e.g. "#1a1a1a")
      */
     setBackground(hex) {
         const color = new THREE.Color(hex);
         this._scene.background = color;
         this._scene.fog.color.copy(color);
+        this._currentBgHex = hex;
+
+        // Adapt grid colors based on background luminance
+        this._updateGridColors();
+    }
+
+    /**
+     * Update grid colors to contrast with the background.
+     * Rebuilds the grid with the current model dimensions and new colors.
+     */
+    _updateGridColors() {
+        if (!this._grid || !this._currentModel) return;
+
+        // Rebuild grid with current model bounds + new background colors
+        const box = new THREE.Box3().setFromObject(this._currentModel);
+        const size = box.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z);
+        this._rebuildGrid(maxDim, box.min.y);
+    }
+
+    /**
+     * Toggle grid visibility.
+     * @param {boolean} visible
+     */
+    setGridVisible(visible) {
+        this._gridVisible = visible;
+        if (this._grid) this._grid.visible = visible;
+    }
+
+    /** Get grid visibility. */
+    getGridVisible() {
+        return this._gridVisible;
+    }
+
+    /**
+     * Toggle axis helper visibility.
+     * @param {boolean} visible
+     */
+    setAxisVisible(visible) {
+        this._axisVisible = visible;
+        this._axisGroup.visible = visible;
+    }
+
+    // ==========================================
+    // Model Transform (recenter, orient, reset, export)
+    // ==========================================
+
+    /** Whether the model has been modified (recentered, oriented, scaled). */
+    get isModelModified() {
+        return this._modelModified || false;
+    }
+
+    /**
+     * Save a snapshot of all geometry positions + mesh transforms
+     * so we can restore them on Reset.
+     */
+    _saveOriginalGeometry() {
+        this._originalState = [];
+        if (!this._currentModel) return;
+
+        this._currentModel.updateMatrixWorld(true);
+
+        this._currentModel.traverse((child) => {
+            if (child.isMesh && child.geometry) {
+                const posAttr = child.geometry.attributes.position;
+                this._originalState.push({
+                    mesh: child,
+                    positions: new Float32Array(posAttr.array),
+                    // Save mesh local transform
+                    position: child.position.clone(),
+                    rotation: child.rotation.clone(),
+                    scale: child.scale.clone(),
+                });
+            }
+        });
+
+        // Save root transform
+        this._originalRootPos = this._currentModel.position.clone();
+        this._originalRootRot = this._currentModel.rotation.clone();
+        this._originalRootScale = this._currentModel.scale.clone();
+    }
+
+    /**
+     * Reset model to its original state (undo all recenter/orient/scale).
+     * Does NOT touch the camera.
+     */
+    resetModel() {
+        if (!this._currentModel || !this._originalState) return;
+
+        // Restore each mesh's geometry and transform
+        for (const saved of this._originalState) {
+            const posAttr = saved.mesh.geometry.attributes.position;
+            posAttr.array.set(saved.positions);
+            posAttr.needsUpdate = true;
+
+            saved.mesh.position.copy(saved.position);
+            saved.mesh.rotation.copy(saved.rotation);
+            saved.mesh.scale.copy(saved.scale);
+            saved.mesh.updateMatrix();
+
+            saved.mesh.geometry.computeVertexNormals();
+            saved.mesh.geometry.computeBoundingBox();
+            saved.mesh.geometry.computeBoundingSphere();
+        }
+
+        // Restore root transform
+        this._currentModel.position.copy(this._originalRootPos);
+        this._currentModel.rotation.copy(this._originalRootRot);
+        this._currentModel.scale.copy(this._originalRootScale);
+
+        this._modelModified = false;
+    }
+
+    /**
+     * Bake all world transforms into geometry vertex positions.
+     * After this, all mesh and root transforms are identity,
+     * and vertices contain actual world-space coordinates.
+     */
+    _bakeWorldTransforms() {
+        this._currentModel.updateMatrixWorld(true);
+
+        this._currentModel.traverse((child) => {
+            if (child.isMesh && child.geometry) {
+                child.geometry.applyMatrix4(child.matrixWorld);
+                child.position.set(0, 0, 0);
+                child.rotation.set(0, 0, 0);
+                child.scale.set(1, 1, 1);
+                child.updateMatrix();
+            }
+        });
+
+        // Reset all intermediate groups and root
+        this._currentModel.traverse((node) => {
+            if (!node.isMesh) {
+                node.position.set(0, 0, 0);
+                node.rotation.set(0, 0, 0);
+                node.scale.set(1, 1, 1);
+                node.updateMatrix();
+            }
+        });
+    }
+
+    /**
+     * Center the model so its bounding box center is at (0, 0, 0).
+     * Does NOT touch the camera.
+     */
+    recenterModel() {
+        if (!this._currentModel) return;
+
+        // Bake transforms so we work with clean geometry
+        this._bakeWorldTransforms();
+
+        // Compute center
+        const box = new THREE.Box3().setFromObject(this._currentModel);
+        const center = box.getCenter(new THREE.Vector3());
+
+        // Shift all vertices so center is at origin
+        this._currentModel.traverse((child) => {
+            if (child.isMesh && child.geometry) {
+                child.geometry.translate(-center.x, -center.y, -center.z);
+                child.geometry.computeBoundingBox();
+                child.geometry.computeBoundingSphere();
+            }
+        });
+
+        this._modelModified = true;
+    }
+
+    /**
+     * Auto-orient the model using PCA (Principal Component Analysis).
+     *
+     * Aligns the model so its "up" direction (smallest variance axis)
+     * coincides with the Y axis. Does NOT touch the camera.
+     */
+    /**
+     * Ground the model: center on X/Z and place it on the ground plane.
+     * The lowest geometry point is at Y=0 (model sits on a surface).
+     * Does NOT touch the camera.
+     */
+    groundModel() {
+        if (!this._currentModel) return;
+
+        this._bakeWorldTransforms();
+
+        const box = new THREE.Box3().setFromObject(this._currentModel);
+        const center = box.getCenter(new THREE.Vector3());
+
+        // Center X and Z, shift Y so min.y = 0
+        const offsetX = -center.x;
+        const offsetZ = -center.z;
+        const offsetY = -box.min.y; // Lift so lowest point touches Y=0
+
+        this._currentModel.traverse((child) => {
+            if (child.isMesh && child.geometry) {
+                child.geometry.translate(offsetX, offsetY, offsetZ);
+                child.geometry.computeBoundingBox();
+                child.geometry.computeBoundingSphere();
+            }
+        });
+
+        this._modelModified = true;
+    }
+
+    autoOrientModel() {
+        if (!this._currentModel) return;
+
+        // Bake transforms first
+        this._bakeWorldTransforms();
+
+        // 1. Collect all vertex positions
+        const positions = [];
+        this._currentModel.traverse((child) => {
+            if (child.isMesh && child.geometry) {
+                const posAttr = child.geometry.attributes.position;
+                if (!posAttr) return;
+                for (let i = 0; i < posAttr.count; i++) {
+                    positions.push(new THREE.Vector3().fromBufferAttribute(posAttr, i));
+                }
+            }
+        });
+
+        if (positions.length < 3) return;
+
+        // 2. Compute centroid
+        const centroid = new THREE.Vector3();
+        for (const p of positions) centroid.add(p);
+        centroid.divideScalar(positions.length);
+
+        // 3. Compute covariance matrix
+        let cxx = 0, cxy = 0, cxz = 0, cyy = 0, cyz = 0, czz = 0;
+        for (const p of positions) {
+            const dx = p.x - centroid.x;
+            const dy = p.y - centroid.y;
+            const dz = p.z - centroid.z;
+            cxx += dx * dx; cxy += dx * dy; cxz += dx * dz;
+            cyy += dy * dy; cyz += dy * dz; czz += dz * dz;
+        }
+        const n = positions.length;
+        cxx /= n; cxy /= n; cxz /= n; cyy /= n; cyz /= n; czz /= n;
+
+        // 4. Find eigenvectors
+        const eigenvectors = this._computeEigenvectors3x3(
+            cxx, cxy, cxz, cyy, cyz, czz
+        );
+
+        // 5. Sort: largest → X, medium → Z, smallest → Y (up)
+        eigenvectors.sort((a, b) => b.value - a.value);
+
+        const ex = eigenvectors[0].vector.normalize();
+        const ey = eigenvectors[2].vector.normalize(); // smallest → up
+        const ez = eigenvectors[1].vector.normalize();
+
+        // Ensure right-handed + Y points up
+        const cross = new THREE.Vector3().crossVectors(ex, ey);
+        if (cross.dot(ez) < 0) ez.negate();
+        if (ey.y < 0) { ey.negate(); ez.negate(); }
+
+        // Rotation matrix
+        const rotMatrix = new THREE.Matrix4().makeBasis(ex, ey, ez);
+        const invRot = rotMatrix.clone().invert();
+
+        // 6. Apply rotation to all vertices (centered at centroid)
+        this._currentModel.traverse((child) => {
+            if (child.isMesh && child.geometry) {
+                const posAttr = child.geometry.attributes.position;
+                if (!posAttr) return;
+
+                for (let i = 0; i < posAttr.count; i++) {
+                    const v = new THREE.Vector3().fromBufferAttribute(posAttr, i);
+                    v.sub(centroid);
+                    v.applyMatrix4(invRot);
+                    v.add(centroid); // Keep position, only rotate
+                    posAttr.setXYZ(i, v.x, v.y, v.z);
+                }
+                posAttr.needsUpdate = true;
+                child.geometry.computeVertexNormals();
+                child.geometry.computeBoundingBox();
+                child.geometry.computeBoundingSphere();
+            }
+        });
+
+        this._modelModified = true;
+    }
+
+    /**
+     * Compute eigenvectors of a 3x3 symmetric matrix via power iteration + deflation.
+     */
+    _computeEigenvectors3x3(a00, a01, a02, a11, a12, a22) {
+        const mat = [
+            [a00, a01, a02],
+            [a01, a11, a12],
+            [a02, a12, a22],
+        ];
+
+        const results = [];
+
+        for (let round = 0; round < 3; round++) {
+            let v = [Math.random(), Math.random(), Math.random()];
+            let eigenvalue = 0;
+
+            for (let iter = 0; iter < 100; iter++) {
+                const w = [
+                    mat[0][0] * v[0] + mat[0][1] * v[1] + mat[0][2] * v[2],
+                    mat[1][0] * v[0] + mat[1][1] * v[1] + mat[1][2] * v[2],
+                    mat[2][0] * v[0] + mat[2][1] * v[1] + mat[2][2] * v[2],
+                ];
+                const len = Math.sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+                if (len < 1e-10) break;
+                v = [w[0] / len, w[1] / len, w[2] / len];
+                eigenvalue = len;
+            }
+
+            results.push({
+                value: eigenvalue,
+                vector: new THREE.Vector3(v[0], v[1], v[2]),
+            });
+
+            for (let i = 0; i < 3; i++) {
+                for (let j = 0; j < 3; j++) {
+                    mat[i][j] -= eigenvalue * v[i] * v[j];
+                }
+            }
+        }
+
+        return results;
+    }
+
+    /**
+     * Export the current model as OBJ text.
+     * Bakes all transforms into the output.
+     */
+    exportAsOBJ() {
+        if (!this._currentModel) return null;
+        this._currentModel.updateMatrixWorld(true);
+        const exporter = new OBJExporter();
+        return exporter.parse(this._currentModel);
+    }
+
+    /** Get axis helper visibility. */
+    getAxisVisible() {
+        return this._axisVisible;
     }
 
     /** Get current light settings for UI synchronization. */

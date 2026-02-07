@@ -24,7 +24,7 @@ RAR archive scanning requires one of the following CLI tools. The application au
 | `7z` | `brew install p7zip` | `sudo apt install p7zip-full` |
 | `unar` | `brew install unar` | `sudo apt install unar` |
 
-Without any of these, the tool still works perfectly for `.obj`, `.fbx`, and `.zip` files. RAR archives will simply be skipped during browsing.
+Without any of these, the tool still works for `.obj`, `.fbx`, `.gltf`, `.glb`, and `.zip` files. RAR archives will simply be skipped.
 
 ---
 
@@ -63,8 +63,6 @@ Open that URL in any modern browser (Chrome, Firefox, Safari, Edge).
 
 ### Custom Port
 
-To run on a different port:
-
 ```bash
 PORT=9000 poetry run meshvault
 ```
@@ -75,18 +73,18 @@ PORT=9000 poetry run meshvault
 
 ### The Interface
 
-The UI has three main areas:
-
 ```
-┌─────────────────────────────────────────────────────┐
-│  [Logo]  [Name input]  [Export path]  [Export btn]  │  ← Top Bar
-├──────────────┬──────────────────────────────────────┤
-│              │                              [☀]     │
-│  File        │         3D Viewer                    │
-│  Browser     │         (Three.js)                   │
-│  (sidebar)   │                                      │
-│              │                            [stats]   │
-└──────────────┴──────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  [Logo]  [Reset] | [Center] [Ground] [Orient] | [Name] [Path] [Export] │  ← Top Bar
+├──────────────┬───────────────────────────────────────────────────────┤
+│  [List/Grid] │                                     [🛤][▦][⚐][◇][☀] │  ← Toolbar
+│  [Filter...] │                                                       │
+│              │              3D Viewer                                 │
+│  File        │              (Three.js)                                │
+│  Browser     │                                                       │
+│  (sidebar)   │  [bg swatches]                              [scale]   │
+│              │  [stats]                                              │
+└──────────────┴───────────────────────────────────────────────────────┘
 ```
 
 ### Browsing Files
@@ -95,7 +93,8 @@ The UI has three main areas:
 2. **Double-click** a folder to navigate into it
 3. Click the **◀** button to go up one level
 4. Click the **🏠** button to return home
-5. The current path is shown at the top of the sidebar
+5. **Filter**: Type in the search box to filter folders and assets by name
+6. **View mode**: Toggle between list and grid view (icons in the sidebar header)
 
 ### Asset Types
 
@@ -103,9 +102,10 @@ Assets are color-coded in the file list:
 
 | Color | Meaning |
 |-------|---------|
-| 🟢 Green badge | `.obj` file on disk |
-| 🟠 Orange badge | `.fbx` file on disk |
-| 🟣 Purple badge | Asset inside a `.zip` or `.rar` archive |
+| 🟢 Green | `.obj` file |
+| 🟠 Orange | `.fbx` file |
+| 🔵 Cyan | `.gltf` / `.glb` file |
+| 🟣 Purple | Asset inside a `.zip` or `.rar` archive |
 
 ### Viewing a 3D Model
 
@@ -113,11 +113,11 @@ Assets are color-coded in the file list:
 2. The model loads in the 3D viewer (a loading spinner appears)
 3. Model info (vertices, faces, file size) appears in the bottom-left corner
 
-> **Note:** Old FBX files (version < 7000, pre-2011) are automatically converted to OBJ by MeshVault before loading. This is seamless — you just click and view.
+> **Note:** Old FBX files (version < 7000, pre-2011) are automatically converted to OBJ by MeshVault before loading.
 
 ### Camera Controls
 
-The viewer has two navigation modes, toggled via the **🛤/✈ button** in the top-right toolbar:
+The viewer has two navigation modes, toggled via the **orbit/FPV button** in the top-right toolbar:
 
 #### Orbit Mode (default)
 
@@ -127,7 +127,7 @@ The viewer has two navigation modes, toggled via the **🛤/✈ button** in the 
 | **Scroll wheel** | Zoom in / out |
 | **Right-click drag** | Pan the view |
 | **Right-click** (no drag) | Set a new orbit pivot on the model surface |
-| **Spacebar** | Reset to default view |
+| **Spacebar** | Reset camera to default view |
 
 #### FPV Mode (drone)
 
@@ -141,52 +141,73 @@ The viewer has two navigation modes, toggled via the **🛤/✈ button** in the 
 | **E** | Altitude up |
 | **Q** | Altitude down |
 | **Left-click drag** | Free look (mouse controls pitch and yaw) |
-| **Spacebar** | Reset to default view (also switches back to Orbit) |
+| **Spacebar** | Reset camera to default view (switches back to Orbit) |
 
-In FPV mode, all movement is relative to the drone itself — forward/backward follows where the camera is actually pointing, and A/D rotate the view rather than strafing. Movement speed adapts automatically to the model size.
+### Viewer Toolbar (top-right)
+
+| Button | What it toggles |
+|--------|----------------|
+| **Orbit/FPV** | Switch between Orbit and FPV navigation modes |
+| **Grid** | Floor grid (scales to model, adapts colors to background) |
+| **Axes** | XYZ axis helper (X=red, Y=green, Z=blue with labels) |
+| **Wireframe** | Wireframe overlay on all meshes |
+| **Light (☀)** | Collapsible lighting control panel |
+
+These settings **persist across model loads** — switching to a new asset keeps your scene preferences.
+
+### Model Transform Buttons (top bar)
+
+| Button | Tooltip | What it does |
+|--------|---------|-------------|
+| **Reset** | *Reset model to original state* | Undo all Center/Ground/Orient/Scale transforms |
+| **Center** | *Center bounding box at (0,0,0)* | Translate model so its center is at the origin |
+| **Ground** | *Place model on ground (Y=0)* | Center X/Z, shift so lowest point touches Y=0 |
+| **Orient** | *Auto-orient via PCA* | Rotate model so its up-direction aligns with Y |
+
+These modify the **model geometry only** — the camera stays where it is.
+
+### Background Colors
+
+12 color swatches in the bottom-left of the viewer. Includes a neutral grayscale ramp (dark → white) plus tinted options (warm dark, dark red, dark green). The grid adapts its colors to contrast with the selected background.
 
 ### Model Scale
 
-A **Scale** slider appears in the bottom-right corner of the viewer when a model is loaded. Drag it to rescale the model from **0.25×** to **2.0×** in 0.25 increments. The slider snaps to standard values. Scale resets to 1.0× each time a new model is loaded.
+A **Scale** slider in the bottom-right (0.25×–2.0×). Resets to 1.0× on new model load.
 
 ### Light Controls
 
-Click the **☀ sun icon** in the top-right corner of the viewer to open the light panel:
+Click **☀** in the toolbar to open the light panel:
 
-| Control | What it adjusts |
-|---------|----------------|
-| **Direction H** | Key light horizontal angle (azimuth, 0°–360°) |
-| **Direction V** | Key light vertical angle (elevation, 5°–90°) |
-| **Key Light** | Main directional light intensity (0–3) |
-| **Fill Light** | Opposite-side fill light intensity (0–2) |
-| **Ambient** | Base ambient lighting intensity (0–2) |
-| **Exposure** | Overall tone mapping exposure (0.3–4) |
-| **Reset** | Restore all light settings to defaults |
+| Control | Range |
+|---------|-------|
+| **Direction H** | Key light azimuth (0°–360°) |
+| **Direction V** | Key light elevation (5°–90°) |
+| **Key Light** | Intensity (0–3) |
+| **Fill Light** | Intensity (0–2) |
+| **Ambient** | Intensity (0–2) |
+| **Exposure** | Tone mapping (0.3–4) |
 
-### Exporting / Renaming an Asset
+### Exporting
 
 1. Select an asset to view it
-2. The **top bar** shows two input fields:
-   - **Name**: The desired output name (pre-filled with original name)
-   - **Export to**: Target directory path
-3. Edit either field as needed
-4. Click **Export** (or press Enter in either field)
-5. A toast notification confirms success or reports errors
+2. The **top bar** shows name + path fields
+3. Click **Export** (or press Enter)
 
 **Export behavior:**
-- **Single file** (e.g., a standalone `.fbx`): Exported as a single renamed file
-- **Multiple files** (e.g., `.obj` + `.mtl` + textures): Exported into a subfolder named after the asset
+- **Unmodified model**: Copies the original file(s) with new name
+- **Modified model** (after Center/Ground/Orient/Scale): Exports the transformed geometry as OBJ via Three.js OBJExporter — all transforms are baked into the vertices
+- **With related files** (`.mtl`, textures): Exported into a subfolder
 
 ---
 
 ## Stopping the Server
 
-Press `Ctrl+C` in the terminal where the server is running. Temporary extraction files (from archive viewing) are automatically cleaned up on shutdown.
+Press `Ctrl+C` in the terminal. Temporary extraction files are cleaned up on shutdown.
 
 ---
 
 ## Next Steps
 
-- Read [Architecture](architecture.md) to understand how the system is designed
-- Check [API Reference](api.md) if you want to integrate with the backend
-- See [FAQ](faq.md) for troubleshooting common issues
+- [Architecture](architecture.md) — System design and components
+- [API Reference](api.md) — Backend REST API
+- [FAQ](faq.md) — Troubleshooting
