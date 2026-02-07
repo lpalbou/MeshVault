@@ -1,0 +1,6 @@
+include LICENSE
+include README.md
+include CHANGELOG.md
+include ACKNOWLEDGMENTS.md
+recursive-include frontend *
+recursive-include backend *.py

@@ -1,0 +1,43 @@
+{
+  "name": "meshvault",
+  "version": "0.1.0",
+  "description": "A professional 3D asset browser for rapid browsing, previewing, and managing OBJ/FBX files",
+  "keywords": [
+    "3d",
+    "asset-browser",
+    "obj",
+    "fbx",
+    "three.js",
+    "viewer",
+    "meshvault",
+    "3d-viewer",
+    "mesh"
+  ],
+  "homepage": "https://github.com/lpalbou/meshvault",
+  "bugs": {
+    "url": "https://github.com/lpalbou/meshvault/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lpalbou/meshvault.git"
+  },
+  "license": "MIT",
+  "author": "Laurent-Philippe Albou <contact@abstractcore.ai>",
+  "bin": {
+    "meshvault": "./bin/meshvault.js"
+  },
+  "files": [
+    "bin/",
+    "backend/",
+    "frontend/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node bin/meshvault.js",
+    "prepublishOnly": "echo 'Ready to publish MeshVault to NPM'"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

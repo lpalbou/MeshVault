@@ -1,0 +1,52 @@
+[tool.poetry]
+name = "meshvault"
+version = "0.1.0"
+description = "A professional 3D asset browser for rapid browsing, previewing, and managing OBJ/FBX files"
+authors = ["Laurent-Philippe Albou <contact@abstractcore.ai>"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/lpalbou/meshvault"
+repository = "https://github.com/lpalbou/meshvault"
+documentation = "https://github.com/lpalbou/meshvault/tree/main/docs"
+keywords = ["3d", "asset-browser", "obj", "fbx", "three.js", "viewer", "meshvault"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+    "Topic :: Multimedia :: Graphics :: Viewers",
+]
+packages = [{include = "backend"}]
+include = ["frontend/**/*"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+fastapi = "^0.115.0"
+uvicorn = {extras = ["standard"], version = "^0.30.0"}
+python-multipart = "^0.0.9"
+rarfile = "^4.2"
+aiofiles = "^24.1.0"
+trimesh = "^4.4.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+httpx = "^0.27.0"
+
+[tool.poetry.scripts]
+meshvault = "backend.app:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

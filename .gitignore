@@ -1,0 +1,56 @@
+# ===========================
+# Python
+# ===========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# ===========================
+# Virtual environments
+# ===========================
+.venv/
+venv/
+env/
+
+# ===========================
+# Testing
+# ===========================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ===========================
+# IDE / Editor
+# ===========================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ===========================
+# Node / NPM
+# ===========================
+node_modules/
+npm-debug.log*
+*.tgz
+
+# ===========================
+# Project-specific
+# ===========================
+
+# Untracked test assets (3D files, archives)
+untracked/
+
+# Temporary conversion outputs
+*.converted.obj
+
+# Poetry lock is committed, but not the cache
+# poetry.lock  # (we DO commit this)
