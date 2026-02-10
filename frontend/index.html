@@ -107,6 +107,32 @@
                 </button>
             </div>
             <span class="top-bar-sep"></span>
+            <!-- Simplify (LOD) -->
+            <div class="toolbar-group" style="position:relative;">
+                <button id="btn-simplify" class="btn btn-tool" title="Simplify mesh (reduce polygon count)">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="12 2 22 12 12 22 2 12"/>
+                        <line x1="8" y1="8" x2="16" y2="16" opacity="0.4"/>
+                    </svg>
+                </button>
+                <!-- Simplify popover -->
+                <div id="simplify-popover" class="simplify-popover" style="display:none;">
+                    <div class="simplify-header">Simplify Mesh</div>
+                    <div class="simplify-info">
+                        <span>Vertices: <strong id="simplify-current">0</strong></span>
+                        <span>→ <strong id="simplify-target">0</strong></span>
+                    </div>
+                    <div class="slider-row">
+                        <span class="slider-label">%</span>
+                        <input type="range" id="simplify-ratio" min="5" max="100" value="50" step="5" />
+                        <span class="slider-value" id="simplify-ratio-val">50%</span>
+                    </div>
+                    <div class="simplify-actions">
+                        <button id="simplify-cancel" class="btn btn-sm">Cancel</button>
+                        <button id="simplify-apply" class="btn btn-primary btn-sm">Apply</button>
+                    </div>
+                </div>
+            </div>
             <!-- Normals -->
             <button id="btn-recompute-normals" class="btn btn-tool" title="Recompute vertex normals">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -339,17 +365,16 @@
             <!-- Scale control (bottom-right) -->
             <div id="scale-control" style="display: none;">
                 <label for="model-scale">Scale</label>
-                <input type="range" id="model-scale" min="0.25" max="2.0" value="1" step="0.25" list="scale-ticks" />
+                <input type="range" id="model-scale" min="0.05" max="5.0" value="1" step="0.05" list="scale-ticks" />
                 <span id="model-scale-val">1.00×</span>
                 <datalist id="scale-ticks">
+                    <option value="0.05"></option>
                     <option value="0.25"></option>
                     <option value="0.5"></option>
-                    <option value="0.75"></option>
                     <option value="1"></option>
-                    <option value="1.25"></option>
-                    <option value="1.5"></option>
-                    <option value="1.75"></option>
                     <option value="2"></option>
+                    <option value="3"></option>
+                    <option value="5"></option>
                 </datalist>
             </div>
 

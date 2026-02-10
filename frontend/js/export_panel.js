@@ -20,13 +20,14 @@ export class ExportPanel {
      * @param {Function} showToast - Function to show toast messages
      * @param {Function} getModifiedOBJ - Returns OBJ string if model is modified, null otherwise
      */
-    constructor(elements, showToast, getModifiedOBJ) {
+    constructor(elements, showToast, getModifiedOBJ, onExportSuccess) {
         this._controls = elements.controls;
         this._nameInput = elements.nameInput;
         this._pathInput = elements.pathInput;
         this._exportBtn = elements.exportBtn;
         this._showToast = showToast;
         this._getModifiedOBJ = getModifiedOBJ || (() => null);
+        this._onExportSuccess = onExportSuccess || (() => {});
 
         this._currentAsset = null;
 
@@ -79,7 +80,6 @@ export class ExportPanel {
         }
 
         this._exportBtn.disabled = true;
-        this._exportBtn.textContent = "Exporting...";
 
         try {
             // Check if model has been modified — export modified OBJ instead
@@ -126,19 +126,13 @@ export class ExportPanel {
                 `Exported${suffix} ${result.files_exported.length} file(s) to ${result.output_path}`,
                 "success"
             );
+            // Refresh the file browser to show the new file
+            this._onExportSuccess();
         } catch (err) {
             console.error("Export error:", err);
             this._showToast(`Export failed: ${err.message}`, "error");
         } finally {
             this._exportBtn.disabled = false;
-            this._exportBtn.innerHTML = `
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
-                    <polyline points="17 8 12 3 7 8"/>
-                    <line x1="12" y1="3" x2="12" y2="15"/>
-                </svg>
-                Export
-            `;
         }
     }
 }

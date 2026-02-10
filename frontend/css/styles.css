@@ -1039,6 +1039,75 @@ html, body {
     background: rgba(30, 40, 71, 0.95);
 }
 
+/* --- Simplify Popover --- */
+.simplify-popover {
+    position: absolute;
+    top: 42px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 240px;
+    background: rgba(22, 33, 62, 0.95);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    z-index: 100;
+    box-shadow: var(--shadow-lg);
+    padding: 12px;
+}
+
+.simplify-header {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 10px;
+}
+
+.simplify-info {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+}
+
+.simplify-info strong {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+}
+
+.simplify-popover .slider-row {
+    margin-bottom: 12px;
+}
+
+.simplify-popover input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    flex: 1;
+    height: 4px;
+    background: var(--border-color);
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+}
+
+.simplify-popover input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent-primary);
+    border: 2px solid rgba(255,255,255,0.15);
+    cursor: pointer;
+}
+
+.simplify-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
 /* --- Materials Inspector Panel (draggable floating window) --- */
 .materials-panel {
     position: fixed;

@@ -56,13 +56,15 @@ class App {
                 exportBtn: this._elements.exportBtn,
             },
             (msg, type) => this._showToast(msg, type),
-            // Modified OBJ getter: returns OBJ text if model was modified
+            // Modified OBJ getter
             () => {
                 if (this._viewer.isModelModified) {
                     return this._viewer.exportAsOBJ();
                 }
                 return null;
-            }
+            },
+            // Refresh file browser after successful export
+            () => this._fileBrowser.browse(this._fileBrowser.currentPath)
         );
 
         // --- Reload Button (reload asset from disk) ---
@@ -107,6 +109,9 @@ class App {
                 this._showToast(`Rotated ${sign}${angle}° around ${axis.toUpperCase()}`, "info");
             });
         });
+
+        // --- Simplify (LOD) ---
+        this._initSimplifyControl();
 
         // --- Recompute normals ---
         document.getElementById("btn-recompute-normals").addEventListener("click", () => {
@@ -437,6 +442,66 @@ class App {
     }
 
     /**
+     * Initialize the mesh simplification (LOD) control.
+     */
+    _initSimplifyControl() {
+        const btn = document.getElementById("btn-simplify");
+        const popover = document.getElementById("simplify-popover");
+        const slider = document.getElementById("simplify-ratio");
+        const ratioDisplay = document.getElementById("simplify-ratio-val");
+        const currentDisplay = document.getElementById("simplify-current");
+        const targetDisplay = document.getElementById("simplify-target");
+        const btnApply = document.getElementById("simplify-apply");
+        const btnCancel = document.getElementById("simplify-cancel");
+
+        let currentVertCount = 0;
+
+        const openPopover = () => {
+            currentVertCount = this._viewer.getTotalVertexCount();
+            currentDisplay.textContent = currentVertCount.toLocaleString();
+            slider.value = 50;
+            ratioDisplay.textContent = "50%";
+            targetDisplay.textContent = Math.floor(currentVertCount * 0.5).toLocaleString();
+            popover.style.display = "block";
+        };
+
+        const closePopover = () => {
+            popover.style.display = "none";
+        };
+
+        btn.addEventListener("click", () => {
+            if (popover.style.display !== "none") {
+                closePopover();
+            } else {
+                openPopover();
+            }
+        });
+
+        slider.addEventListener("input", () => {
+            const pct = parseInt(slider.value, 10);
+            ratioDisplay.textContent = `${pct}%`;
+            targetDisplay.textContent = Math.floor(currentVertCount * pct / 100).toLocaleString();
+        });
+
+        btnCancel.addEventListener("click", closePopover);
+
+        btnApply.addEventListener("click", () => {
+            const ratio = parseInt(slider.value, 10) / 100;
+            closePopover();
+            this._showToast("Simplifying mesh...", "info");
+
+            // Use setTimeout to let the toast render before heavy computation
+            setTimeout(() => {
+                const result = this._viewer.simplifyModel(ratio);
+                this._showToast(
+                    `Simplified: ${result.before.toLocaleString()} → ${result.after.toLocaleString()} vertices`,
+                    "success"
+                );
+            }, 50);
+        });
+    }
+
+    /**
      * Initialize the material inspector panel.
      *
      * Architecture note: each material card stores a live reference to the
@@ -691,11 +756,21 @@ class App {
 
         let currentModalPath = "";
 
+        const extLabel = document.querySelector(".modal-ext");
+
         const openModal = () => {
-            // Pre-fill with source directory and filename
-            currentModalPath = this._fileBrowser.currentPath || "";
             const asset = this._exportPanel._currentAsset;
-            nameInput.value = asset ? asset.name : "model";
+            // Pre-fill path with source directory
+            currentModalPath = this._fileBrowser.currentPath || "";
+
+            // Pre-fill filename with original name + extension
+            // If model is modified, export will be .obj regardless
+            const isModified = this._viewer.isModelModified;
+            const ext = isModified ? ".obj" : (asset ? asset.extension : ".obj");
+            const baseName = asset ? asset.name : "model";
+            nameInput.value = baseName + ext;
+            extLabel.textContent = isModified ? "(modified → .obj)" : "";
+
             modal.style.display = "flex";
             loadFolder(currentModalPath);
         };
@@ -754,12 +829,16 @@ class App {
 
         // Save button triggers the actual export
         btnSave.addEventListener("click", async () => {
-            const newName = nameInput.value.trim();
-            if (!newName) {
+            const fullName = nameInput.value.trim();
+            if (!fullName) {
                 this._showToast("Please enter a file name", "error");
                 nameInput.focus();
                 return;
             }
+
+            // Strip extension for the export API (it adds .obj for modified)
+            const dotIdx = fullName.lastIndexOf(".");
+            const newName = dotIdx > 0 ? fullName.substring(0, dotIdx) : fullName;
 
             // Set the hidden inputs so export_panel can use them
             document.getElementById("asset-name-input").value = newName;

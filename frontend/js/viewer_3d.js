@@ -21,6 +21,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
 import { OBJExporter } from "three/addons/exporters/OBJExporter.js";
 import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
+import { SimplifyModifier } from "three/addons/modifiers/SimplifyModifier.js";
 import { VertexNormalsHelper } from "three/addons/helpers/VertexNormalsHelper.js";
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
@@ -1809,6 +1810,99 @@ export class Viewer3D {
         });
 
         return Array.from(matMap.values());
+    }
+
+    /**
+     * Get the total unique vertex count of the current model.
+     * Uses the stats computed by _computeStats (which deduplicates).
+     */
+    getTotalVertexCount() {
+        if (!this._currentModel) return 0;
+        const stats = this._computeStats(this._currentModel);
+        return stats.vertices;
+    }
+
+    /**
+     * Simplify the model geometry to a target vertex count.
+     *
+     * Uses Three.js SimplifyModifier (edge collapse decimation).
+     * Preserves UVs and material assignments. Recomputes normals after.
+     *
+     * @param {number} targetRatio - Target ratio (0.0–1.0) of vertices to keep
+     * @returns {{ before: number, after: number }} Vertex counts before/after
+     */
+    simplifyModel(targetRatio) {
+        if (!this._currentModel) return { before: 0, after: 0 };
+
+        const modifier = new SimplifyModifier();
+        let totalBefore = 0;
+        let totalAfter = 0;
+
+        // If normals are displayed, turn them off during simplification
+        const hadNormals = this._normalsVisible;
+        if (hadNormals) this.setNormalsVisible(false);
+
+        // Bake world transforms first so mergeVertices works correctly
+        this._bakeWorldTransforms();
+
+        this._currentModel.traverse((child) => {
+            if (!child.isMesh || !child.geometry) return;
+
+            let geo = child.geometry;
+
+            // Step 1: Merge vertices to create indexed topology.
+            // SimplifyModifier requires shared vertices (indexed geometry)
+            // to perform meaningful edge collapses.
+            // Remove normals first so vertices at UV seams can merge.
+            geo.deleteAttribute("normal");
+            const hadUV = geo.hasAttribute("uv");
+            if (hadUV) geo.deleteAttribute("uv");
+            geo = BufferGeometryUtils.mergeVertices(geo, 0.0001);
+
+            const vertCount = geo.attributes.position.count;
+            totalBefore += vertCount;
+
+            // Step 2: Calculate vertices to remove
+            const targetCount = Math.max(4, Math.floor(vertCount * targetRatio));
+            const removeCount = vertCount - targetCount;
+
+            if (removeCount <= 0) {
+                child.geometry.dispose();
+                child.geometry = geo;
+                child.geometry.computeVertexNormals();
+                totalAfter += vertCount;
+                return;
+            }
+
+            try {
+                // Step 3: Simplify the indexed geometry
+                const simplified = modifier.modify(geo, removeCount);
+                child.geometry.dispose();
+                child.geometry = simplified;
+                totalAfter += simplified.attributes.position.count;
+            } catch (err) {
+                console.warn(`Simplification failed for mesh ${child.name}:`, err);
+                child.geometry.dispose();
+                child.geometry = geo;
+                totalAfter += vertCount;
+            }
+
+            // Step 4: Recompute normals on the result
+            child.geometry.computeVertexNormals();
+            child.geometry.computeBoundingBox();
+            child.geometry.computeBoundingSphere();
+        });
+
+        this._modelModified = true;
+
+        // Refresh normals display if it was on
+        if (hadNormals) this.setNormalsVisible(true);
+
+        // Update stats
+        const stats = this._computeStats(this._currentModel);
+        this._onInfoUpdate(stats);
+
+        return { before: totalBefore, after: totalAfter };
     }
 
     exportAsOBJ() {
