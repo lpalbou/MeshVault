@@ -20,6 +20,8 @@ import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
 import { OBJExporter } from "three/addons/exporters/OBJExporter.js";
+import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
+import { VertexNormalsHelper } from "three/addons/helpers/VertexNormalsHelper.js";
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { SSAOPass } from "three/addons/postprocessing/SSAOPass.js";
@@ -147,6 +149,7 @@ export class Viewer3D {
             this._currentModel = null;
         }
         this._mixers = [];
+        this._clearNormalsHelpers();
     }
 
     /**
@@ -190,9 +193,12 @@ export class Viewer3D {
             this.setWireframe(true);
         }
 
-        // Grid and axis visibility are already preserved on their scene objects
-        // (they aren't cleared on model load), so nothing to do there.
+        // Normals: recreate helpers for the new model
+        if (this._normalsVisible) {
+            this.setNormalsVisible(true);
+        }
 
+        // Grid and axis visibility are already preserved on their scene objects.
         // Background is also already preserved on the scene.
     }
 
@@ -1263,6 +1269,53 @@ export class Viewer3D {
     }
 
     /**
+     * Toggle vertex normals visualization.
+     * Shows colored lines from each vertex in the direction of its normal.
+     * Useful for debugging shading issues and verifying normal directions.
+     *
+     * @param {boolean} enabled
+     */
+    setNormalsVisible(enabled) {
+        // Remove existing helpers
+        this._clearNormalsHelpers();
+
+        if (enabled && this._currentModel) {
+            this._normalsHelpers = [];
+            const box = new THREE.Box3().setFromObject(this._currentModel);
+            const size = box.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z);
+            // Normal line length proportional to model size
+            const normalLength = maxDim * 0.02;
+
+            this._currentModel.traverse((child) => {
+                if (child.isMesh && child.geometry) {
+                    const helper = new VertexNormalsHelper(child, normalLength, 0x44ddff);
+                    this._scene.add(helper);
+                    this._normalsHelpers.push(helper);
+                }
+            });
+        }
+
+        this._normalsVisible = enabled;
+    }
+
+    /** Get normals display state. */
+    getNormalsVisible() {
+        return this._normalsVisible || false;
+    }
+
+    /** Remove all normals helper objects from the scene. */
+    _clearNormalsHelpers() {
+        if (this._normalsHelpers) {
+            for (const h of this._normalsHelpers) {
+                this._scene.remove(h);
+                h.dispose();
+            }
+            this._normalsHelpers = [];
+        }
+    }
+
+    /**
      * Set the viewer background color.
      * Also updates fog and grid colors to match for visual consistency.
      * Grid adapts: light grid lines on dark backgrounds, dark on light.
@@ -1483,6 +1536,53 @@ export class Viewer3D {
      * @param {'x'|'y'|'z'} axis - The rotation axis
      * @param {number} angleDeg - Rotation angle in degrees (e.g., 90, -90)
      */
+    /**
+     * Recompute smooth vertex normals for all meshes.
+     *
+     * Steps:
+     * 1. Delete existing normals (they prevent vertex merging at hard edges)
+     * 2. Merge vertices at the same position (creates indexed geometry)
+     * 3. Compute vertex normals by averaging face normals at shared vertices
+     *
+     * This turns faceted/flat shading into fully smooth shading.
+     */
+    recomputeNormals() {
+        if (!this._currentModel) return;
+
+        // If normals are displayed, turn them off first (will re-add after)
+        const hadNormals = this._normalsVisible;
+        if (hadNormals) this.setNormalsVisible(false);
+
+        this._currentModel.traverse((child) => {
+            if (child.isMesh && child.geometry) {
+                const geo = child.geometry;
+
+                // 1. Remove existing normals so mergeVertices only compares positions
+                geo.deleteAttribute("normal");
+
+                // 2. Also remove UVs temporarily for merge (preserving them prevents
+                //    merging at UV seams which keeps faces split)
+                const hadUV = geo.hasAttribute("uv");
+                const uvBackup = hadUV ? geo.getAttribute("uv").clone() : null;
+                if (hadUV) geo.deleteAttribute("uv");
+
+                // 3. Merge vertices at same position (tolerance handles float noise)
+                child.geometry = BufferGeometryUtils.mergeVertices(geo, 0.0001);
+
+                // 4. Compute smooth normals on the merged geometry
+                child.geometry.computeVertexNormals();
+
+                child.geometry.computeBoundingBox();
+                child.geometry.computeBoundingSphere();
+            }
+        });
+
+        this._modelModified = true;
+
+        // Re-enable normals display if it was on
+        if (hadNormals) this.setNormalsVisible(true);
+    }
+
     rotateModel(axis, angleDeg) {
         if (!this._currentModel) return;
 

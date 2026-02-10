@@ -71,6 +71,11 @@ export class FileBrowser {
         this._viewMode = localStorage.getItem("meshvault_viewMode") || "list";
         // Current search filter
         this._filterText = "";
+
+        // Suppress browser default context menu on the sidebar
+        this._container.addEventListener("contextmenu", (e) => {
+            e.preventDefault();
+        });
     }
 
     /** Get the current browsing path */
@@ -274,6 +279,11 @@ export class FileBrowser {
             this._setSelected(item);
         });
 
+        // Right-click context menu
+        item.addEventListener("contextmenu", (e) => {
+            this._showContextMenu(e, folder.path, folder.name);
+        });
+
         return item;
     }
 
@@ -322,6 +332,15 @@ export class FileBrowser {
             this._onAssetSelect(asset);
         });
 
+        // Right-click context menu
+        const revealPath = asset.is_in_archive ? asset.archive_path : asset.path;
+        const revealName = asset.is_in_archive
+            ? asset.archive_path.split("/").pop()
+            : asset.path.split("/").pop();
+        item.addEventListener("contextmenu", (e) => {
+            this._showContextMenu(e, revealPath, revealName);
+        });
+
         return item;
     }
 
@@ -349,6 +368,12 @@ export class FileBrowser {
             this._onAssetSelect(asset);
         });
 
+        const cardRevealPath = asset.is_in_archive ? asset.archive_path : asset.path;
+        const cardRevealName = cardRevealPath.split("/").pop();
+        card.addEventListener("contextmenu", (e) => {
+            this._showContextMenu(e, cardRevealPath, cardRevealName);
+        });
+
         return card;
     }
 
@@ -370,6 +395,196 @@ export class FileBrowser {
         if (bytes < 1024) return `${bytes} B`;
         if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
         return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    /**
+     * Show a context menu with file operations.
+     * @param {MouseEvent} event
+     * @param {string} filePath - Absolute path to the file/folder
+     * @param {string} [fileName] - Display name (for rename prompt)
+     */
+    _showContextMenu(event, filePath, fileName) {
+        event.preventDefault();
+        event.stopPropagation();
+        this._dismissContextMenu();
+
+        const menu = document.createElement("div");
+        menu.className = "context-menu";
+
+        // Position — keep within viewport
+        let x = event.clientX;
+        let y = event.clientY;
+        menu.style.left = `${x}px`;
+        menu.style.top = `${y}px`;
+
+        // --- Show in file manager ---
+        this._addContextMenuItem(menu, "Show in file manager", async () => {
+            try {
+                await fetch("/api/reveal", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ path: filePath }),
+                });
+            } catch (err) {
+                console.error("Reveal failed:", err);
+            }
+        });
+
+        // --- Rename (inline editing on the item itself) ---
+        const displayName = fileName || filePath.split("/").pop();
+        this._addContextMenuItem(menu, "Rename", () => {
+            this._startInlineRename(event.target.closest(".file-item, .asset-card"), filePath, displayName);
+        });
+
+        // Separator
+        const sep = document.createElement("div");
+        sep.className = "context-menu-sep";
+        menu.appendChild(sep);
+
+        // --- Delete ---
+        this._addContextMenuItem(menu, "Delete", async () => {
+            const ok = confirm(`Delete "${displayName}"?\n\nThis cannot be undone.`);
+            if (!ok) return;
+            try {
+                const resp = await fetch("/api/delete", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ path: filePath }),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    alert(`Delete failed: ${err.detail}`);
+                } else {
+                    this.browse(this._currentPath);
+                }
+            } catch (err) {
+                alert(`Delete failed: ${err.message}`);
+            }
+        }, true);
+
+        document.body.appendChild(menu);
+        this._activeContextMenu = menu;
+
+        // Reposition if off-screen
+        const rect = menu.getBoundingClientRect();
+        if (rect.right > window.innerWidth) menu.style.left = `${window.innerWidth - rect.width - 8}px`;
+        if (rect.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - rect.height - 8}px`;
+
+        // Dismiss on any click outside
+        const dismiss = (e) => {
+            if (!menu.contains(e.target)) {
+                this._dismissContextMenu();
+                document.removeEventListener("click", dismiss, true);
+                document.removeEventListener("contextmenu", dismiss, true);
+            }
+        };
+        setTimeout(() => {
+            document.addEventListener("click", dismiss, true);
+            document.addEventListener("contextmenu", dismiss, true);
+        }, 0);
+    }
+
+    /** Add a single item to a context menu. */
+    _addContextMenuItem(menu, label, action, danger = false) {
+        const item = document.createElement("div");
+        item.className = `context-menu-item${danger ? " danger" : ""}`;
+        item.textContent = label;
+        item.addEventListener("click", () => {
+            this._dismissContextMenu();
+            action();
+        });
+        menu.appendChild(item);
+    }
+
+    /**
+     * Start inline rename: replace the name text in the file item with
+     * an editable input field. Enter confirms, Escape cancels.
+     */
+    _startInlineRename(itemElement, filePath, currentName) {
+        if (!itemElement) return;
+
+        // Find the name element (works for both list and grid items)
+        const nameEl = itemElement.querySelector(".file-item-name, .asset-card-name");
+        if (!nameEl) return;
+
+        const originalText = nameEl.textContent;
+        const input = document.createElement("input");
+        input.type = "text";
+        input.value = currentName;
+        input.className = "inline-rename-input";
+
+        nameEl.textContent = "";
+        nameEl.appendChild(input);
+
+        // Delay focus to avoid immediate blur from context menu dismissal
+        let committed = false;
+        setTimeout(() => {
+            input.focus();
+            const dotIdx = currentName.lastIndexOf(".");
+            input.setSelectionRange(0, dotIdx > 0 ? dotIdx : currentName.length);
+        }, 50);
+
+        const restore = () => {
+            if (!committed && input.parentElement) {
+                nameEl.textContent = originalText;
+            }
+        };
+
+        const commit = async () => {
+            if (committed) return;
+            committed = true;
+            const newName = input.value.trim();
+            if (!newName || newName === currentName) {
+                nameEl.textContent = originalText;
+                return;
+            }
+            // Show a temporary "renaming..." state
+            nameEl.textContent = newName;
+            try {
+                const resp = await fetch("/api/rename", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ path: filePath, new_name: newName }),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    nameEl.textContent = originalText;
+                    this._onStatusUpdate(`Rename failed: ${err.detail}`);
+                } else {
+                    this.browse(this._currentPath);
+                }
+            } catch (err) {
+                nameEl.textContent = originalText;
+                this._onStatusUpdate(`Rename failed: ${err.message}`);
+            }
+        };
+
+        input.addEventListener("keydown", (e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") {
+                e.preventDefault();
+                commit();
+            } else if (e.key === "Escape") {
+                restore();
+            }
+        });
+
+        input.addEventListener("blur", () => {
+            // Small delay to allow Enter click to fire first
+            setTimeout(() => restore(), 100);
+        });
+
+        // Prevent clicks on the input from triggering item selection/loading
+        input.addEventListener("click", (e) => e.stopPropagation());
+        input.addEventListener("dblclick", (e) => e.stopPropagation());
+    }
+
+    /** Remove the active context menu if any. */
+    _dismissContextMenu() {
+        if (this._activeContextMenu) {
+            this._activeContextMenu.remove();
+            this._activeContextMenu = null;
+        }
     }
 
     /**

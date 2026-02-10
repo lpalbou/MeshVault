@@ -9,6 +9,8 @@ This is the entry point that:
 
 import os
 import sys
+import subprocess
+import platform
 import mimetypes
 import urllib.parse
 from pathlib import Path
@@ -368,6 +370,98 @@ async def export_modified(request: ExportModifiedRequest):
         "message": f"Exported modified model as OBJ",
         "files_exported": [str(obj_path)],
     }
+
+
+class RevealRequest(BaseModel):
+    """Request body for revealing a file in the OS file manager."""
+    path: str
+
+
+class RenameRequest(BaseModel):
+    """Request body for renaming a file or folder."""
+    path: str
+    new_name: str
+
+
+class DeleteRequest(BaseModel):
+    """Request body for deleting a file or folder."""
+    path: str
+
+
+@app.post("/api/reveal")
+async def reveal_in_file_manager(request: RevealRequest):
+    """
+    Open the OS file manager and select/highlight the given file or folder.
+
+    Works on macOS (Finder), Linux (xdg-open), and Windows (Explorer).
+    """
+    file_path = Path(request.path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"Path not found: {request.path}")
+
+    try:
+        system = platform.system()
+        if system == "Darwin":
+            # macOS: open Finder and select the file
+            subprocess.Popen(["open", "-R", str(file_path)])
+        elif system == "Windows":
+            # Windows: open Explorer and select the file
+            subprocess.Popen(["explorer", "/select,", str(file_path)])
+        elif system == "Linux":
+            # Linux: open the parent directory (no universal "select file" support)
+            parent = str(file_path.parent) if file_path.is_file() else str(file_path)
+            subprocess.Popen(["xdg-open", parent])
+        else:
+            raise HTTPException(status_code=500, detail=f"Unsupported OS: {system}")
+
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to reveal: {e}")
+
+
+@app.post("/api/rename")
+async def rename_file(request: RenameRequest):
+    """
+    Rename a file or folder. The new_name is just the filename (not a path).
+    The file stays in the same directory.
+    """
+    file_path = Path(request.path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"Not found: {request.path}")
+
+    new_name = request.new_name.strip()
+    if not new_name or "/" in new_name or "\\" in new_name:
+        raise HTTPException(status_code=400, detail="Invalid name")
+
+    new_path = file_path.parent / new_name
+    if new_path.exists():
+        raise HTTPException(status_code=409, detail=f"Already exists: {new_name}")
+
+    try:
+        file_path.rename(new_path)
+        return {"success": True, "new_path": str(new_path)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Rename failed: {e}")
+
+
+@app.post("/api/delete")
+async def delete_file(request: DeleteRequest):
+    """
+    Delete a file or empty folder.
+    """
+    file_path = Path(request.path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"Not found: {request.path}")
+
+    try:
+        if file_path.is_file():
+            file_path.unlink()
+        elif file_path.is_dir():
+            import shutil
+            shutil.rmtree(str(file_path))
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
 
 
 @app.get("/api/default_path")

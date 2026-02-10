@@ -65,6 +65,13 @@ class App {
             }
         );
 
+        // --- Reload Button (reload asset from disk) ---
+        document.getElementById("btn-reload").addEventListener("click", () => {
+            if (this._lastLoadedAsset) {
+                this._onAssetSelected(this._lastLoadedAsset);
+            }
+        });
+
         // --- Reset Model Button (undo all transforms, not camera) ---
         document.getElementById("btn-reset-view").addEventListener("click", () => {
             this._viewer.resetModel();
@@ -101,8 +108,14 @@ class App {
             });
         });
 
-        // --- Export folder browse button ---
-        this._initFolderModal();
+        // --- Recompute normals ---
+        document.getElementById("btn-recompute-normals").addEventListener("click", () => {
+            this._viewer.recomputeNormals();
+            this._showToast("Normals recomputed", "info");
+        });
+
+        // --- Export (Save As) modal ---
+        this._initSaveAsModal();
 
         // --- Bind Navigation Buttons ---
         this._elements.btnGoUp.addEventListener("click", () => {
@@ -124,6 +137,7 @@ class App {
         this._initGridToggle();
         this._initAxisToggle();
         this._initWireframeToggle();
+        this._initNormalsToggle();
         this._initLightControls();
         this._initBackgroundSwatches();
 
@@ -139,6 +153,8 @@ class App {
      * Loads the asset in the 3D viewer and shows the export controls.
      */
     async _onAssetSelected(asset) {
+        this._lastLoadedAsset = asset;
+
         // Show loading overlay
         this._elements.loadingOverlay.style.display = "flex";
         this._elements.viewerPlaceholder.style.display = "none";
@@ -364,6 +380,18 @@ class App {
     }
 
     /**
+     * Initialize the normals visualization toggle.
+     */
+    _initNormalsToggle() {
+        const btn = document.getElementById("normals-toggle");
+        btn.addEventListener("click", () => {
+            const current = this._viewer.getNormalsVisible();
+            this._viewer.setNormalsVisible(!current);
+            btn.classList.toggle("active", !current);
+        });
+    }
+
+    /**
      * Initialize the background color swatches.
      */
     _initBackgroundSwatches() {
@@ -442,10 +470,34 @@ class App {
         };
 
         // Toggle panel visibility
-        toggleBtn.addEventListener("click", () => {
+        let outsideListener = null;
+        const closePanel = () => {
+            panel.style.display = "none";
+            toggleBtn.classList.remove("active");
+            if (outsideListener) {
+                document.removeEventListener("mousedown", outsideListener, true);
+                outsideListener = null;
+            }
+        };
+
+        toggleBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
             const visible = panel.style.display !== "none";
-            panel.style.display = visible ? "none" : "block";
-            toggleBtn.classList.toggle("active", !visible);
+            if (visible) {
+                closePanel();
+            } else {
+                panel.style.display = "block";
+                toggleBtn.classList.add("active");
+                // Close on click outside (panel or toggle button)
+                setTimeout(() => {
+                    outsideListener = (ev) => {
+                        if (!panel.contains(ev.target) && ev.target !== toggleBtn) {
+                            closePanel();
+                        }
+                    };
+                    document.addEventListener("mousedown", outsideListener, true);
+                }, 0);
+            }
         });
 
         // Wire each slider to its viewer method
@@ -498,22 +550,26 @@ class App {
      * Initialize sidebar resize drag behavior.
      */
     /**
-     * Initialize the folder picker modal for the export path.
+     * Initialize the Save As modal — opened by the Export button.
+     * Lets user browse for a folder and set a filename, then saves.
      */
-    _initFolderModal() {
+    _initSaveAsModal() {
         const modal = document.getElementById("folder-modal");
         const pathDisplay = document.getElementById("folder-modal-path");
         const listContainer = document.getElementById("folder-modal-list");
-        const btnSelect = document.getElementById("folder-modal-select");
+        const nameInput = document.getElementById("modal-name-input");
+        const btnSave = document.getElementById("folder-modal-select");
         const btnCancel = document.getElementById("folder-modal-cancel");
         const btnClose = document.getElementById("folder-modal-close");
-        const btnBrowse = document.getElementById("btn-browse-export");
-        const pathInput = document.getElementById("export-path-input");
+        const exportBtn = document.getElementById("export-btn");
 
         let currentModalPath = "";
 
         const openModal = () => {
-            currentModalPath = pathInput.value || this._fileBrowser.currentPath || "";
+            // Pre-fill with source directory and filename
+            currentModalPath = this._fileBrowser.currentPath || "";
+            const asset = this._exportPanel._currentAsset;
+            nameInput.value = asset ? asset.name : "model";
             modal.style.display = "flex";
             loadFolder(currentModalPath);
         };
@@ -562,16 +618,36 @@ class App {
             }
         };
 
-        btnBrowse.addEventListener("click", openModal);
+        // Export button opens the modal
+        exportBtn.addEventListener("click", openModal);
         btnCancel.addEventListener("click", closeModal);
         btnClose.addEventListener("click", closeModal);
         modal.addEventListener("click", (e) => {
             if (e.target === modal) closeModal();
         });
 
-        btnSelect.addEventListener("click", () => {
-            pathInput.value = currentModalPath;
+        // Save button triggers the actual export
+        btnSave.addEventListener("click", async () => {
+            const newName = nameInput.value.trim();
+            if (!newName) {
+                this._showToast("Please enter a file name", "error");
+                nameInput.focus();
+                return;
+            }
+
+            // Set the hidden inputs so export_panel can use them
+            document.getElementById("asset-name-input").value = newName;
+            document.getElementById("export-path-input").value = currentModalPath;
+
             closeModal();
+
+            // Trigger the export
+            await this._exportPanel._onExport();
+        });
+
+        // Enter in name input triggers save
+        nameInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") btnSave.click();
         });
     }
 
