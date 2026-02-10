@@ -138,6 +138,7 @@ class App {
         this._initAxisToggle();
         this._initWireframeToggle();
         this._initNormalsToggle();
+        this._initMaterialsPanel();
         this._initLightControls();
         this._initBackgroundSwatches();
 
@@ -433,6 +434,131 @@ class App {
         this._scaleDisplay.textContent = "1.00×";
         this._scaleContainer.style.display = "flex";
         this._viewer.setModelScale(1);
+    }
+
+    /**
+     * Initialize the material inspector panel.
+     *
+     * Architecture note: each material card stores a live reference to the
+     * THREE.Material object. The property rows use data-attributes that map
+     * directly to material properties. This means a future editor only needs
+     * to swap the value <span> with a <input>/<slider> and call
+     * material[prop] = newValue — no data model changes needed.
+     */
+    _initMaterialsPanel() {
+        const toggleBtn = document.getElementById("materials-toggle");
+        const panel = document.getElementById("materials-panel");
+        const listContainer = document.getElementById("materials-list");
+        const countDisplay = document.getElementById("materials-count");
+        const header = panel.querySelector(".light-panel-header");
+
+        // Toggle show/hide
+        toggleBtn.addEventListener("click", () => {
+            const visible = panel.style.display !== "none";
+            if (visible) {
+                panel.style.display = "none";
+                toggleBtn.classList.remove("active");
+            } else {
+                this._renderMaterialsList(listContainer, countDisplay);
+                panel.style.display = "flex";
+                toggleBtn.classList.add("active");
+            }
+        });
+
+        // Draggable by header
+        let isDragging = false;
+        let dragOffsetX = 0;
+        let dragOffsetY = 0;
+
+        header.addEventListener("mousedown", (e) => {
+            isDragging = true;
+            dragOffsetX = e.clientX - panel.offsetLeft;
+            dragOffsetY = e.clientY - panel.offsetTop;
+            document.body.style.userSelect = "none";
+            e.preventDefault();
+        });
+
+        document.addEventListener("mousemove", (e) => {
+            if (!isDragging) return;
+            panel.style.left = `${e.clientX - dragOffsetX}px`;
+            panel.style.top = `${e.clientY - dragOffsetY}px`;
+        });
+
+        document.addEventListener("mouseup", () => {
+            if (isDragging) {
+                isDragging = false;
+                document.body.style.userSelect = "";
+            }
+        });
+    }
+
+    /**
+     * Render the materials list into the panel.
+     * Each card shows material properties and the meshes using it.
+     * Data-attributes on property rows enable future editing.
+     */
+    _renderMaterialsList(container, countDisplay) {
+        const materials = this._viewer.getMaterialsInfo();
+        container.innerHTML = "";
+        countDisplay.textContent = `(${materials.length})`;
+
+        if (materials.length === 0) {
+            container.innerHTML = '<div class="empty-state">No materials found</div>';
+            return;
+        }
+
+        for (const mat of materials) {
+            const card = document.createElement("div");
+            card.className = "mat-card";
+            // Store material reference for future editing
+            card._materialRef = mat.material;
+            card._meshRefs = mat.meshes;
+
+            const meshNames = mat.meshes
+                .map((m) => m.name || "unnamed")
+                .slice(0, 3)
+                .join(", ");
+            const meshExtra = mat.meshes.length > 3
+                ? ` +${mat.meshes.length - 3} more`
+                : "";
+
+            card.innerHTML = `
+                <div class="mat-card-header">
+                    <div class="mat-color-swatch" style="background:${mat.color};"></div>
+                    <div class="mat-card-name" title="${mat.name}">${mat.name}</div>
+                    <div class="mat-card-type">${mat.type.replace("Mesh", "").replace("Material", "")}</div>
+                </div>
+                <div class="mat-props">
+                    <div class="mat-prop" data-prop="color">
+                        <span class="mat-prop-label">Color</span>
+                        <span class="mat-prop-value">${mat.color}</span>
+                    </div>
+                    <div class="mat-prop" data-prop="roughness">
+                        <span class="mat-prop-label">Rough</span>
+                        <span class="mat-prop-value">${mat.roughness.toFixed(2)}</span>
+                    </div>
+                    <div class="mat-prop" data-prop="metalness">
+                        <span class="mat-prop-label">Metal</span>
+                        <span class="mat-prop-value">${mat.metalness.toFixed(2)}</span>
+                    </div>
+                    <div class="mat-prop" data-prop="opacity">
+                        <span class="mat-prop-label">Alpha</span>
+                        <span class="mat-prop-value">${mat.opacity.toFixed(2)}</span>
+                    </div>
+                    <div class="mat-prop">
+                        <span class="mat-prop-label">Texture</span>
+                        <span class="mat-prop-value ${mat.hasMap ? "has-texture" : ""}">${mat.hasMap ? "Yes" : "No"}</span>
+                    </div>
+                    <div class="mat-prop">
+                        <span class="mat-prop-label">Normal</span>
+                        <span class="mat-prop-value ${mat.hasNormalMap ? "has-texture" : ""}">${mat.hasNormalMap ? "Yes" : "No"}</span>
+                    </div>
+                </div>
+                <div class="mat-meshes">${mat.meshes.length} mesh${mat.meshes.length !== 1 ? "es" : ""}: ${meshNames}${meshExtra}</div>
+            `;
+
+            container.appendChild(card);
+        }
     }
 
     /**

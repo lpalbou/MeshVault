@@ -1749,6 +1749,68 @@ export class Viewer3D {
      * Export the current model as OBJ text.
      * Bakes all transforms into the output.
      */
+    /**
+     * Extract all materials from the current model with mesh references.
+     *
+     * Returns an array of material descriptors:
+     * {
+     *   id: number,              // Unique index
+     *   name: string,            // Material name or auto-generated
+     *   material: THREE.Material, // Direct reference (for future editing)
+     *   meshes: THREE.Mesh[],    // Meshes using this material
+     *   color: string,           // Hex color (#rrggbb)
+     *   roughness: number,
+     *   metalness: number,
+     *   opacity: number,
+     *   transparent: boolean,
+     *   wireframe: boolean,
+     *   type: string,            // e.g. "MeshStandardMaterial"
+     *   hasMap: boolean,         // Has diffuse texture
+     *   hasNormalMap: boolean,
+     * }
+     *
+     * The material references are live — editing them affects the scene
+     * immediately (foundation for future material editor).
+     */
+    getMaterialsInfo() {
+        if (!this._currentModel) return [];
+
+        // Use a Map to deduplicate materials (same material instance on multiple meshes)
+        const matMap = new Map();
+        let autoId = 0;
+
+        this._currentModel.traverse((child) => {
+            if (!child.isMesh || !child.material) return;
+
+            const mats = Array.isArray(child.material)
+                ? child.material
+                : [child.material];
+
+            for (const mat of mats) {
+                if (!matMap.has(mat)) {
+                    matMap.set(mat, {
+                        id: autoId++,
+                        name: mat.name || `Material_${autoId}`,
+                        material: mat, // Live reference for future editing
+                        meshes: [],
+                        color: mat.color ? "#" + mat.color.getHexString() : "#808080",
+                        roughness: mat.roughness !== undefined ? mat.roughness : 0.5,
+                        metalness: mat.metalness !== undefined ? mat.metalness : 0.0,
+                        opacity: mat.opacity !== undefined ? mat.opacity : 1.0,
+                        transparent: !!mat.transparent,
+                        wireframe: !!mat.wireframe,
+                        type: mat.type || "Unknown",
+                        hasMap: !!mat.map,
+                        hasNormalMap: !!mat.normalMap,
+                    });
+                }
+                matMap.get(mat).meshes.push(child);
+            }
+        });
+
+        return Array.from(matMap.values());
+    }
+
     exportAsOBJ() {
         if (!this._currentModel) return null;
         this._currentModel.updateMatrixWorld(true);
