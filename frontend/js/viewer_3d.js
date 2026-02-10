@@ -39,6 +39,9 @@ export class Viewer3D {
         this._mixers = []; // Animation mixers for FBX
         this._clock = new THREE.Clock();
 
+        // Load guard: prevents race conditions when clicking assets rapidly
+        this._loadId = 0;
+
         // Navigation mode: 'orbit' (default) or 'fpv' (drone)
         this._navMode = "orbit";
         this._keysPressed = new Set();
@@ -79,6 +82,10 @@ export class Viewer3D {
      * @returns {Promise<{vertices: number, faces: number}>}
      */
     async loadModel(url, extension, options = {}) {
+        // Increment load ID to guard against race conditions
+        // (user clicking multiple assets rapidly)
+        const thisLoadId = ++this._loadId;
+
         // Remove previous model and reset all viewer state
         this._clearModel();
         this._resetViewerState();
@@ -101,6 +108,12 @@ export class Viewer3D {
         } catch (loadErr) {
             console.error(`Failed to load ${ext} model:`, loadErr);
             throw loadErr;
+        }
+
+        // If another load was started while we were loading, discard this result
+        if (thisLoadId !== this._loadId) {
+            this._disposeObject(object);
+            return { vertices: 0, faces: 0 };
         }
 
         // Apply high-quality materials and settings
@@ -1462,6 +1475,52 @@ export class Viewer3D {
         this._modelModified = true;
     }
 
+    /**
+     * Rotate the model by a given angle around an axis.
+     * Bakes the rotation directly into the geometry vertices.
+     * Does NOT touch the camera.
+     *
+     * @param {'x'|'y'|'z'} axis - The rotation axis
+     * @param {number} angleDeg - Rotation angle in degrees (e.g., 90, -90)
+     */
+    rotateModel(axis, angleDeg) {
+        if (!this._currentModel) return;
+
+        this._bakeWorldTransforms();
+
+        const angleRad = (angleDeg * Math.PI) / 180;
+        const rotMatrix = new THREE.Matrix4();
+
+        if (axis === "x") rotMatrix.makeRotationX(angleRad);
+        else if (axis === "y") rotMatrix.makeRotationY(angleRad);
+        else if (axis === "z") rotMatrix.makeRotationZ(angleRad);
+
+        // Compute centroid to rotate around model center
+        const box = new THREE.Box3().setFromObject(this._currentModel);
+        const center = box.getCenter(new THREE.Vector3());
+
+        this._currentModel.traverse((child) => {
+            if (child.isMesh && child.geometry) {
+                const posAttr = child.geometry.attributes.position;
+                if (!posAttr) return;
+
+                for (let i = 0; i < posAttr.count; i++) {
+                    const v = new THREE.Vector3().fromBufferAttribute(posAttr, i);
+                    v.sub(center);
+                    v.applyMatrix4(rotMatrix);
+                    v.add(center);
+                    posAttr.setXYZ(i, v.x, v.y, v.z);
+                }
+                posAttr.needsUpdate = true;
+                child.geometry.computeVertexNormals();
+                child.geometry.computeBoundingBox();
+                child.geometry.computeBoundingSphere();
+            }
+        });
+
+        this._modelModified = true;
+    }
+
     autoOrientModel() {
         if (!this._currentModel) return;
 
@@ -1675,23 +1734,37 @@ export class Viewer3D {
      * Compute model statistics (vertices, faces).
      */
     _computeStats(object) {
-        let vertices = 0;
+        let bufferVerts = 0;
         let faces = 0;
+        const uniqueSet = new Set();
 
         object.traverse((child) => {
             if (child.isMesh && child.geometry) {
                 const geo = child.geometry;
-                if (geo.attributes.position) {
-                    vertices += geo.attributes.position.count;
+                const posAttr = geo.attributes.position;
+                if (posAttr) {
+                    bufferVerts += posAttr.count;
+
+                    // Count unique vertex positions (rounded to avoid float noise)
+                    for (let i = 0; i < posAttr.count; i++) {
+                        const key = `${posAttr.getX(i).toFixed(5)},${posAttr.getY(i).toFixed(5)},${posAttr.getZ(i).toFixed(5)}`;
+                        uniqueSet.add(key);
+                    }
                 }
                 if (geo.index) {
                     faces += geo.index.count / 3;
-                } else if (geo.attributes.position) {
-                    faces += geo.attributes.position.count / 3;
+                } else if (posAttr) {
+                    faces += posAttr.count / 3;
                 }
             }
         });
 
-        return { vertices: Math.round(vertices), faces: Math.round(faces) };
+        const uniqueVerts = uniqueSet.size;
+
+        return {
+            vertices: Math.round(uniqueVerts),
+            faces: Math.round(faces),
+            bufferVertices: Math.round(bufferVerts),
+        };
     }
 }

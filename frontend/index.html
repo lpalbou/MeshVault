@@ -43,55 +43,78 @@
             </div>
         </div>
         <div class="top-bar-center" id="asset-controls" style="display: none;">
-            <div class="input-group">
-                <label for="asset-name-input">Name:</label>
-                <input type="text" id="asset-name-input" placeholder="asset_name" />
-            </div>
-            <div class="input-group">
-                <label for="export-path-input">Export to:</label>
-                <input type="text" id="export-path-input" placeholder="/path/to/export" />
-            </div>
-            <button id="btn-reset-view" class="btn btn-sm" title="Reset model to original state (undo Center/Ground/Orient/Scale)">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <!-- Reset -->
+            <button id="btn-reset-view" class="btn btn-tool" title="Reset model to original state (undo all transforms)">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="1 4 1 10 7 10"/>
                     <path d="M3.51 15a9 9 0 105.64-11.36L1 10"/>
                 </svg>
-                Reset
             </button>
             <span class="top-bar-sep"></span>
-            <button id="btn-recenter" class="btn btn-sm" title="Center the model's bounding box at (0, 0, 0)">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="12" cy="12" r="3"/>
-                    <path d="M12 2v4"/><path d="M12 18v4"/>
-                    <path d="M2 12h4"/><path d="M18 12h4"/>
-                </svg>
-                Center
-            </button>
-            <button id="btn-ground" class="btn btn-sm" title="Center on X/Z and place the model on the ground (lowest point at Y=0)">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <line x1="2" y1="20" x2="22" y2="20"/>
-                    <path d="M12 16V4"/>
-                    <polyline points="8 8 12 4 16 8"/>
-                </svg>
-                Ground
-            </button>
-            <button id="btn-auto-orient" class="btn btn-sm" title="Auto-orient the model so its up-vector aligns with Y (PCA)">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/>
-                    <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
-                    <line x1="12" y1="22.08" x2="12" y2="12"/>
-                </svg>
-                Orient
-            </button>
+            <!-- Position group -->
+            <div class="toolbar-group">
+                <button id="btn-recenter" class="btn btn-tool" title="Center bounding box at origin (0, 0, 0)">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"/>
+                        <path d="M12 2v4"/><path d="M12 18v4"/>
+                        <path d="M2 12h4"/><path d="M18 12h4"/>
+                    </svg>
+                </button>
+                <button id="btn-ground" class="btn btn-tool" title="Ground model: center X/Z, lowest point at Y=0">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="2" y1="20" x2="22" y2="20"/>
+                        <path d="M12 16V6"/>
+                        <polyline points="8 10 12 6 16 10"/>
+                    </svg>
+                </button>
+                <button id="btn-auto-orient" class="btn btn-tool" title="Auto-orient via PCA (smallest axis → Y up)">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/>
+                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                        <line x1="12" y1="22.08" x2="12" y2="12"/>
+                    </svg>
+                </button>
+            </div>
             <span class="top-bar-sep"></span>
-            <button id="export-btn" class="btn btn-primary" title="Export asset (with modifications)">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
-                    <polyline points="17 8 12 3 7 8"/>
-                    <line x1="12" y1="3" x2="12" y2="15"/>
-                </svg>
-                Export
-            </button>
+            <!-- Rotation group -->
+            <div class="toolbar-group rotate-group">
+                <button class="btn btn-tool rot-btn rot-x" data-axis="x" data-angle="90" title="Rotate +90° around X (pitch forward)">
+                    <span class="rot-axis">X</span><span class="rot-dir">+</span>
+                </button>
+                <button class="btn btn-tool rot-btn rot-x" data-axis="x" data-angle="-90" title="Rotate −90° around X (pitch backward)">
+                    <span class="rot-axis">X</span><span class="rot-dir">−</span>
+                </button>
+                <button class="btn btn-tool rot-btn rot-y" data-axis="y" data-angle="90" title="Rotate +90° around Y (yaw left)">
+                    <span class="rot-axis">Y</span><span class="rot-dir">+</span>
+                </button>
+                <button class="btn btn-tool rot-btn rot-y" data-axis="y" data-angle="-90" title="Rotate −90° around Y (yaw right)">
+                    <span class="rot-axis">Y</span><span class="rot-dir">−</span>
+                </button>
+                <button class="btn btn-tool rot-btn rot-z" data-axis="z" data-angle="90" title="Rotate +90° around Z (roll CW)">
+                    <span class="rot-axis">Z</span><span class="rot-dir">+</span>
+                </button>
+                <button class="btn btn-tool rot-btn rot-z" data-axis="z" data-angle="-90" title="Rotate −90° around Z (roll CCW)">
+                    <span class="rot-axis">Z</span><span class="rot-dir">−</span>
+                </button>
+            </div>
+            <span class="top-bar-sep"></span>
+            <!-- Export group -->
+            <div class="toolbar-group">
+                <input type="hidden" id="asset-name-input" />
+                <input type="text" id="export-path-input" class="export-path-input" placeholder="/path/to/export" />
+                <button id="btn-browse-export" class="btn btn-tool" title="Browse for export folder">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
+                    </svg>
+                </button>
+                <button id="export-btn" class="btn btn-primary btn-tool" title="Export asset to selected folder">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                </button>
+            </div>
         </div>
         <div class="top-bar-right">
             <span id="status-text" class="status-text"></span>
@@ -316,6 +339,24 @@
 
     <!-- Toast notifications -->
     <div id="toast-container"></div>
+
+    <!-- Folder picker modal -->
+    <div id="folder-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3>Select export folder</h3>
+                <button id="folder-modal-close" class="btn btn-icon btn-xs">&times;</button>
+            </div>
+            <div class="modal-path" id="folder-modal-path"></div>
+            <div class="modal-list" id="folder-modal-list">
+                <!-- Populated dynamically -->
+            </div>
+            <div class="modal-footer">
+                <button id="folder-modal-cancel" class="btn btn-sm">Cancel</button>
+                <button id="folder-modal-select" class="btn btn-primary btn-sm">Select this folder</button>
+            </div>
+        </div>
+    </div>
 
     <!-- Main app script -->
     <script type="module" src="/static/js/app.js"></script>

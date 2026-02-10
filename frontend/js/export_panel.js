@@ -49,9 +49,8 @@ export class ExportPanel {
         this._currentAsset = asset;
         this._controls.style.display = "flex";
         this._nameInput.value = asset.name;
-        if (!this._pathInput.value) {
-            this._pathInput.value = currentBrowsePath || "";
-        }
+        // Always pre-fill with the source directory
+        this._pathInput.value = currentBrowsePath || "";
     }
 
     /** Hide the export controls */

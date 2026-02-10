@@ -90,6 +90,20 @@ class App {
             this._showToast("Model oriented (Y = up)", "info");
         });
 
+        // --- Rotation buttons ---
+        document.querySelectorAll(".rot-btn").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                const axis = btn.dataset.axis;
+                const angle = parseInt(btn.dataset.angle, 10);
+                this._viewer.rotateModel(axis, angle);
+                const sign = angle > 0 ? "+" : "";
+                this._showToast(`Rotated ${sign}${angle}° around ${axis.toUpperCase()}`, "info");
+            });
+        });
+
+        // --- Export folder browse button ---
+        this._initFolderModal();
+
         // --- Bind Navigation Buttons ---
         this._elements.btnGoUp.addEventListener("click", () => {
             this._fileBrowser.goUp();
@@ -483,6 +497,84 @@ class App {
     /**
      * Initialize sidebar resize drag behavior.
      */
+    /**
+     * Initialize the folder picker modal for the export path.
+     */
+    _initFolderModal() {
+        const modal = document.getElementById("folder-modal");
+        const pathDisplay = document.getElementById("folder-modal-path");
+        const listContainer = document.getElementById("folder-modal-list");
+        const btnSelect = document.getElementById("folder-modal-select");
+        const btnCancel = document.getElementById("folder-modal-cancel");
+        const btnClose = document.getElementById("folder-modal-close");
+        const btnBrowse = document.getElementById("btn-browse-export");
+        const pathInput = document.getElementById("export-path-input");
+
+        let currentModalPath = "";
+
+        const openModal = () => {
+            currentModalPath = pathInput.value || this._fileBrowser.currentPath || "";
+            modal.style.display = "flex";
+            loadFolder(currentModalPath);
+        };
+
+        const closeModal = () => {
+            modal.style.display = "none";
+        };
+
+        const loadFolder = async (path) => {
+            try {
+                const url = path
+                    ? `/api/browse?path=${encodeURIComponent(path)}`
+                    : "/api/browse";
+                const resp = await fetch(url);
+                if (!resp.ok) throw new Error("Failed to browse");
+                const data = await resp.json();
+
+                currentModalPath = data.current_path;
+                pathDisplay.textContent = currentModalPath;
+
+                listContainer.innerHTML = "";
+
+                // Go up item
+                if (data.parent_path) {
+                    const upItem = document.createElement("div");
+                    upItem.className = "modal-folder-item go-up";
+                    upItem.innerHTML = `<span class="folder-icon">◀</span> ..`;
+                    upItem.addEventListener("click", () => loadFolder(data.parent_path));
+                    listContainer.appendChild(upItem);
+                }
+
+                // Folder items
+                for (const folder of data.folders) {
+                    const item = document.createElement("div");
+                    item.className = "modal-folder-item";
+                    item.innerHTML = `<span class="folder-icon">📁</span> ${folder.name}`;
+                    item.addEventListener("click", () => loadFolder(folder.path));
+                    listContainer.appendChild(item);
+                }
+
+                if (!data.parent_path && data.folders.length === 0) {
+                    listContainer.innerHTML = '<div class="empty-state">No accessible folders</div>';
+                }
+            } catch (err) {
+                listContainer.innerHTML = `<div class="empty-state">Error: ${err.message}</div>`;
+            }
+        };
+
+        btnBrowse.addEventListener("click", openModal);
+        btnCancel.addEventListener("click", closeModal);
+        btnClose.addEventListener("click", closeModal);
+        modal.addEventListener("click", (e) => {
+            if (e.target === modal) closeModal();
+        });
+
+        btnSelect.addEventListener("click", () => {
+            pathInput.value = currentModalPath;
+            closeModal();
+        });
+    }
+
     _initSidebarResize() {
         const handle = this._elements.sidebarResize;
         const sidebar = this._elements.sidebar;
