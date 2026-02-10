@@ -436,6 +436,27 @@ export class FileBrowser {
             this._startInlineRename(event.target.closest(".file-item, .asset-card"), filePath, displayName);
         });
 
+        // --- Duplicate ---
+        this._addContextMenuItem(menu, "Duplicate", async () => {
+            try {
+                const resp = await fetch("/api/duplicate", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ path: filePath }),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    this._onStatusUpdate(`Duplicate failed: ${err.detail}`);
+                } else {
+                    const result = await resp.json();
+                    this._onStatusUpdate(`Duplicated to ${result.new_path.split("/").pop()}`);
+                    this.browse(this._currentPath);
+                }
+            } catch (err) {
+                this._onStatusUpdate(`Duplicate failed: ${err.message}`);
+            }
+        });
+
         // Separator
         const sep = document.createElement("div");
         sep.className = "context-menu-sep";

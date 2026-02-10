@@ -30,15 +30,8 @@ export class ExportPanel {
 
         this._currentAsset = null;
 
-        this._exportBtn.addEventListener("click", () => this._onExport());
-
-        // Enter key in inputs triggers export
-        this._nameInput.addEventListener("keydown", (e) => {
-            if (e.key === "Enter") this._onExport();
-        });
-        this._pathInput.addEventListener("keydown", (e) => {
-            if (e.key === "Enter") this._onExport();
-        });
+        // Note: Export button click is handled by the Save As modal in app.js.
+        // ExportPanel._onExport() is called programmatically by the modal's Save button.
     }
 
     /**

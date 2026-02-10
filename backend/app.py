@@ -388,6 +388,11 @@ class DeleteRequest(BaseModel):
     path: str
 
 
+class DuplicateRequest(BaseModel):
+    """Request body for duplicating a file."""
+    path: str
+
+
 @app.post("/api/reveal")
 async def reveal_in_file_manager(request: RevealRequest):
     """
@@ -462,6 +467,36 @@ async def delete_file(request: DeleteRequest):
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
+
+
+@app.post("/api/duplicate")
+async def duplicate_file(request: DuplicateRequest):
+    """
+    Duplicate a file. Creates a copy named <stem>_copy<ext> in the same directory.
+    If that name exists, appends _copy2, _copy3, etc.
+    """
+    import shutil
+    file_path = Path(request.path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"Not found: {request.path}")
+    if not file_path.is_file():
+        raise HTTPException(status_code=400, detail="Can only duplicate files")
+
+    # Generate a unique copy name
+    stem = file_path.stem
+    ext = file_path.suffix
+    parent = file_path.parent
+    new_path = parent / f"{stem}_copy{ext}"
+    counter = 2
+    while new_path.exists():
+        new_path = parent / f"{stem}_copy{counter}{ext}"
+        counter += 1
+
+    try:
+        shutil.copy2(str(file_path), str(new_path))
+        return {"success": True, "new_path": str(new_path)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Duplicate failed: {e}")
 
 
 @app.get("/api/default_path")
