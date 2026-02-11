@@ -179,6 +179,7 @@ class App {
         try {
             let url;
             let relatedFiles = asset.related_files || [];
+            let sourcePath = asset.path;
 
             // The actual format to load (may differ if FBX was auto-converted to OBJ)
             let loadExtension = asset.extension;
@@ -200,6 +201,7 @@ class App {
                 url = prepared.file_url;
                 // Use the resolved temp paths instead of archive-internal paths
                 relatedFiles = prepared.related_files || [];
+                sourcePath = prepared.file_path || asset.path;
                 // Use actual extension (may be .obj if FBX was auto-converted)
                 if (prepared.actual_extension) {
                     loadExtension = prepared.actual_extension;
@@ -220,7 +222,7 @@ class App {
             }
 
             // Prepare options for the viewer
-            const options = { relatedFiles };
+            const options = { relatedFiles, sourcePath };
 
             // Load the model (use loadExtension which may differ from original
             // if backend auto-converted an old FBX to OBJ)
@@ -1073,6 +1075,29 @@ class App {
         // Enter in name input triggers save
         nameInput.addEventListener("keydown", (e) => {
             if (e.key === "Enter") btnSave.click();
+        });
+
+        // Global Save shortcut: Ctrl+S / Cmd+S
+        // - If modal is closed: open Save dialog with prefilled values.
+        // - If modal is open: trigger save immediately.
+        document.addEventListener("keydown", (e) => {
+            const isSaveKey = (e.key === "s" || e.key === "S");
+            if (!isSaveKey || (!e.ctrlKey && !e.metaKey) || e.altKey) return;
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            if (!this._exportPanel._currentAsset) {
+                this._showToast("No asset selected", "error");
+                return;
+            }
+
+            const modalOpen = modal.style.display !== "none";
+            if (modalOpen) {
+                btnSave.click();
+            } else {
+                openModal();
+            }
         });
     }
 

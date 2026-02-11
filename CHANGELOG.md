@@ -31,6 +31,11 @@ MeshVault is a local tool for 3D artists and game developers to browse, preview,
 - FBX preview stabilization: normalize near-black textured multipliers, clamp extreme metalness without IBL, and sanitize accidental ultra-low opacity materials
 - FBX fallback texture binding: when FBX files omit texture links, MeshVault now auto-binds related extracted textures by naming conventions (`_d`, `_n`, `_ao`, etc.)
 - Robust texture fallback upgraded: per-material scoring, numeric token matching (`01` ↔ `1`), OpenGL-vs-DirectX normal preference, and native TGA loading support
+- FBX resource resolver now maps relative/absolute texture references to `/api/asset/related` using source file path, fixing wrong requests like `/api/asset/*.jpg`
+- Missing/broken texture references are now sanitized before shading fallback so dark materials are still made readable
+- Fixed FBX regression: internal model URL (`/api/asset/file?...`) is no longer rewritten to `/api/asset/related`, preventing load failures
+- FBX fallback now detects likely non-color diffuse assignments (e.g. gloss/spec `_g`) and can rebind to better color maps when available
+- Emissive textures are now classified/bound in fallback and preserved during legacy material → PBR upgrade
 
 ### Model Transforms
 - Reload, reset (geometry snapshot restore), center, ground, PCA auto-orient, rotate ±90° per axis
@@ -57,6 +62,7 @@ MeshVault is a local tool for 3D artists and game developers to browse, preview,
 - Scale slider 0.05×–5.0×
 - Resizable sidebar, GitHub link, author credit
 - Material inspector now closes on outside click (while remaining draggable)
+- Save shortcut: `Ctrl+S` / `Cmd+S` opens Save dialog (or confirms save if already open), exporting modified geometry when applicable
 
 ### Backend
 - FastAPI with 14 REST endpoints
@@ -68,6 +74,7 @@ MeshVault is a local tool for 3D artists and game developers to browse, preview,
 - Archive-served assets now use no-cache headers and versioned file URLs to prevent stale browser payloads
 - Archive related-file matching now uses strict stem token matching (avoids false links like `asteroid_1` → `asteroid_10`)
 - Archive related-file discovery now includes robust fallback to shared texture directories (`images/`, `sourceimages/`, etc.) for packs that separate scenes and textures
+- Direct FBX browse now includes nearby texture candidates (same folder + common texture subfolders) to recover broken absolute texture links via basename matching
 
 ### Developer Experience
 - Zero frontend build step (ES modules, Three.js CDN)

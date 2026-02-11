@@ -82,7 +82,8 @@ export class Viewer3D {
      * @param {string} extension - File extension (.obj, .fbx)
      * @param {object} options - Additional loading options
      * @param {string[]} options.relatedFiles - Related file paths
-     * @param {string} options.basePath - Base path for resolving relative files
+     * @param {string} options.sourcePath - Absolute source file path for resolving
+     *                                     relative resource references
      * @returns {Promise<{vertices: number, faces: number}>}
      */
     async loadModel(url, extension, options = {}) {
@@ -910,27 +911,34 @@ export class Viewer3D {
             // textures are extracted to a temp directory.
             const manager = new THREE.LoadingManager();
             const relatedFiles = options.relatedFiles || [];
+            const sourcePath = options.sourcePath || null;
 
-            if (relatedFiles.length > 0) {
-                // Build a map of filename → API URL for texture resolution
-                const textureMap = {};
-                for (const f of relatedFiles) {
-                    const filename = f.split("/").pop().split("\\").pop();
-                    textureMap[filename.toLowerCase()] = `/api/asset/related?path=${encodeURIComponent(f)}`;
+            // Build filename -> absolute path map from extracted related files.
+            const textureMap = {};
+            for (const f of relatedFiles) {
+                if (!this._isTextureFilePath(f)) continue;
+                const filename = f.split("/").pop().split("\\").pop().toLowerCase();
+                if (!(filename in textureMap)) {
+                    textureMap[filename] = f;
                 }
-
-                manager.setURLModifier((resourceUrl) => {
-                    // Extract filename from the URL the FBX loader wants
-                    const filename = resourceUrl.split("/").pop().split("\\").pop().split("?")[0];
-                    const match = textureMap[filename.toLowerCase()];
-                    if (match) {
-                        return match;
-                    }
-                    // If not in our map, try serving via related endpoint
-                    // (the URL might be a relative path from the FBX)
-                    return resourceUrl;
-                });
             }
+
+            // Always install URL resolver for FBX resources.
+            // This handles:
+            // 1) Archive-related files (from relatedFiles map)
+            // 2) Direct FBX files using relative texture paths next to sourcePath
+            // 3) Absolute filesystem paths embedded in FBX
+            manager.setURLModifier((resourceUrl) => {
+                const resolvedPath = this._resolveFBXResourcePath(
+                    resourceUrl,
+                    sourcePath,
+                    textureMap
+                );
+                if (resolvedPath) {
+                    return `/api/asset/related?path=${encodeURIComponent(resolvedPath)}`;
+                }
+                return resourceUrl;
+            });
 
             const loader = new FBXLoader(manager);
             loader.load(
@@ -971,6 +979,102 @@ export class Viewer3D {
     }
 
     /**
+     * Resolve an FBX-referenced resource URL to an absolute filesystem path.
+     * Returns null when the URL should not be rewritten.
+     */
+    _resolveFBXResourcePath(resourceUrl, sourcePath, textureMap) {
+        if (!resourceUrl) return null;
+        const trimmed = String(resourceUrl).trim();
+        if (!trimmed) return null;
+
+        // Ignore external/data URLs.
+        if (/^(data:|blob:|https?:\/\/)/i.test(trimmed)) return null;
+
+        // Already resolved through our API, or the main model URL itself.
+        if (
+            trimmed.startsWith("/api/asset/related?") ||
+            trimmed.startsWith("/api/asset/file?")
+        ) {
+            return null;
+        }
+
+        let clean = trimmed.split("?")[0].split("#")[0];
+
+        // Malformed FBX refs sometimes come as "/api/asset/<filename>".
+        // Keep /api/asset/file and /api/asset/related untouched, but salvage
+        // bare "/api/asset/<name>" by stripping the prefix and resolving it.
+        if (clean.startsWith("/api/asset/")) {
+            if (
+                clean.startsWith("/api/asset/file") ||
+                clean.startsWith("/api/asset/related")
+            ) {
+                return null;
+            }
+            clean = clean.slice("/api/asset/".length);
+        } else if (clean.startsWith("/api/")) {
+            return null;
+        }
+        const filename = clean.split("/").pop().split("\\").pop();
+        if (filename) {
+            const match = textureMap[filename.toLowerCase()];
+            if (match) return this._normalizeFsPath(match);
+        }
+
+        // Absolute filesystem path embedded in FBX.
+        if (/^[a-zA-Z]:[\\/]/.test(clean) || clean.startsWith("/")) {
+            return this._normalizeFsPath(clean);
+        }
+
+        // Relative path from source FBX directory.
+        if (sourcePath) {
+            const sourceNorm = this._normalizeFsPath(sourcePath);
+            const idx = sourceNorm.lastIndexOf("/");
+            const baseDir = idx >= 0 ? sourceNorm.slice(0, idx) : "";
+            if (baseDir) {
+                return this._resolveRelativeFsPath(baseDir, clean);
+            }
+        }
+
+        return null;
+    }
+
+    _normalizeFsPath(path) {
+        const raw = String(path).replace(/\\/g, "/");
+        const isUnixAbs = raw.startsWith("/");
+
+        const out = [];
+        const parts = raw.split("/");
+        for (let i = 0; i < parts.length; i++) {
+            const part = parts[i];
+            if (!part || part === ".") {
+                if (i === 0 && isUnixAbs) out.push("");
+                continue;
+            }
+            if (part === "..") {
+                if (
+                    out.length > 0 &&
+                    out[out.length - 1] !== "" &&
+                    out[out.length - 1] !== ".."
+                ) {
+                    out.pop();
+                }
+                continue;
+            }
+            out.push(part);
+        }
+        if (isUnixAbs && out[0] !== "") out.unshift("");
+        return out.join("/");
+    }
+
+    _resolveRelativeFsPath(baseDir, relPath) {
+        const rel = String(relPath).replace(/\\/g, "/");
+        if (/^[a-zA-Z]:[\\/]/.test(relPath) || rel.startsWith("/")) {
+            return this._normalizeFsPath(rel);
+        }
+        return this._normalizeFsPath(`${baseDir}/${rel}`);
+    }
+
+    /**
      * Auto-bind textures for FBX files when texture links are missing.
      *
      * Robust logic:
@@ -1005,10 +1109,13 @@ export class Viewer3D {
         for (const mat of materials) {
             const matName = mat.name || "";
             let changed = false;
+            this._sanitizeMaterialTextureSlots(mat);
 
             const pick = (slot) => this._pickBestTextureEntry(textureEntries, matName, slot);
 
-            if (!mat.map) {
+            const currentMapName = this._extractTextureFilename(mat.map);
+            const mapLooksWrong = this._isLikelyNonColorTextureName(currentMapName);
+            if (!this._isUsableTexture(mat.map) || mapLooksWrong) {
                 const entry = pick("map");
                 const tex = await this._loadTextureFromAbsPath(
                     entry?.path,
@@ -1016,12 +1123,15 @@ export class Viewer3D {
                     textureCache
                 );
                 if (tex) {
-                    mat.map = tex;
-                    changed = true;
+                    // Avoid replacing with the same likely-wrong file.
+                    if (!(mapLooksWrong && currentMapName && entry?.fileLower === currentMapName)) {
+                        mat.map = tex;
+                        changed = true;
+                    }
                 }
             }
 
-            if (!mat.normalMap) {
+            if (!this._isUsableTexture(mat.normalMap)) {
                 const entry = pick("normalMap");
                 const tex = await this._loadTextureFromAbsPath(
                     entry?.path,
@@ -1038,7 +1148,7 @@ export class Viewer3D {
                 }
             }
 
-            if (!mat.aoMap) {
+            if (!this._isUsableTexture(mat.aoMap)) {
                 const entry = pick("aoMap");
                 const tex = await this._loadTextureFromAbsPath(
                     entry?.path,
@@ -1053,7 +1163,7 @@ export class Viewer3D {
                 }
             }
 
-            if (mat.roughness !== undefined && !mat.roughnessMap) {
+            if (mat.roughness !== undefined && !this._isUsableTexture(mat.roughnessMap)) {
                 const entry = pick("roughnessMap");
                 const tex = await this._loadTextureFromAbsPath(
                     entry?.path,
@@ -1067,7 +1177,7 @@ export class Viewer3D {
                 }
             }
 
-            if (mat.metalness !== undefined && !mat.metalnessMap) {
+            if (mat.metalness !== undefined && !this._isUsableTexture(mat.metalnessMap)) {
                 const entry = pick("metalnessMap");
                 const tex = await this._loadTextureFromAbsPath(
                     entry?.path,
@@ -1081,7 +1191,7 @@ export class Viewer3D {
                 }
             }
 
-            if (!mat.bumpMap) {
+            if (!this._isUsableTexture(mat.bumpMap)) {
                 const entry = pick("bumpMap");
                 const tex = await this._loadTextureFromAbsPath(
                     entry?.path,
@@ -1091,6 +1201,25 @@ export class Viewer3D {
                 if (tex) {
                     mat.bumpMap = tex;
                     mat.bumpScale = 0.05;
+                    changed = true;
+                }
+            }
+
+            if (!this._isUsableTexture(mat.emissiveMap)) {
+                const entry = pick("emissiveMap");
+                const tex = await this._loadTextureFromAbsPath(
+                    entry?.path,
+                    THREE.SRGBColorSpace,
+                    textureCache
+                );
+                if (tex) {
+                    mat.emissiveMap = tex;
+                    if (mat.emissive && this._isVeryDark(mat.emissive)) {
+                        mat.emissive.set(0xffffff);
+                    }
+                    if (mat.emissiveIntensity !== undefined) {
+                        mat.emissiveIntensity = Math.max(mat.emissiveIntensity, 1.0);
+                    }
                     changed = true;
                 }
             }
@@ -1112,6 +1241,72 @@ export class Viewer3D {
         }
 
         return applied;
+    }
+
+    _isUsableTexture(tex) {
+        if (!tex || !tex.isTexture) return false;
+        const img = tex.image || tex.source?.data || null;
+        if (!img) return false;
+        if (
+            typeof img.width === "number" &&
+            typeof img.height === "number" &&
+            (img.width === 0 || img.height === 0)
+        ) {
+            return false;
+        }
+        return true;
+    }
+
+    _extractTextureFilename(tex) {
+        if (!tex || !tex.isTexture) return "";
+        const img = tex.image || tex.source?.data || null;
+        const src = img?.currentSrc || img?.src || "";
+        if (!src) return "";
+        try {
+            let raw = String(src);
+            if (raw.includes("/api/asset/related?")) {
+                const m = raw.match(/[?&]path=([^&]+)/);
+                if (m && m[1]) {
+                    raw = decodeURIComponent(m[1]);
+                }
+            }
+            raw = raw.split("?")[0].split("#")[0];
+            return raw.split("/").pop().split("\\").pop().toLowerCase();
+        } catch {
+            return "";
+        }
+    }
+
+    _isLikelyNonColorTextureName(name) {
+        if (!name) return false;
+        const stem = String(name).toLowerCase().replace(/\.[^.]+$/, "");
+        return /(^|[_\-\s])(normal|nrm|nor|rough|roughness|metal|metallic|ao|occlusion|height|disp|displacement|bump|spec|specular|gloss|glossiness|emissive|emission|mask|alpha|opacity|id|wire|g|s)([_\-\s]|$)/.test(stem);
+    }
+
+    _sanitizeMaterialTextureSlots(material) {
+        if (!material) return false;
+        const textureSlots = [
+            "map",
+            "normalMap",
+            "aoMap",
+            "roughnessMap",
+            "metalnessMap",
+            "bumpMap",
+            "emissiveMap",
+            "alphaMap",
+        ];
+        let changed = false;
+        for (const slot of textureSlots) {
+            const tex = material[slot];
+            if (tex && tex.isTexture && !this._isUsableTexture(tex)) {
+                material[slot] = null;
+                changed = true;
+            }
+        }
+        if (changed) {
+            material.needsUpdate = true;
+        }
+        return changed;
     }
 
     _isTextureFilePath(path) {
@@ -1203,8 +1398,11 @@ export class Viewer3D {
 
         // Avoid obviously wrong diffuse picks.
         if (targetSlot === "map") {
-            if (/(wire|mask|id|height|normal|rough|metal|ao|occlusion)/.test(entry.stemLower)) {
-                score -= 18;
+            if (/(diffuse|albedo|basecolor|base_color|color|col)/.test(entry.stemLower)) {
+                score += 20;
+            }
+            if (this._isLikelyNonColorTextureName(entry.fileLower)) {
+                score -= 35;
             }
         }
 
@@ -1291,7 +1489,10 @@ export class Viewer3D {
         if (/(^|[_\-\s])(ao|occlusion|ambientocclusion)([_\-\s]|$)/.test(stem)) {
             return "aoMap";
         }
-        if (/(^|[_\-\s])(rough|roughness|rgh)([_\-\s]|$)/.test(stem)) {
+        if (/(^|[_\-\s])(emissive|emission|emit|glow)([_\-\s]|$)/.test(stem)) {
+            return "emissiveMap";
+        }
+        if (/(^|[_\-\s])(rough|roughness|rgh|gloss|glossiness|spec|specular|g|s)([_\-\s]|$)/.test(stem)) {
             return "roughnessMap";
         }
         if (/(^|[_\-\s])(metal|metallic|mtl|met)([_\-\s]|$)/.test(stem)) {
@@ -1442,6 +1643,8 @@ export class Viewer3D {
      * Preserves existing textures and colors.
      */
     _upgradeMaterial(material) {
+        this._sanitizeMaterialTextureSlots(material);
+
         // Skip if already a standard/physical material
         if (
             material.isMeshStandardMaterial ||
@@ -1468,10 +1671,20 @@ export class Viewer3D {
         };
 
         // Preserve textures if any
-        if (material.map) params.map = material.map;
-        if (material.normalMap) params.normalMap = material.normalMap;
-        if (material.bumpMap) params.bumpMap = material.bumpMap;
-        if (material.alphaMap) params.alphaMap = material.alphaMap;
+        if (this._isUsableTexture(material.map)) params.map = material.map;
+        if (this._isUsableTexture(material.normalMap)) params.normalMap = material.normalMap;
+        if (this._isUsableTexture(material.bumpMap)) params.bumpMap = material.bumpMap;
+        if (this._isUsableTexture(material.alphaMap)) params.alphaMap = material.alphaMap;
+        if (material.emissive) params.emissive = material.emissive.clone();
+        if (this._isUsableTexture(material.emissiveMap)) {
+            params.emissiveMap = material.emissiveMap;
+            if (!params.emissive || this._isVeryDark(params.emissive)) {
+                params.emissive = new THREE.Color(0xffffff);
+            }
+            params.emissiveIntensity = material.emissiveIntensity !== undefined
+                ? Math.max(material.emissiveIntensity, 1.0)
+                : 1.0;
+        }
         if (material.transparent) params.transparent = true;
         if (material.opacity !== undefined) params.opacity = material.opacity;
 
@@ -1519,6 +1732,7 @@ export class Viewer3D {
      */
     _fixDarkColor(material) {
         let changed = false;
+        this._sanitizeMaterialTextureSlots(material);
 
         // Some FBX exports set transparent=true with very low opacity even for
         // opaque meshes. In a preview viewer this makes assets nearly invisible.
@@ -1536,20 +1750,30 @@ export class Viewer3D {
             material.roughness !== undefined &&
             !material.envMap
         ) {
-            if (!material.metalnessMap && material.metalness > 0.75) {
-                material.metalness = material.map ? 0.35 : 0.15;
+            const hasMetalnessMap = this._isUsableTexture(material.metalnessMap);
+            const hasRoughnessMap = this._isUsableTexture(material.roughnessMap);
+            const hasColorMap = this._isUsableTexture(material.map);
+
+            // In preview mode without IBL, aggressively metallic materials can
+            // collapse to near-black. Keep a conservative metallic response.
+            if (!hasMetalnessMap && material.metalness > 0.5) {
+                material.metalness = hasColorMap ? 0.25 : 0.12;
                 changed = true;
             }
-            if (!material.roughnessMap && material.roughness < 0.25) {
-                material.roughness = 0.45;
+
+            // Also avoid ultra-smooth surfaces that look black/mirror-like under
+            // missing or partial texture setups.
+            if (!hasRoughnessMap && material.roughness < 0.45) {
+                material.roughness = hasColorMap ? 0.5 : 0.6;
                 changed = true;
             }
         }
 
         if (material.color) {
             const lum = material.color.r * 0.299 + material.color.g * 0.587 + material.color.b * 0.114;
+            const hasColorMap = this._isUsableTexture(material.map);
 
-            if (material.map) {
+            if (hasColorMap) {
                 // Textured materials should usually use a neutral (white)
                 // diffuse multiplier. Near-black multipliers crush textures.
                 if (lum < 0.25) {
@@ -1561,9 +1785,9 @@ export class Viewer3D {
                     // Boost to a visible neutral gray
                     material.color.set(0x808080);
                     changed = true;
-                } else if (lum < 0.3) {
+                } else if (lum < 0.35) {
                     // Slightly dark — brighten proportionally
-                    const boost = 0.3 / lum;
+                    const boost = 0.4 / lum;
                     material.color.r = Math.min(1, material.color.r * boost);
                     material.color.g = Math.min(1, material.color.g * boost);
                     material.color.b = Math.min(1, material.color.b * boost);
