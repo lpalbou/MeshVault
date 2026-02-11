@@ -531,6 +531,24 @@ html, body {
     color: var(--text-muted);
 }
 
+/* --- Sort Select --- */
+.sort-select {
+    height: 26px;
+    padding: 0 4px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-family: var(--font-family);
+    outline: none;
+    cursor: pointer;
+}
+
+.sort-select:focus {
+    border-color: var(--accent-primary);
+}
+
 .path-bar {
     display: flex;
     align-items: center;

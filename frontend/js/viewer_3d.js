@@ -1822,15 +1822,6 @@ export class Viewer3D {
         return stats.vertices;
     }
 
-    /**
-     * Simplify the model geometry to a target vertex count.
-     *
-     * Uses Three.js SimplifyModifier (edge collapse decimation).
-     * Preserves UVs and material assignments. Recomputes normals after.
-     *
-     * @param {number} targetRatio - Target ratio (0.0–1.0) of vertices to keep
-     * @returns {{ before: number, after: number }} Vertex counts before/after
-     */
     simplifyModel(targetRatio) {
         if (!this._currentModel) return { before: 0, after: 0 };
 

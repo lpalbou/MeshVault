@@ -115,8 +115,12 @@ class App {
 
         // --- Recompute normals ---
         document.getElementById("btn-recompute-normals").addEventListener("click", () => {
-            this._viewer.recomputeNormals();
-            this._showToast("Normals recomputed", "info");
+            const hide = this._showProcessing("Recomputing normals…");
+            setTimeout(() => {
+                this._viewer.recomputeNormals();
+                hide();
+                this._showToast("Normals recomputed", "info");
+            }, 50);
         });
 
         // --- Export (Save As) modal ---
@@ -135,6 +139,7 @@ class App {
 
         // --- Sidebar Controls ---
         this._initSearchFilter();
+        this._initSortSelect();
         this._initViewModeToggle();
 
         // --- Viewer Toolbar ---
@@ -271,6 +276,21 @@ class App {
     }
 
     /**
+     * Show the full-screen loading overlay with a custom message.
+     * Returns a function to hide it.
+     */
+    _showProcessing(message) {
+        const overlay = this._elements.loadingOverlay;
+        const msgEl = document.getElementById("loading-message");
+        msgEl.textContent = message;
+        overlay.style.display = "flex";
+        return () => {
+            overlay.style.display = "none";
+            msgEl.textContent = "Loading asset...";
+        };
+    }
+
+    /**
      * Format file size for display.
      */
     _formatSize(bytes) {
@@ -285,6 +305,18 @@ class App {
     _initSearchFilter() {
         const input = document.getElementById("search-filter");
         this._fileBrowser.setFilterInput(input);
+    }
+
+    /**
+     * Initialize the sort selector.
+     */
+    _initSortSelect() {
+        const select = document.getElementById("sort-select");
+        // Restore saved preference
+        select.value = this._fileBrowser.getSortMode();
+        select.addEventListener("change", () => {
+            this._fileBrowser.setSortMode(select.value);
+        });
     }
 
     /**
@@ -488,11 +520,11 @@ class App {
         btnApply.addEventListener("click", () => {
             const ratio = parseInt(slider.value, 10) / 100;
             closePopover();
-            this._showToast("Simplifying mesh...", "info");
+            const hideProcessing = this._showProcessing("Simplifying mesh…");
 
-            // Use setTimeout to let the toast render before heavy computation
             setTimeout(() => {
                 const result = this._viewer.simplifyModel(ratio);
+                hideProcessing();
                 this._showToast(
                     `Simplified: ${result.before.toLocaleString()} → ${result.after.toLocaleString()} vertices`,
                     "success"

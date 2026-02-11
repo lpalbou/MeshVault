@@ -170,6 +170,13 @@
                 <div class="sidebar-title-row">
                     <h2>Files</h2>
                     <div class="sidebar-actions">
+                        <select id="sort-select" class="sort-select" title="Sort files">
+                            <option value="name">A–Z</option>
+                            <option value="name-desc">Z–A</option>
+                            <option value="size">Size ↑</option>
+                            <option value="size-desc">Size ↓</option>
+                            <option value="type">Type</option>
+                        </select>
                         <button id="btn-view-list" class="btn btn-icon btn-xs active" title="List view">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
@@ -228,7 +235,7 @@
             <!-- Loading overlay -->
             <div id="loading-overlay" style="display: none;">
                 <div class="spinner"></div>
-                <p>Loading asset...</p>
+                <p id="loading-message">Loading asset...</p>
             </div>
             <!-- Viewer toolbar (top-right) -->
             <div id="viewer-toolbar">

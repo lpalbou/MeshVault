@@ -69,6 +69,8 @@ export class FileBrowser {
         this._currentAssets = [];
         // View mode: 'list' or 'grid'
         this._viewMode = localStorage.getItem("meshvault_viewMode") || "list";
+        // Sort mode
+        this._sortMode = localStorage.getItem("meshvault_sortMode") || "name";
         // Current search filter
         this._filterText = "";
 
@@ -156,6 +158,52 @@ export class FileBrowser {
         }
     }
 
+    /** Set the sort mode and re-render. */
+    setSortMode(mode) {
+        this._sortMode = mode;
+        localStorage.setItem("meshvault_sortMode", mode);
+        this._renderFiltered();
+    }
+
+    /** Get the current sort mode. */
+    getSortMode() {
+        return this._sortMode;
+    }
+
+    /**
+     * Sort arrays of folders and assets based on the current sort mode.
+     */
+    _applySorting(folders, assets) {
+        const mode = this._sortMode;
+
+        // Folders: always sorted by name (asc or desc)
+        const nameDir = mode === "name-desc" ? -1 : 1;
+        folders.sort((a, b) => nameDir * a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+
+        // Assets: sort by the selected criterion
+        switch (mode) {
+            case "name":
+                assets.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+                break;
+            case "name-desc":
+                assets.sort((a, b) => b.name.localeCompare(a.name, undefined, { sensitivity: "base" }));
+                break;
+            case "size":
+                assets.sort((a, b) => a.size - b.size);
+                break;
+            case "size-desc":
+                assets.sort((a, b) => b.size - a.size);
+                break;
+            case "type":
+                assets.sort((a, b) => a.extension.localeCompare(b.extension) || a.name.localeCompare(b.name));
+                break;
+            default:
+                break;
+        }
+
+        return { folders, assets };
+    }
+
     /**
      * Set a reference to the filter input element (called by App after DOM init).
      */
@@ -184,8 +232,8 @@ export class FileBrowser {
      */
     _renderFiltered() {
         const filter = this._filterText;
-        let folders = this._currentFolders;
-        let assets = this._currentAssets;
+        let folders = [...this._currentFolders];
+        let assets = [...this._currentAssets];
 
         if (filter) {
             folders = folders.filter((f) =>
@@ -196,7 +244,9 @@ export class FileBrowser {
             );
         }
 
-        this._render(folders, assets);
+        // Apply sorting
+        const sorted = this._applySorting(folders, assets);
+        this._render(sorted.folders, sorted.assets);
     }
 
     /**

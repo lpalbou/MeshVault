@@ -1,179 +1,136 @@
 # FAQ
 
-Frequently asked questions, troubleshooting tips, and common issues.
-
 ---
 
-## General
+## Formats
 
 ### What 3D formats are supported?
 
-- **`.obj`** (Wavefront OBJ) — with `.mtl` materials and textures
-- **`.fbx`** (Autodesk FBX) — version 7000+ natively, version < 7000 auto-converted to OBJ
-- **`.gltf`** / **`.glb`** (GL Transmission Format) — the modern standard
-- **`.stl`** (Stereolithography) — common in 3D printing workflows
+- **`.obj`** — with `.mtl` materials and textures
+- **`.fbx`** — version 7000+ natively, < 7000 auto-converted to OBJ
+- **`.gltf`** / **`.glb`** — GL Transmission Format
+- **`.stl`** — Stereolithography (3D printing)
 
-### What archive formats are supported?
+### What archives are supported?
 
-- **`.zip`** — Built-in support (Python `zipfile`)
-- **`.rar`** — Via multi-tool fallback: `bsdtar`, `unrar`, `7z`, `7za`, `unar` (auto-detected)
-
-### Can I browse any directory on my machine?
-
-Yes. The file browser starts at your home directory and can navigate anywhere your user has read access. Hidden files (starting with `.`) are excluded.
-
-### Is there network access or cloud functionality?
-
-No. MeshVault is a **purely local tool**. The backend serves on `localhost` only. No data leaves your machine (except Three.js loaded from CDN).
+- **`.zip`** — built-in
+- **`.rar`** — via `bsdtar`, `unrar`, `7z`, or `unar` (auto-detected)
 
 ---
 
-## Installation
-
-### I don't have Poetry installed
-
-```bash
-curl -sSL https://install.python-poetry.org | python3 -
-```
-
-Restart your terminal and verify with `poetry --version`.
-
-### RAR files are not being scanned
-
-Install at least one of: `bsdtar`, `unrar`, `7z`, or `unar`. See the [Getting Started](getting_started.md) guide for install commands per platform.
-
-### "Module not found" errors when starting
-
-Run inside the Poetry virtualenv:
-
-```bash
-poetry run meshvault
-# or
-poetry shell
-meshvault
-```
-
----
-
-## Usage
+## Navigation
 
 ### How do I navigate around the model?
 
-Two modes, toggled with the **orbit/FPV button** (top-right toolbar):
+Two modes (toggle in toolbar):
+- **Orbit**: Left-drag orbit, scroll zoom, right-drag pan, right-click set pivot
+- **FPV**: W/Shift forward, S/Ctrl backward, A/D yaw, arrows pitch, E/Q altitude, left-drag mouse look
 
-- **Orbit mode**: Left-drag to orbit, scroll to zoom, right-drag to pan. Right-click on model to set a new orbit pivot.
-- **FPV mode**: W/Shift forward, S/Ctrl backward, A/D yaw, arrows for pitch/yaw, E/Q altitude, left-drag for mouse look.
+**Spacebar** resets camera. Does not affect model.
 
-**Spacebar** resets the camera to the initial auto-framed position. It does NOT affect the model.
+### How do I toggle grid / axes / wireframe / normals?
 
-### How do I center or reorient a model?
+Toolbar buttons on the right side of the viewer. All settings persist when switching models.
 
-Use the **transform buttons** in the top bar:
+---
 
-| Button | Effect |
-|--------|--------|
-| **Reset** | Undo all transforms (restore original geometry) |
-| **Center** | Move model center to (0, 0, 0) |
-| **Ground** | Center X/Z, place lowest point at Y=0 |
-| **Orient** | PCA auto-orient (smallest variance axis → Y) |
+## Model Operations
 
-These modify the **model only** — the camera stays where it is.
+### How do I center or orient a model?
 
-### How do I toggle the grid / axes / wireframe?
+Use top bar buttons:
+- **Reload** — re-fetch from disk
+- **Reset** — undo all transforms
+- **Center** — bbox center → (0,0,0)
+- **Ground** — center X/Z, bottom at Y=0
+- **Orient** — PCA auto-orient (Y = up)
+- **X±/Y±/Z±** — rotate 90° per axis
 
-Use the **viewer toolbar** buttons (top-right, vertical stack):
+These modify geometry only — camera stays put.
 
-1. Orbit/FPV toggle
-2. **Grid** — floor grid that scales to model and adapts colors to background
-3. **Axes** — XYZ axis helper (X=red, Y=green, Z=blue) with labels
-4. **Wireframe** — toggle wireframe rendering on all meshes
-5. **Light (☀)** — collapsible lighting panel
+### How do I simplify a mesh?
 
-These settings **persist across model loads**.
+Click **Simplify** (diamond icon) → set target percentage → **Apply**. The modifier merges vertices first (for proper topology), then applies edge collapse decimation. A full-screen overlay shows during processing.
 
-### How do I adjust the lighting?
+### How do I fix faceted/flat shading?
 
-Click the **☀** button to open the light panel with sliders for key light direction, fill/ambient intensity, and exposure. Click **Reset** in the panel to restore defaults.
+Click the **Normals** button (starburst icon) in the toolbar. This merges vertices at the same position and recomputes smooth vertex normals. Note: UVs are lost (required for vertex merging across UV seams).
 
-### How do I change the background color?
+### What's the material inspector?
 
-Click any of the **12 color swatches** in the bottom-left of the viewer. Includes dark, gray, light, white, and tinted options. The grid adapts its colors to contrast with the background.
+Click the sphere icon in the toolbar. A draggable floating panel shows all materials on the model: name, color, roughness, metalness, opacity, texture presence, and which meshes use each material.
 
-### The model looks dark or flat
+---
 
-Try increasing the **Key Light** or **Exposure** in the light panel. Some models with dark vertex colors may need higher intensity. You can also try a lighter background.
+## File Management
 
-### OBJ file loads but has no textures
+### How do I rename / duplicate / delete files?
 
-The `.mtl` file must be in the same directory as the `.obj` and share the same stem name (e.g., `model.obj` + `model.mtl`).
+**Right-click** any file or folder in the sidebar:
+- **Show in file manager** — opens Finder/Explorer
+- **Rename** — inline editing directly on the filename
+- **Duplicate** — creates `name_copy.ext` in same folder
+- **Delete** — confirmation dialog, then removes
 
-### I get "FBX version not supported"
+### How do I sort files?
 
-MeshVault auto-converts old FBX (version < 7000) to OBJ. If you see this error, make sure you're on the latest version.
+Use the sort dropdown at the top of the sidebar: A–Z, Z–A, Size ↑, Size ↓, Type. Persists across sessions.
 
-### Can I view animated FBX / GLTF files?
+---
 
-Yes. Animations are auto-played via Three.js `AnimationMixer`.
+## Export
 
-### What happens when I export?
+### How does export work?
 
-- **Unmodified model**: Copies the original file(s) with the new name
-- **Modified model** (after Center/Ground/Orient/Scale): Exports as OBJ with all transforms baked into the vertices
-- **With related files**: Exported into a subfolder
-- Source files are **never modified or deleted**
+Click **Export** → **Save As** dialog opens:
+- Browse folders to select destination
+- Filename pre-filled with original name + extension
+- Modified models (centered/oriented/rotated/simplified) export as `.obj`
+- Unmodified models copy the original file(s)
+- File browser auto-refreshes after export
 
-### Can I export to a directory that doesn't exist?
+### What gets exported when the model is modified?
 
-Yes. MeshVault auto-creates the target directory.
+All transforms (center, ground, orient, rotate, scale, simplify, normals) are baked into the vertex positions. The result is saved as a clean `.obj` file via Three.js OBJExporter.
+
+---
+
+## Lighting & Background
+
+### How do I change the background?
+
+Click any of the **12 color swatches** (bottom-left). Grid line colors adapt automatically.
+
+### How do I adjust lighting?
+
+Click **☀** in the toolbar. Sliders for key light direction (H/V), per-light intensity, and exposure.
 
 ---
 
 ## Troubleshooting
 
-### Port 8420 is already in use
+### Port already in use
 
 ```bash
 PORT=9000 poetry run meshvault
 ```
 
-### "Access denied" error when browsing
+### Blank page
 
-Your user doesn't have read permissions for that directory.
+Check server is running, use `http` (not `https`), check F12 console, requires ES module import maps (Chrome 89+, Firefox 108+, Safari 16.4+).
 
-### The browser shows a blank page
+### Model loads slowly
 
-1. Check the server is running ("Uvicorn running on..." in terminal)
-2. Use `http://localhost:8420` (not `https`)
-3. Check browser console (F12) for JS errors
-4. Requires ES module import maps: Chrome 89+, Firefox 108+, Safari 16.4+, Edge 89+
-
-### Model takes a long time to load
-
-Large files (>50MB) may take seconds to transfer and parse. SSAO postprocessing can slow down on very complex models (>1M triangles).
+Large files (>50MB) need time. SSAO slows on >1M triangles. Simplify first.
 
 ---
 
 ## Development
 
-### Running tests
-
 ```bash
-poetry run pytest tests/ -v
+poetry run pytest tests/ -v        # Run tests
+# Swagger UI: http://localhost:8420/docs
+# ReDoc: http://localhost:8420/redoc
 ```
 
-### Auto-generated API docs
-
-- **Swagger UI**: http://localhost:8420/docs
-- **ReDoc**: http://localhost:8420/redoc
-
-### Frontend changes — no build step needed
-
-Edit any file in `frontend/` and refresh the browser. Three.js is loaded from CDN via import maps.
-
-### Adding a new 3D format
-
-1. Add extension to `SUPPORTED_3D_EXTENSIONS` in `file_browser.py` and `archive_inspector.py`
-2. Add a Three.js loader + method in `viewer_3d.js`
-3. Wire it in the `loadModel()` switch
-4. Register the MIME type in `app.py`
-5. Add badge color in CSS and icon in `file_browser.js`
+Frontend: no build step. Edit `frontend/` files, refresh browser.

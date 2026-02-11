@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the system design, component breakdown, and key design decisions of MeshVault.
+System design, component breakdown, and key design decisions of MeshVault.
 
 ---
 
@@ -9,16 +9,13 @@ This document describes the system design, component breakdown, and key design d
 ```
 ┌──────────────────────────────────┐
 │          Frontend (Browser)       │
-│                                   │
 │  ┌───────────┐  ┌──────────────┐ │
 │  │ File      │  │ Viewer3D     │ │
 │  │ Browser   │  │ (Three.js)   │ │
 │  └─────┬─────┘  └──────┬───────┘ │
-│        │               │         │
 │  ┌─────┴───────────────┴───────┐ │
 │  │       App.js (orchestrator) │ │
 │  └──────────────┬──────────────┘ │
-│                 │                 │
 │  ┌──────────────┴──────────────┐ │
 │  │     ExportPanel             │ │
 │  └─────────────────────────────┘ │
@@ -26,12 +23,10 @@ This document describes the system design, component breakdown, and key design d
                  │ HTTP (REST API)
 ┌────────────────┴─────────────────┐
 │          Backend (FastAPI)        │
-│                                   │
 │  ┌───────────┐  ┌──────────────┐ │
 │  │ File      │  │ Archive      │ │
 │  │ Browser   │  │ Inspector    │ │
 │  └───────────┘  └──────────────┘ │
-│                                   │
 │  ┌───────────┐  ┌──────────────┐ │
 │  │ Export    │  │ FBX          │ │
 │  │ Manager   │  │ Converter    │ │
@@ -43,74 +38,71 @@ This document describes the system design, component breakdown, and key design d
 
 ## Backend Components
 
-### `app.py` — FastAPI Server
+### `app.py` — FastAPI Server (12 endpoints)
 
-- REST API routes (browse, serve, prepare, export, export_modified)
-- Auto-convert old FBX (version < 7000) to OBJ before serving
-- Serve frontend static files and `index.html`
-- Application lifecycle (temp file cleanup on shutdown)
+- Browse, serve files, prepare archives, export (original + modified)
+- Reveal in file manager, rename, delete, duplicate
+- Auto-convert old FBX (< 7000) to OBJ
 
 ### `file_browser.py` — FileBrowser
 
-- List directory contents (folders + 3D assets: `.obj`, `.fbx`, `.gltf`, `.glb`, `.stl`)
-- Detect related files (`.mtl`, textures) for each asset
-- Delegate archive inspection to `ArchiveInspector`
-- Optional root path constraint for security
+- List directories + 3D assets (`.obj`, `.fbx`, `.gltf`, `.glb`, `.stl`)
+- Detect related files (`.mtl`, textures)
+- Optional root path constraint
 
 ### `archive_inspector.py` — ArchiveInspector
 
-- Inspect ZIP/RAR archives for 3D assets without full extraction
-- Multi-tool RAR fallback: `rarfile` → `bsdtar` → `unrar` → `7z` → `unar`
-- Extract on demand with temp directory management
-- Resolve archive-internal paths to extracted filesystem paths
+- ZIP/RAR inspection + multi-tool extraction fallback
+- `rarfile` → `bsdtar` → `unrar` → `7z` → `unar`
 
 ### `export_manager.py` — ExportManager
 
-- Copy/rename filesystem assets (single file or folder with derivatives)
-- Extract and rename archived assets
+- Copy/rename assets (single file or folder with derivatives)
 
 ### `fbx_converter.py` — FBX Converter
 
-- Parse FBX binary format (version 5000–6100)
-- Handle scalar properties (v6100) and array properties (v7000+)
-- Extract geometry (vertices, indices, normals, UVs) + convert to OBJ
+- Parse FBX binary (v5000–6100), extract geometry, convert to OBJ
 
 ---
 
 ## Frontend Components
 
-### `app.js` — Application Orchestrator
+### `app.js` — Orchestrator
 
-- Wire all components together (file browser, viewer, export panel)
-- Archive asset preparation (`/api/asset/prepare_archive`)
-- Toolbar: nav mode, grid, axes, wireframe, light panel, scale, background
-- Model transform buttons: reset, center, ground, orient
-- Search filter + grid/list view toggle
+- Wire all components: file browser, viewer, export panel
+- Toolbar: nav mode, grid, axes, wireframe, normals, materials, lights
+- Model transforms: reload, reset, center, ground, orient, rotate, simplify, normals
+- Save As modal with folder browser
+- Sort selector, search filter, grid/list toggle
+- Context menu (rename, duplicate, delete, reveal)
+- Processing overlay for heavy operations
 
 ### `file_browser.js` — FileBrowser UI
 
-- Fetch and render directory contents (list view + grid view)
+- List + grid view with localStorage persistence
 - Real-time search/filter (case-insensitive, client-side)
-- Color-coded badges: OBJ (green), FBX (orange), GLTF/GLB (cyan), STL (violet), archived (purple)
-- View mode persistence via `localStorage`
+- Sort: name (A–Z/Z–A), size (↑/↓), type — persisted
+- Inline rename, right-click context menu
+- Color-coded badges: OBJ (green), FBX (orange), GLTF (cyan), STL (violet), archived (purple)
 
 ### `viewer_3d.js` — Viewer3D
 
-The most complex frontend component:
-
-- **Rendering**: PBR materials, 5-light setup, SSAO, ACES tone mapping, soft shadows
-- **Loaders**: OBJLoader + MTLLoader, FBXLoader, GLTFLoader, STLLoader
-- **Navigation**: Orbit mode (OrbitControls) and FPV drone mode (keyboard + mouse look)
-- **Scene helpers**: Toggleable grid (scales to model, adapts to background), XYZ axes with labels
-- **Model transforms**: Center at origin, ground on Y=0, PCA auto-orient, reset to original
-- **Export**: OBJExporter for modified model export with baked transforms
-- **Persistence**: Wireframe, grid, axes, background survive across model loads
+- **Rendering**: PBR materials, 5-light setup, SSAO, ACES tone mapping
+- **Loaders**: OBJ+MTL, FBX, GLTF/GLB, STL
+- **Navigation**: Orbit (OrbitControls) + FPV drone (keyboard + mouse look)
+- **Scene helpers**: Grid (scales to model, adapts to bg), XYZ axes with labels, normals visualization (VertexNormalsHelper)
+- **Model transforms**: Center, ground, PCA orient, rotate ±90°, reset (geometry snapshot restore)
+- **Mesh operations**: Simplify (SimplifyModifier with vertex merging), recompute normals (merge + smooth)
+- **Material inspector**: `getMaterialsInfo()` with live material references
+- **Export**: OBJExporter for modified geometry
+- **Persistence**: Wireframe, grid, axes, normals, background survive model loads
+- **Race guard**: `_loadId` prevents stale async loads from corrupting scene
 
 ### `export_panel.js` — ExportPanel
 
-- Name + path inputs with Enter-to-export
-- Detects modified models → exports via `/api/export_modified` (OBJ text)
-- Unmodified models → exports via `/api/export` (copies source files)
+- Detects modified models → `/api/export_modified` (OBJ text)
+- Unmodified → `/api/export` (copies source)
+- Refreshes file browser after successful export
 
 ---
 
@@ -118,18 +110,19 @@ The most complex frontend component:
 
 ```
 Scene
-  ├── Hemisphere Light (ambient fill)          ← intensity adjustable
-  ├── Key Directional Light (shadows)          ← direction + intensity adjustable
-  ├── Fill Directional Light                   ← intensity adjustable
+  ├── Hemisphere Light           ← intensity adjustable
+  ├── Key Directional Light      ← direction + intensity
+  ├── Fill Directional Light     ← intensity
   ├── Rim Directional Light
-  ├── Ambient Light                            ← intensity adjustable
-  ├── Ground Plane (shadow receiver)
-  ├── Grid Helper (toggleable, scales to model, adapts to background)
-  ├── Axis Helper (toggleable, X=red Y=green Z=blue + labels)
-  └── Model (PBR materials, wireframe toggleable)
+  ├── Ambient Light              ← intensity
+  ├── Ground Plane (shadows)
+  ├── Grid Helper (toggleable, adaptive colors)
+  ├── Axis Helper (toggleable, XYZ + labels)
+  ├── Normals Helper (toggleable, cyan lines)
+  └── Model (PBR, wireframe toggleable)
         │
         ▼
-  WebGLRenderer (MSAA, ACESFilmic tone mapping ← exposure adjustable)
+  WebGLRenderer (MSAA, ACES tone mapping ← exposure)
         │
         ▼
   EffectComposer → RenderPass → SSAOPass → OutputPass
@@ -141,20 +134,15 @@ Scene
 
 ```
 Orbit Mode (default)
-  ├── Left-drag: orbit around pivot
-  ├── Scroll: zoom (0.01–1000)
-  ├── Right-drag: pan
-  └── Right-click (no drag): set pivot via raycast
+  ├── Left-drag: orbit    ├── Scroll: zoom (0.01–1000)
+  ├── Right-drag: pan     └── Right-click: set pivot (raycast)
 
 FPV Mode (drone)
-  ├── W/Shift: forward along TRUE look direction
-  ├── S/Ctrl: backward
-  ├── A/D + ←/→: yaw
-  ├── ↑/↓: pitch
-  ├── E/Q: altitude up/down
-  └── Left-drag: mouse look (pitch + yaw)
+  ├── W/Shift: forward    ├── A/D + ←/→: yaw
+  ├── S/Ctrl: backward    ├── ↑/↓: pitch
+  ├── E/Q: altitude       └── Left-drag: mouse look
 
-Spacebar: reset camera only (does not affect model)
+Spacebar: reset camera only (model untouched)
 ```
 
 ---
@@ -162,36 +150,48 @@ Spacebar: reset camera only (does not affect model)
 ## Model Transform Pipeline
 
 ```
-Reset  → Restore original geometry snapshot (saved on load)
-Center → Bake world transforms → shift bbox center to (0,0,0)
-Ground → Bake world transforms → center X/Z → shift min.Y to 0
-Orient → Bake world transforms → PCA eigenvectors → rotate so smallest variance = Y
-Export → If modified: OBJExporter.parse() → POST /api/export_modified
-         If original: POST /api/export (copies source files)
+Reload   → Re-fetch from disk (full reset)
+Reset    → Restore geometry snapshot (saved on load)
+Center   → Bake transforms → shift bbox center to (0,0,0)
+Ground   → Bake transforms → center X/Z → min.Y to 0
+Orient   → Bake transforms → PCA → rotate smallest variance → Y
+Rotate   → Bake transforms → ±90° around X/Y/Z
+Simplify → Merge vertices → SimplifyModifier (edge collapse) → recompute normals
+Normals  → Delete normals + UVs → merge vertices → computeVertexNormals (smooth)
+Export   → If modified: OBJExporter → POST /api/export_modified
+           If original: POST /api/export
 ```
 
-All transform operations modify geometry vertices only — camera is never touched.
-Original geometry is saved as a snapshot on load for Reset.
+---
+
+## File Management
+
+```
+Right-click context menu:
+  ├── Show in file manager (macOS/Windows/Linux)
+  ├── Rename (inline editing in sidebar)
+  ├── Duplicate (creates _copy suffix)
+  └── Delete (confirmation dialog)
+```
 
 ---
 
 ## State Persistence on Model Load
 
-When loading a new model:
-
 | Resets (new object) | Preserves (user settings) |
 |---------------------|--------------------------|
-| Camera position + orbit target | Wireframe on/off |
-| FPV mode → back to Orbit | Grid visibility |
+| Camera + orbit target | Wireframe |
+| FPV mode → Orbit | Grid visibility |
 | Scale → 1.0× | Axis visibility |
-| Model transforms (modified flag) | Background color |
-| FPV yaw/pitch angles | Light settings |
+| Model transforms | Normals visibility |
+| Modified flag | Background color |
+| | Light settings |
 
 ---
 
 ## Security
 
-- Optional `root_path` constraint on `FileBrowser`
-- All paths resolved to absolute before serving
-- Backend only reads/copies files — never executes them
-- Temp directories cleaned up on shutdown
+- Optional `root_path` on FileBrowser
+- Paths resolved to absolute before serving
+- Only reads/copies — never executes
+- Temp dirs cleaned on shutdown
