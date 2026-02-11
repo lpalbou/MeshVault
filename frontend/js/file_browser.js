@@ -41,6 +41,15 @@ const ICONS = {
         <line x1="22" y1="8.5" x2="12" y2="15.5"/>
         <line x1="2" y1="8.5" x2="12" y2="15.5"/>
     </svg>`,
+    max: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="3" y="3" width="18" height="18" rx="2"/>
+        <path d="M7 8l5 4-5 4"/><line x1="14" y1="16" x2="18" y2="16"/>
+    </svg>`,
+    unity: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 2L2 7v10l10 5 10-5V7L12 2z"/>
+        <path d="M12 12L2 7"/><path d="M12 12l10-5"/>
+        <path d="M12 12v10"/>
+    </svg>`,
     archive: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <rect x="2" y="4" width="20" height="16" rx="2"/>
         <path d="M12 4v16"/>
@@ -107,6 +116,9 @@ export class FileBrowser {
             this._currentPath = data.current_path;
             this._parentPath = data.parent_path;
 
+            // Remember last directory for next session
+            localStorage.setItem("meshvault_lastDir", this._currentPath);
+
             // Cache data for filtering
             this._currentFolders = data.folders;
             this._currentAssets = data.assets;
@@ -156,6 +168,20 @@ export class FileBrowser {
         } catch {
             this.browse(null);
         }
+    }
+
+    /** Navigate to the last visited directory, or home if none saved. */
+    async goLastOrHome() {
+        const lastDir = localStorage.getItem("meshvault_lastDir");
+        if (lastDir) {
+            try {
+                await this.browse(lastDir);
+                return;
+            } catch {
+                // Saved dir no longer exists — fall back to home
+            }
+        }
+        await this.goHome();
     }
 
     /** Set the sort mode and re-render. */
@@ -478,6 +504,22 @@ export class FileBrowser {
             } catch (err) {
                 console.error("Reveal failed:", err);
             }
+        });
+
+        // --- Copy file path ---
+        this._addContextMenuItem(menu, "Copy file path", () => {
+            navigator.clipboard.writeText(filePath).then(() => {
+                this._onStatusUpdate("Path copied to clipboard");
+            }).catch(() => {
+                // Fallback for older browsers
+                const textarea = document.createElement("textarea");
+                textarea.value = filePath;
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand("copy");
+                document.body.removeChild(textarea);
+                this._onStatusUpdate("Path copied to clipboard");
+            });
         });
 
         // --- Rename (inline editing on the item itself) ---

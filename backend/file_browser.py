@@ -19,7 +19,7 @@ from backend.archive_inspector import ArchiveInspector
 SUPPORTED_3D_EXTENSIONS = {".obj", ".fbx", ".gltf", ".glb", ".stl"}
 
 # Supported archive extensions
-SUPPORTED_ARCHIVE_EXTENSIONS = {".zip", ".rar"}
+SUPPORTED_ARCHIVE_EXTENSIONS = {".zip", ".rar", ".unitypackage"}
 
 
 @dataclass

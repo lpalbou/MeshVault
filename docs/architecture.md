@@ -1,148 +1,71 @@
 # Architecture
 
-System design, component breakdown, and key design decisions of MeshVault.
-
 ---
 
-## High-Level Architecture
+## High-Level
 
 ```
-┌──────────────────────────────────┐
-│          Frontend (Browser)       │
-│  ┌───────────┐  ┌──────────────┐ │
-│  │ File      │  │ Viewer3D     │ │
-│  │ Browser   │  │ (Three.js)   │ │
-│  └─────┬─────┘  └──────┬───────┘ │
-│  ┌─────┴───────────────┴───────┐ │
-│  │       App.js (orchestrator) │ │
-│  └──────────────┬──────────────┘ │
-│  ┌──────────────┴──────────────┐ │
-│  │     ExportPanel             │ │
-│  └─────────────────────────────┘ │
-└────────────────┬─────────────────┘
-                 │ HTTP (REST API)
-┌────────────────┴─────────────────┐
-│          Backend (FastAPI)        │
-│  ┌───────────┐  ┌──────────────┐ │
-│  │ File      │  │ Archive      │ │
-│  │ Browser   │  │ Inspector    │ │
-│  └───────────┘  └──────────────┘ │
-│  ┌───────────┐  ┌──────────────┐ │
-│  │ Export    │  │ FBX          │ │
-│  │ Manager   │  │ Converter    │ │
-│  └───────────┘  └──────────────┘ │
-└──────────────────────────────────┘
+Frontend (Browser)                    Backend (FastAPI)
+┌─────────────────────┐              ┌──────────────────────┐
+│ FileBrowser (sidebar)│──── HTTP ───→│ file_browser.py      │
+│ Viewer3D (Three.js)  │              │ archive_inspector.py │
+│ App.js (orchestrator)│              │ export_manager.py    │
+│ ExportPanel          │              │ fbx_converter.py     │
+└─────────────────────┘              │ blend_converter.py   │
+                                     └──────────────────────┘
 ```
 
 ---
 
-## Backend Components
+## Backend (14 API endpoints)
 
-### `app.py` — FastAPI Server (12 endpoints)
+### `app.py` — Server
+Browse, serve, prepare, export (original + modified), reveal, rename, duplicate, delete, scan textures. Auto-converts `.blend` → `.glb` (Blender CLI) and old `.fbx` → `.obj`.
 
-- Browse, serve files, prepare archives, export (original + modified)
-- Reveal in file manager, rename, delete, duplicate
-- Auto-convert old FBX (< 7000) to OBJ
+### `file_browser.py`
+Lists directories + 3D assets (`.obj`, `.fbx`, `.gltf`, `.glb`, `.stl`, `.blend`, `.max`). Detects related files. Optional root constraint.
 
-### `file_browser.py` — FileBrowser
+### `archive_inspector.py`
+ZIP (built-in), RAR (multi-tool fallback), `.unitypackage` (tar.gz with GUID structure).
 
-- List directories + 3D assets (`.obj`, `.fbx`, `.gltf`, `.glb`, `.stl`)
-- Detect related files (`.mtl`, textures)
-- Optional root path constraint
+### `blend_converter.py`
+Finds Blender CLI (PATH, macOS app bundle, Windows Program Files). Runs `blender --background --python export.py` to convert `.blend` → `.glb`. Caches results.
 
-### `archive_inspector.py` — ArchiveInspector
-
-- ZIP/RAR inspection + multi-tool extraction fallback
-- `rarfile` → `bsdtar` → `unrar` → `7z` → `unar`
-
-### `export_manager.py` — ExportManager
-
-- Copy/rename assets (single file or folder with derivatives)
-
-### `fbx_converter.py` — FBX Converter
-
-- Parse FBX binary (v5000–6100), extract geometry, convert to OBJ
+### `fbx_converter.py`
+Pure Python FBX binary parser (v5000–6100) → OBJ converter. Zero dependencies.
 
 ---
 
-## Frontend Components
+## Frontend
 
 ### `app.js` — Orchestrator
+Wires everything: file browser, viewer, export panel. Toolbar toggles (screenshot, nav, grid, axes, wireframe, normals, textures, materials, lights). Model transforms (reload, reset, center, ground, orient, rotate, simplify, normals). Save As modal, texture folder picker, sort, filter, context menu.
 
-- Wire all components: file browser, viewer, export panel
-- Toolbar: nav mode, grid, axes, wireframe, normals, materials, lights
-- Model transforms: reload, reset, center, ground, orient, rotate, simplify, normals
-- Save As modal with folder browser
-- Sort selector, search filter, grid/list toggle
-- Context menu (rename, duplicate, delete, reveal)
-- Processing overlay for heavy operations
+### `file_browser.js`
+List + grid view, sort (name/size/type), search filter, inline rename, right-click context menu (rename/duplicate/delete/reveal). Color-coded badges. Remember last directory.
 
-### `file_browser.js` — FileBrowser UI
+### `viewer_3d.js`
+- **Rendering**: PBR, 5-light, SSAO, ACES, shadows
+- **Loaders**: OBJ+MTL, FBX, GLTF/GLB, STL (+ Blend/MAX handled by backend)
+- **Navigation**: Orbit + FPV drone with race condition guard
+- **Scene**: Grid (adaptive), axes (labeled), normals viz, wireframe
+- **Transforms**: Center, ground, PCA orient, rotate ±90°, simplify (merge + edge collapse), smooth normals
+- **Textures**: `applyTextureFolder()` with convention + fuzzy matching
+- **Materials**: `getMaterialsInfo()` with live references
+- **Export**: OBJExporter, screenshot (PNG)
+- **Persistence**: Wireframe, grid, axes, normals, background across loads
 
-- List + grid view with localStorage persistence
-- Real-time search/filter (case-insensitive, client-side)
-- Sort: name (A–Z/Z–A), size (↑/↓), type — persisted
-- Inline rename, right-click context menu
-- Color-coded badges: OBJ (green), FBX (orange), GLTF (cyan), STL (violet), archived (purple)
-
-### `viewer_3d.js` — Viewer3D
-
-- **Rendering**: PBR materials, 5-light setup, SSAO, ACES tone mapping
-- **Loaders**: OBJ+MTL, FBX, GLTF/GLB, STL
-- **Navigation**: Orbit (OrbitControls) + FPV drone (keyboard + mouse look)
-- **Scene helpers**: Grid (scales to model, adapts to bg), XYZ axes with labels, normals visualization (VertexNormalsHelper)
-- **Model transforms**: Center, ground, PCA orient, rotate ±90°, reset (geometry snapshot restore)
-- **Mesh operations**: Simplify (SimplifyModifier with vertex merging), recompute normals (merge + smooth)
-- **Material inspector**: `getMaterialsInfo()` with live material references
-- **Export**: OBJExporter for modified geometry
-- **Persistence**: Wireframe, grid, axes, normals, background survive model loads
-- **Race guard**: `_loadId` prevents stale async loads from corrupting scene
-
-### `export_panel.js` — ExportPanel
-
-- Detects modified models → `/api/export_modified` (OBJ text)
-- Unmodified → `/api/export` (copies source)
-- Refreshes file browser after successful export
+### `export_panel.js`
+Modified → `/api/export_modified` (OBJ). Original → `/api/export`. Auto-refreshes browser.
 
 ---
 
 ## Rendering Pipeline
 
 ```
-Scene
-  ├── Hemisphere Light           ← intensity adjustable
-  ├── Key Directional Light      ← direction + intensity
-  ├── Fill Directional Light     ← intensity
-  ├── Rim Directional Light
-  ├── Ambient Light              ← intensity
-  ├── Ground Plane (shadows)
-  ├── Grid Helper (toggleable, adaptive colors)
-  ├── Axis Helper (toggleable, XYZ + labels)
-  ├── Normals Helper (toggleable, cyan lines)
-  └── Model (PBR, wireframe toggleable)
-        │
-        ▼
-  WebGLRenderer (MSAA, ACES tone mapping ← exposure)
-        │
-        ▼
-  EffectComposer → RenderPass → SSAOPass → OutputPass
-```
-
----
-
-## Camera & Navigation
-
-```
-Orbit Mode (default)
-  ├── Left-drag: orbit    ├── Scroll: zoom (0.01–1000)
-  ├── Right-drag: pan     └── Right-click: set pivot (raycast)
-
-FPV Mode (drone)
-  ├── W/Shift: forward    ├── A/D + ←/→: yaw
-  ├── S/Ctrl: backward    ├── ↑/↓: pitch
-  ├── E/Q: altitude       └── Left-drag: mouse look
-
-Spacebar: reset camera only (model untouched)
+Scene → Lights (5) → Ground → Grid → Axes → Normals → Model
+  → WebGLRenderer (MSAA, ACES, preserveDrawingBuffer)
+  → EffectComposer → RenderPass → SSAOPass → OutputPass
 ```
 
 ---
@@ -150,48 +73,23 @@ Spacebar: reset camera only (model untouched)
 ## Model Transform Pipeline
 
 ```
-Reload   → Re-fetch from disk (full reset)
-Reset    → Restore geometry snapshot (saved on load)
-Center   → Bake transforms → shift bbox center to (0,0,0)
-Ground   → Bake transforms → center X/Z → min.Y to 0
-Orient   → Bake transforms → PCA → rotate smallest variance → Y
-Rotate   → Bake transforms → ±90° around X/Y/Z
-Simplify → Merge vertices → SimplifyModifier (edge collapse) → recompute normals
-Normals  → Delete normals + UVs → merge vertices → computeVertexNormals (smooth)
-Export   → If modified: OBJExporter → POST /api/export_modified
-           If original: POST /api/export
+Reload   → Re-fetch from disk
+Reset    → Restore geometry snapshot
+Center   → Bake transforms → bbox center to (0,0,0)
+Ground   → Bake → center X/Z → min.Y to 0
+Orient   → Bake → PCA eigenvectors → rotate smallest → Y
+Rotate   → Bake → ±90° around X/Y/Z
+Simplify → Merge vertices → SimplifyModifier → recompute normals
+Normals  → Delete normals/UVs → merge → computeVertexNormals
+Export   → Modified: OBJExporter → POST /api/export_modified
+           Original: POST /api/export
 ```
 
 ---
 
-## File Management
+## State on Model Load
 
-```
-Right-click context menu:
-  ├── Show in file manager (macOS/Windows/Linux)
-  ├── Rename (inline editing in sidebar)
-  ├── Duplicate (creates _copy suffix)
-  └── Delete (confirmation dialog)
-```
-
----
-
-## State Persistence on Model Load
-
-| Resets (new object) | Preserves (user settings) |
-|---------------------|--------------------------|
-| Camera + orbit target | Wireframe |
-| FPV mode → Orbit | Grid visibility |
-| Scale → 1.0× | Axis visibility |
-| Model transforms | Normals visibility |
-| Modified flag | Background color |
-| | Light settings |
-
----
-
-## Security
-
-- Optional `root_path` on FileBrowser
-- Paths resolved to absolute before serving
-- Only reads/copies — never executes
-- Temp dirs cleaned on shutdown
+| Resets | Preserves |
+|--------|-----------|
+| Camera, FPV→Orbit, Scale→1× | Wireframe, Grid, Axes, Normals |
+| Transforms, Modified flag | Background, Lights |

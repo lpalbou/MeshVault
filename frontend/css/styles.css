@@ -293,6 +293,25 @@ html, body {
     border-color: #3a8dee;
 }
 
+/* Cancel button inside the processing overlay */
+.btn-cancel-processing {
+    margin-top: 16px;
+    padding: 10px 32px;
+    font-size: 14px;
+    font-weight: 600;
+    background: #f44336;
+    border: 2px solid #f44336;
+    color: #fff;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.btn-cancel-processing:hover {
+    background: #d32f2f;
+    border-color: #d32f2f;
+}
+
 /* Rotation buttons with colored axis labels */
 .rot-btn {
     font-size: 11px;
@@ -623,6 +642,10 @@ html, body {
     color: #ab47bc;
 }
 
+.file-item-icon.asset-max {
+    color: #78909c;
+}
+
 .file-item-icon.archive {
     color: var(--accent-secondary);
 }
@@ -677,6 +700,11 @@ html, body {
 .badge-stl {
     background: rgba(171, 71, 188, 0.15);
     color: #ab47bc;
+}
+
+.badge-max {
+    background: rgba(120, 144, 156, 0.15);
+    color: #78909c;
 }
 
 .badge-archive {
@@ -734,6 +762,7 @@ html, body {
 .asset-card-icon.asset-gltf,
 .asset-card-icon.asset-glb { color: #26c6da; }
 .asset-card-icon.asset-stl { color: #ab47bc; }
+.asset-card-icon.asset-max { color: #78909c; }
 
 .asset-card-name {
     font-size: 11px;

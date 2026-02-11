@@ -236,9 +236,17 @@
             <div id="loading-overlay" style="display: none;">
                 <div class="spinner"></div>
                 <p id="loading-message">Loading asset...</p>
+                <button id="loading-cancel-btn" class="btn btn-cancel-processing" style="display: none;">Cancel</button>
             </div>
             <!-- Viewer toolbar (top-right) -->
             <div id="viewer-toolbar">
+                <!-- Screenshot -->
+                <button id="screenshot-btn" class="btn btn-icon viewer-tool-btn" title="Save screenshot as PNG">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/>
+                        <circle cx="12" cy="13" r="4"/>
+                    </svg>
+                </button>
                 <!-- Nav mode toggle -->
                 <button id="nav-mode-toggle" class="btn btn-icon viewer-tool-btn" title="Switch to FPV mode">
                     <svg id="nav-icon-orbit" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -281,6 +289,15 @@
                         <circle cx="12" cy="16" r="2"/>
                         <line x1="12" y1="14" x2="12" y2="4"/>
                         <polyline points="9 7 12 4 15 7"/>
+                    </svg>
+                </button>
+                <!-- Texture folder picker -->
+                <button id="texture-folder-btn" class="btn btn-icon viewer-tool-btn" title="Load textures from folder">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="18" height="18" rx="2"/>
+                        <path d="M3 9h18"/>
+                        <path d="M9 3v18"/>
+                        <circle cx="15" cy="15" r="3" fill="none"/>
                     </svg>
                 </button>
                 <!-- Material inspector toggle -->
@@ -406,6 +423,7 @@
             <div id="viewer-info" style="display: none;">
                 <span id="info-vertices">0 vertices</span>
                 <span id="info-faces">0 faces</span>
+                <span id="info-dims" title="Bounding box dimensions (W × H × D)"></span>
                 <span id="info-size">0 KB</span>
             </div>
         </main>

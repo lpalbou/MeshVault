@@ -142,12 +142,18 @@ class App {
         this._initSortSelect();
         this._initViewModeToggle();
 
+        // --- Screenshot ---
+        document.getElementById("screenshot-btn").addEventListener("click", () => {
+            this._viewer.screenshot();
+        });
+
         // --- Viewer Toolbar ---
         this._initNavModeToggle();
         this._initGridToggle();
         this._initAxisToggle();
         this._initWireframeToggle();
         this._initNormalsToggle();
+        this._initTextureFolderPicker();
         this._initMaterialsPanel();
         this._initLightControls();
         this._initBackgroundSwatches();
@@ -155,8 +161,8 @@ class App {
         // --- Scale Control ---
         this._initScaleControl();
 
-        // --- Start ---
-        this._fileBrowser.goHome();
+        // --- Start (resume last directory, or home) ---
+        this._fileBrowser.goLastOrHome();
     }
 
     /**
@@ -250,6 +256,12 @@ class App {
     _updateViewerInfo(stats) {
         this._elements.infoVertices.textContent = `${stats.vertices.toLocaleString()} vertices`;
         this._elements.infoFaces.textContent = `${stats.faces.toLocaleString()} faces`;
+        // Show bounding box dimensions (W × H × D)
+        if (stats.width !== undefined) {
+            const fmt = (v) => v < 0.01 ? v.toExponential(1) : v < 10 ? v.toFixed(2) : v < 1000 ? v.toFixed(1) : v.toFixed(0);
+            document.getElementById("info-dims").textContent =
+                `${fmt(stats.width)} × ${fmt(stats.height)} × ${fmt(stats.depth)}`;
+        }
     }
 
     /**
@@ -517,19 +529,175 @@ class App {
 
         btnCancel.addEventListener("click", closePopover);
 
-        btnApply.addEventListener("click", () => {
+        btnApply.addEventListener("click", async () => {
             const ratio = parseInt(slider.value, 10) / 100;
             closePopover();
-            const hideProcessing = this._showProcessing("Simplifying mesh…");
 
-            setTimeout(() => {
-                const result = this._viewer.simplifyModel(ratio);
-                hideProcessing();
-                this._showToast(
-                    `Simplified: ${result.before.toLocaleString()} → ${result.after.toLocaleString()} vertices`,
-                    "success"
-                );
-            }, 50);
+            // Show processing overlay
+            const overlay = this._elements.loadingOverlay;
+            const msgEl = document.getElementById("loading-message");
+            const cancelBtn = document.getElementById("loading-cancel-btn");
+            msgEl.textContent = "Simplifying mesh…";
+            overlay.style.display = "flex";
+
+            // Show the red cancel button inside the overlay
+            const abortController = new AbortController();
+            cancelBtn.style.display = "inline-block";
+            cancelBtn.onclick = () => {
+                abortController.abort();
+                cancelBtn.textContent = "Cancelling…";
+                cancelBtn.disabled = true;
+            };
+
+            try {
+                const result = await this._viewer.simplifyModel(ratio, abortController.signal);
+
+                if (result.cancelled) {
+                    this._showToast("Simplification cancelled", "info");
+                } else {
+                    this._showToast(
+                        `Simplified: ${result.before.toLocaleString()} → ${result.after.toLocaleString()} vertices`,
+                        "success"
+                    );
+                }
+            } catch (err) {
+                this._showToast(`Simplification failed: ${err.message}`, "error");
+            } finally {
+                overlay.style.display = "none";
+                msgEl.textContent = "Loading asset...";
+                cancelBtn.style.display = "none";
+                cancelBtn.textContent = "Cancel";
+                cancelBtn.disabled = false;
+                cancelBtn.onclick = null;
+            }
+        });
+    }
+
+    /**
+     * Initialize the texture folder picker.
+     * Opens the folder browser modal. When a folder is selected,
+     * scans it for textures and applies them to the current model.
+     */
+    _initTextureFolderPicker() {
+        const btn = document.getElementById("texture-folder-btn");
+
+        btn.addEventListener("click", () => {
+            // Reuse the Save As modal for folder browsing
+            const modal = document.getElementById("folder-modal");
+            const pathDisplay = document.getElementById("folder-modal-path");
+            const listContainer = document.getElementById("folder-modal-list");
+            const nameInput = document.getElementById("modal-name-input");
+            const btnSave = document.getElementById("folder-modal-select");
+            const btnCancel = document.getElementById("folder-modal-cancel");
+            const btnClose = document.getElementById("folder-modal-close");
+            const headerEl = modal.querySelector(".modal-header h3");
+            const filenameRow = modal.querySelector(".modal-filename");
+
+            // Reconfigure modal for texture folder selection
+            const origTitle = headerEl.textContent;
+            const origBtnText = btnSave.textContent;
+            headerEl.textContent = "Select texture folder";
+            btnSave.textContent = "Apply textures";
+            filenameRow.style.display = "none";
+
+            let currentPath = this._fileBrowser.currentPath || "";
+
+            const loadFolder = async (path) => {
+                try {
+                    const url = path
+                        ? `/api/browse?path=${encodeURIComponent(path)}`
+                        : "/api/browse";
+                    const resp = await fetch(url);
+                    if (!resp.ok) throw new Error("Failed to browse");
+                    const data = await resp.json();
+                    currentPath = data.current_path;
+                    pathDisplay.textContent = currentPath;
+                    listContainer.innerHTML = "";
+
+                    if (data.parent_path) {
+                        const upItem = document.createElement("div");
+                        upItem.className = "modal-folder-item go-up";
+                        upItem.innerHTML = `<span class="folder-icon">◀</span> ..`;
+                        upItem.addEventListener("click", () => loadFolder(data.parent_path));
+                        listContainer.appendChild(upItem);
+                    }
+
+                    for (const folder of data.folders) {
+                        const item = document.createElement("div");
+                        item.className = "modal-folder-item";
+                        item.innerHTML = `<span class="folder-icon">📁</span> ${folder.name}`;
+                        item.addEventListener("click", () => loadFolder(folder.path));
+                        listContainer.appendChild(item);
+                    }
+                } catch (err) {
+                    listContainer.innerHTML = `<div class="empty-state">Error: ${err.message}</div>`;
+                }
+            };
+
+            const closeAndRestore = () => {
+                modal.style.display = "none";
+                headerEl.textContent = origTitle;
+                btnSave.textContent = origBtnText;
+                filenameRow.style.display = "";
+                // Remove temp listeners
+                btnSave.removeEventListener("click", onApply);
+                btnCancel.removeEventListener("click", closeAndRestore);
+                btnClose.removeEventListener("click", closeAndRestore);
+            };
+
+            const onApply = async () => {
+                closeAndRestore();
+                const hide = this._showProcessing("Scanning & applying textures…");
+
+                try {
+                    // Scan the folder for textures
+                    const scanResp = await fetch("/api/scan_textures", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ path: currentPath }),
+                    });
+
+                    if (!scanResp.ok) {
+                        hide();
+                        this._showToast("Failed to scan folder", "error");
+                        return;
+                    }
+
+                    const scanData = await scanResp.json();
+
+                    if (scanData.count === 0) {
+                        hide();
+                        this._showToast("No textures found in selected folder", "error");
+                        return;
+                    }
+
+                    // Apply textures to the model
+                    const applied = await this._viewer.applyTextureFolder(scanData.textures);
+                    hide();
+
+                    if (applied > 0) {
+                        this._showToast(
+                            `Applied ${applied} texture(s) from ${scanData.count} found`,
+                            "success"
+                        );
+                    } else {
+                        this._showToast(
+                            `${scanData.count} textures found but none matched model materials`,
+                            "info"
+                        );
+                    }
+                } catch (err) {
+                    hide();
+                    this._showToast(`Texture loading failed: ${err.message}`, "error");
+                }
+            };
+
+            btnSave.addEventListener("click", onApply);
+            btnCancel.addEventListener("click", closeAndRestore);
+            btnClose.addEventListener("click", closeAndRestore);
+
+            modal.style.display = "flex";
+            loadFolder(currentPath);
         });
     }
 
@@ -549,16 +717,36 @@ class App {
         const countDisplay = document.getElementById("materials-count");
         const header = panel.querySelector(".light-panel-header");
 
+        let outsideListener = null;
+        const closePanel = () => {
+            panel.style.display = "none";
+            toggleBtn.classList.remove("active");
+            if (outsideListener) {
+                document.removeEventListener("mousedown", outsideListener, true);
+                outsideListener = null;
+            }
+        };
+
         // Toggle show/hide
-        toggleBtn.addEventListener("click", () => {
+        toggleBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
             const visible = panel.style.display !== "none";
             if (visible) {
-                panel.style.display = "none";
-                toggleBtn.classList.remove("active");
+                closePanel();
             } else {
                 this._renderMaterialsList(listContainer, countDisplay);
                 panel.style.display = "flex";
                 toggleBtn.classList.add("active");
+
+                // Close on click outside (panel or toggle button)
+                setTimeout(() => {
+                    outsideListener = (ev) => {
+                        if (!panel.contains(ev.target) && !toggleBtn.contains(ev.target)) {
+                            closePanel();
+                        }
+                    };
+                    document.addEventListener("mousedown", outsideListener, true);
+                }, 0);
             }
         });
 

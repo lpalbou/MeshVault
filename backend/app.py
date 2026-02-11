@@ -78,6 +78,26 @@ file_browser = FileBrowser()
 export_manager = ExportManager()
 
 
+def _build_file_response(file_path: Path) -> FileResponse:
+    """
+    Serve files with explicit no-cache headers.
+
+    This prevents stale browser caching when an extracted temp file is repaired
+    (e.g., previously 0-byte archive extraction, then re-extracted correctly).
+    """
+    content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+    return FileResponse(
+        path=str(file_path),
+        media_type=content_type,
+        filename=file_path.name,
+        headers={
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle — clean up temp files on shutdown."""
@@ -166,6 +186,17 @@ async def browse(path: Optional[str] = Query(default=None)):
     }
 
 
+def _maybe_convert_asset(file_path: Path) -> tuple[Path, str]:
+    """
+    Check if a file needs conversion before serving.
+    Currently handles old FBX (version < 7000) → OBJ.
+    """
+    ext = file_path.suffix.lower()
+    if ext == ".fbx":
+        return _maybe_convert_fbx(file_path)
+    return file_path, ext
+
+
 def _maybe_convert_fbx(file_path: Path) -> tuple[Path, str]:
     """
     Check if an FBX file needs conversion (version < 7000) and convert it.
@@ -197,19 +228,15 @@ async def serve_asset_file(path: str = Query(...)):
     """
     Serve a 3D asset file for the viewer.
 
-    For regular files, serves directly.
-    For FBX files with version < 7000, auto-converts to OBJ.
+    Auto-converts if needed:
+    - .blend → .glb via Blender CLI
+    - .fbx (version < 7000) → .obj via built-in parser
     """
     file_path = Path(path)
     if file_path.exists() and file_path.is_file():
-        # Auto-convert old FBX if needed
-        serve_path, _ = _maybe_convert_fbx(file_path)
-        content_type = mimetypes.guess_type(str(serve_path))[0] or "application/octet-stream"
-        return FileResponse(
-            path=str(serve_path),
-            media_type=content_type,
-            filename=serve_path.name,
-        )
+        # Auto-convert if needed (blend→glb, old fbx→obj)
+        serve_path, _ = _maybe_convert_asset(file_path)
+        return _build_file_response(serve_path)
 
     raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
@@ -236,12 +263,7 @@ async def serve_archive_asset(
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Extracted file not found")
 
-    content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
-    return FileResponse(
-        path=str(file_path),
-        media_type=content_type,
-        filename=file_path.name,
-    )
+    return _build_file_response(file_path)
 
 
 @app.get("/api/asset/prepare_archive")
@@ -270,11 +292,16 @@ async def prepare_archive_asset(
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Extracted file not found")
 
-    # Auto-convert old FBX if needed
-    serve_path, actual_ext = _maybe_convert_fbx(file_path)
+    # Auto-convert if needed (blend→glb, old fbx→obj)
+    serve_path, actual_ext = _maybe_convert_asset(file_path)
 
     # Build the file URL for the main asset (points to converted file if applicable)
-    file_url = f"/api/asset/file?path={urllib.parse.quote(str(serve_path))}"
+    stat = serve_path.stat()
+    version = f"{stat.st_size}-{stat.st_mtime_ns}"
+    file_url = (
+        f"/api/asset/file?path={urllib.parse.quote(str(serve_path))}"
+        f"&v={version}"
+    )
 
     # Resolve related file paths: map archive-internal -> extracted temp paths
     # First, get all related files from the archive listing
@@ -311,12 +338,7 @@ async def serve_related_file(path: str = Query(...)):
     if not file_path.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
-    content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
-    return FileResponse(
-        path=str(file_path),
-        media_type=content_type,
-        filename=file_path.name,
-    )
+    return _build_file_response(file_path)
 
 
 @app.post("/api/export")
@@ -390,6 +412,11 @@ class DeleteRequest(BaseModel):
 
 class DuplicateRequest(BaseModel):
     """Request body for duplicating a file."""
+    path: str
+
+
+class ScanTexturesRequest(BaseModel):
+    """Request body for scanning a folder for texture files."""
     path: str
 
 
@@ -497,6 +524,37 @@ async def duplicate_file(request: DuplicateRequest):
         return {"success": True, "new_path": str(new_path)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Duplicate failed: {e}")
+
+
+@app.get("/api/default_path")
+@app.post("/api/scan_textures")
+async def scan_textures(request: ScanTexturesRequest):
+    """
+    Scan a folder recursively for texture/image files.
+
+    Returns a map of lowercase filename → absolute path for quick lookup.
+    The frontend uses this to resolve missing texture references by filename.
+    """
+    TEXTURE_EXTENSIONS = {
+        ".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tiff", ".tif",
+        ".dds", ".exr", ".hdr", ".webp", ".gif",
+    }
+
+    folder = Path(request.path)
+    if not folder.exists() or not folder.is_dir():
+        raise HTTPException(status_code=404, detail=f"Folder not found: {request.path}")
+
+    textures = {}
+    try:
+        for f in folder.rglob("*"):
+            if f.is_file() and f.suffix.lower() in TEXTURE_EXTENSIONS:
+                # Map by lowercase filename for case-insensitive matching
+                key = f.name.lower()
+                textures[key] = str(f)
+    except PermissionError:
+        pass
+
+    return {"folder": str(folder), "count": len(textures), "textures": textures}
 
 
 @app.get("/api/default_path")

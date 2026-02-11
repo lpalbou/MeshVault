@@ -11,13 +11,14 @@ MeshVault exposes a REST API served by FastAPI. When the server is running, inte
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/` | Serve the main HTML page |
-| `GET` | `/api/browse` | Browse a directory for folders and 3D assets |
-| `GET` | `/api/asset/file` | Serve a 3D file (auto-converts old FBX to OBJ) |
+| `GET` | `/api/browse` | Browse a directory for 3D assets and folders |
+| `GET` | `/api/asset/file` | Serve a 3D file (auto-converts `.blend`→`.glb`, old `.fbx`→`.obj`) |
 | `GET` | `/api/asset/archive` | Extract and serve a 3D file from an archive |
 | `GET` | `/api/asset/prepare_archive` | Extract archived asset + return resolved temp paths |
 | `GET` | `/api/asset/related` | Serve a related file (material, texture) |
 | `POST` | `/api/export` | Export an unmodified asset |
 | `POST` | `/api/export_modified` | Export a modified model (OBJ from frontend) |
+| `POST` | `/api/scan_textures` | Scan a folder recursively for texture files |
 | `POST` | `/api/reveal` | Open file manager and select a file |
 | `POST` | `/api/rename` | Rename a file or folder |
 | `POST` | `/api/duplicate` | Duplicate a file |

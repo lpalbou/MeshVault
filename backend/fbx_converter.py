@@ -77,26 +77,51 @@ class GeometryData:
 
 def get_fbx_version(file_path: str) -> Optional[int]:
     """
-    Read the FBX version from a binary FBX file header.
+    Read the FBX version from a file header.
 
+    Handles both binary FBX (Kaydara header) and ASCII FBX (; FBX x.y.z).
     Returns the version number (e.g., 6100, 7400) or None if not a valid FBX.
     """
     try:
         with open(file_path, "rb") as f:
-            magic = f.read(21)
-            if magic != FBX_MAGIC:
-                return None
-            # Skip 2 bytes (0x1A, 0x00)
-            f.read(2)
-            version = struct.unpack("<I", f.read(4))[0]
-            return version
+            header = f.read(27)
+
+            # Binary FBX: starts with "Kaydara FBX Binary  \x00"
+            if header[:21] == FBX_MAGIC:
+                version = struct.unpack("<I", header[23:27])[0]
+                return version
+
+            # ASCII FBX: starts with "; FBX x.y.z project file"
+            try:
+                text = header.decode("ascii", errors="ignore")
+                if text.startswith("; FBX"):
+                    # Parse version from "; FBX 6.1.0 project file"
+                    import re
+                    match = re.search(r"FBX\s+(\d+)\.(\d+)", text)
+                    if match:
+                        major = int(match.group(1))
+                        minor = int(match.group(2))
+                        return major * 1000 + minor * 100
+            except Exception:
+                pass
+
+        return None
     except Exception:
         return None
 
 
+def is_ascii_fbx(file_path: str) -> bool:
+    """Check if an FBX file is ASCII format (not binary)."""
+    try:
+        with open(file_path, "rb") as f:
+            return f.read(5) == b"; FBX"
+    except Exception:
+        return False
+
+
 def convert_fbx_to_obj(fbx_path: str, obj_path: str) -> bool:
     """
-    Convert an FBX binary file (version < 7000) to Wavefront OBJ format.
+    Convert an FBX file (version < 7000, binary or ASCII) to Wavefront OBJ.
 
     Args:
         fbx_path: Path to the input FBX file.
@@ -106,12 +131,16 @@ def convert_fbx_to_obj(fbx_path: str, obj_path: str) -> bool:
         True if conversion succeeded, False otherwise.
     """
     try:
+        # Handle ASCII FBX separately
+        if is_ascii_fbx(fbx_path):
+            return _convert_ascii_fbx_to_obj(fbx_path, obj_path)
+
         version = get_fbx_version(fbx_path)
         if version is None:
-            logger.error(f"Not a valid FBX binary file: {fbx_path}")
+            logger.error(f"Not a valid FBX file: {fbx_path}")
             return False
 
-        logger.info(f"Parsing FBX version {version}: {fbx_path}")
+        logger.info(f"Parsing FBX binary version {version}: {fbx_path}")
 
         # Parse the FBX tree
         root = _parse_fbx_binary(fbx_path, version)
@@ -500,3 +529,144 @@ def _write_obj(geometries: list[GeometryData], obj_path: str):
         sum(1 for idx in g.indices if idx < 0) for g in geometries
     )
     logger.info(f"OBJ written: {total_verts} vertices, {total_faces} faces")
+
+
+# =============================================================
+# ASCII FBX Parser (for FBX 6.x text format)
+# =============================================================
+
+def _convert_ascii_fbx_to_obj(fbx_path: str, obj_path: str) -> bool:
+    """
+    Convert an ASCII FBX file to Wavefront OBJ format.
+
+    ASCII FBX 6.x stores geometry in a text tree structure.
+    Vertices are in "Vertices:" arrays, faces in "PolygonVertexIndex:".
+    """
+    import re
+
+    logger.info(f"Parsing ASCII FBX: {fbx_path}")
+
+    try:
+        with open(fbx_path, "r", errors="replace") as f:
+            content = f.read()
+
+        # Extract all Vertices blocks
+        all_vertices = []
+        all_indices = []
+
+        # Find Vertices: x,y,z,x,y,z,...
+        vert_pattern = re.compile(
+            r"Vertices:\s*([\d\s.,eE+-]+?)(?=\n\s*\w|\n\s*})",
+            re.DOTALL
+        )
+        idx_pattern = re.compile(
+            r"PolygonVertexIndex:\s*([\d\s.,eE+-]+?)(?=\n\s*\w|\n\s*})",
+            re.DOTALL
+        )
+        normal_pattern = re.compile(
+            r"Normals:\s*([\d\s.,eE+-]+?)(?=\n\s*\w|\n\s*})",
+            re.DOTALL
+        )
+
+        vert_matches = vert_pattern.findall(content)
+        idx_matches = idx_pattern.findall(content)
+        normal_matches = normal_pattern.findall(content)
+
+        if not vert_matches:
+            logger.error("No vertices found in ASCII FBX")
+            return False
+
+        # Parse all geometry blocks
+        geometries = []
+        for i, vert_text in enumerate(vert_matches):
+            # Parse vertices
+            nums = [float(x) for x in re.findall(r'[+-]?\d+\.?\d*(?:[eE][+-]?\d+)?', vert_text)]
+            vertices = nums
+
+            # Parse indices
+            indices = []
+            if i < len(idx_matches):
+                indices = [int(x) for x in re.findall(r'-?\d+', idx_matches[i])]
+
+            # Parse normals (optional)
+            normals = []
+            if i < len(normal_matches):
+                normals = [float(x) for x in re.findall(r'[+-]?\d+\.?\d*(?:[eE][+-]?\d+)?', normal_matches[i])]
+
+            if vertices and indices:
+                geometries.append({
+                    "vertices": vertices,
+                    "indices": indices,
+                    "normals": normals,
+                })
+
+        if not geometries:
+            logger.error("No usable geometry found in ASCII FBX")
+            return False
+
+        # Write OBJ
+        with open(obj_path, "w") as f:
+            f.write(f"# Converted from ASCII FBX by MeshVault\n")
+            f.write(f"# Geometries: {len(geometries)}\n\n")
+
+            vertex_offset = 0
+            normal_offset = 0
+
+            for gi, geo in enumerate(geometries):
+                verts = geo["vertices"]
+                indices = geo["indices"]
+                normals = geo["normals"]
+                num_verts = len(verts) // 3
+                has_normals = len(normals) >= 3
+
+                f.write(f"o Mesh_{gi}\n")
+
+                # Write vertices
+                for vi in range(num_verts):
+                    x = verts[vi * 3]
+                    y = verts[vi * 3 + 1]
+                    z = verts[vi * 3 + 2]
+                    f.write(f"v {x} {y} {z}\n")
+
+                # Write normals
+                if has_normals:
+                    num_normals = len(normals) // 3
+                    for ni in range(num_normals):
+                        f.write(f"vn {normals[ni*3]} {normals[ni*3+1]} {normals[ni*3+2]}\n")
+
+                # Write faces from PolygonVertexIndex
+                # Negative index = end of polygon (bitwise NOT to get actual index)
+                polygon = []
+                normal_idx = 0
+                for raw_idx in indices:
+                    if raw_idx < 0:
+                        actual_idx = ~raw_idx
+                        polygon.append(actual_idx)
+                        # Write the face
+                        face_parts = []
+                        for vi in polygon:
+                            v = vi + 1 + vertex_offset
+                            if has_normals and normal_idx < len(normals) // 3:
+                                n = normal_idx + 1 + normal_offset
+                                face_parts.append(f"{v}//{n}")
+                                normal_idx += 1
+                            else:
+                                face_parts.append(str(v))
+                                normal_idx += 1
+                        f.write(f"f {' '.join(face_parts)}\n")
+                        polygon = []
+                    else:
+                        polygon.append(raw_idx)
+
+                vertex_offset += num_verts
+                if has_normals:
+                    normal_offset += len(normals) // 3
+                f.write("\n")
+
+        total_v = sum(len(g["vertices"]) // 3 for g in geometries)
+        logger.info(f"ASCII FBX → OBJ: {total_v} vertices written to {obj_path}")
+        return True
+
+    except Exception as e:
+        logger.error(f"ASCII FBX conversion failed: {e}")
+        return False

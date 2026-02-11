@@ -19,6 +19,7 @@ import { MTLLoader } from "three/addons/loaders/MTLLoader.js";
 import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
+import { TGALoader } from "three/addons/loaders/TGALoader.js";
 import { OBJExporter } from "three/addons/exporters/OBJExporter.js";
 import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
 import { SimplifyModifier } from "three/addons/modifiers/SimplifyModifier.js";
@@ -101,6 +102,7 @@ export class Viewer3D {
                 object = await this._loadOBJ(url, options);
             } else if (ext === ".fbx") {
                 object = await this._loadFBX(url, options);
+            
             } else if (ext === ".gltf" || ext === ".glb") {
                 object = await this._loadGLTF(url, options);
             } else if (ext === ".stl") {
@@ -453,6 +455,7 @@ export class Viewer3D {
         this._renderer = new THREE.WebGLRenderer({
             antialias: true,
             alpha: false,
+            preserveDrawingBuffer: true,  // Required for screenshot (toDataURL)
             powerPreference: "high-performance",
         });
         this._renderer.setSize(
@@ -900,12 +903,39 @@ export class Viewer3D {
         });
     }
 
-    _loadFBX(url) {
+    _loadFBX(url, options = {}) {
         return new Promise((resolve, reject) => {
-            const loader = new FBXLoader();
+            // Set up a loading manager that redirects texture requests
+            // through our API. This is essential for archived assets where
+            // textures are extracted to a temp directory.
+            const manager = new THREE.LoadingManager();
+            const relatedFiles = options.relatedFiles || [];
+
+            if (relatedFiles.length > 0) {
+                // Build a map of filename → API URL for texture resolution
+                const textureMap = {};
+                for (const f of relatedFiles) {
+                    const filename = f.split("/").pop().split("\\").pop();
+                    textureMap[filename.toLowerCase()] = `/api/asset/related?path=${encodeURIComponent(f)}`;
+                }
+
+                manager.setURLModifier((resourceUrl) => {
+                    // Extract filename from the URL the FBX loader wants
+                    const filename = resourceUrl.split("/").pop().split("\\").pop().split("?")[0];
+                    const match = textureMap[filename.toLowerCase()];
+                    if (match) {
+                        return match;
+                    }
+                    // If not in our map, try serving via related endpoint
+                    // (the URL might be a relative path from the FBX)
+                    return resourceUrl;
+                });
+            }
+
+            const loader = new FBXLoader(manager);
             loader.load(
                 url,
-                (object) => {
+                async (object) => {
                     try {
                         // Handle FBX animations
                         if (object.animations && object.animations.length > 0) {
@@ -914,6 +944,14 @@ export class Viewer3D {
                             action.play();
                             this._mixers.push(mixer);
                         }
+
+                        // Fallback for FBX exports that omit texture links:
+                        // if no maps are bound, auto-assign from related files
+                        // by filename conventions (_d, _n, _ao, etc.).
+                        if (relatedFiles.length > 0) {
+                            await this._autoBindFBXTextures(object, relatedFiles);
+                        }
+
                         resolve(object);
                     } catch (err) {
                         console.error("FBX post-load processing error:", err);
@@ -930,6 +968,348 @@ export class Viewer3D {
                 }
             );
         });
+    }
+
+    /**
+     * Auto-bind textures for FBX files when texture links are missing.
+     *
+     * Robust logic:
+     * - Supports TGA (common in DCC exports)
+     * - Scores texture candidates per material name (including numeric tokens)
+     * - Assigns maps per material instead of one global texture for all
+     * - Gracefully falls back when naming conventions are inconsistent
+     */
+    async _autoBindFBXTextures(object, relatedFiles) {
+        const textureEntries = (relatedFiles || [])
+            .filter((p) => this._isTextureFilePath(p))
+            .map((p) => this._buildTextureEntry(p));
+        if (textureEntries.length === 0) return 0;
+
+        // Deduplicate material instances across meshes.
+        const materials = [];
+        const seen = new Set();
+        object.traverse((child) => {
+            if (!child.isMesh || !child.material) return;
+            const mats = Array.isArray(child.material) ? child.material : [child.material];
+            for (const mat of mats) {
+                if (!mat || seen.has(mat)) continue;
+                seen.add(mat);
+                materials.push(mat);
+            }
+        });
+
+        const textureCache = new Map();
+        let needsUv2 = false;
+        let applied = 0;
+
+        for (const mat of materials) {
+            const matName = mat.name || "";
+            let changed = false;
+
+            const pick = (slot) => this._pickBestTextureEntry(textureEntries, matName, slot);
+
+            if (!mat.map) {
+                const entry = pick("map");
+                const tex = await this._loadTextureFromAbsPath(
+                    entry?.path,
+                    THREE.SRGBColorSpace,
+                    textureCache
+                );
+                if (tex) {
+                    mat.map = tex;
+                    changed = true;
+                }
+            }
+
+            if (!mat.normalMap) {
+                const entry = pick("normalMap");
+                const tex = await this._loadTextureFromAbsPath(
+                    entry?.path,
+                    THREE.LinearSRGBColorSpace,
+                    textureCache
+                );
+                if (tex) {
+                    mat.normalMap = tex;
+                    // DirectX normal maps have inverted green channel.
+                    if (entry?.isDirectX) {
+                        mat.normalScale = new THREE.Vector2(1, -1);
+                    }
+                    changed = true;
+                }
+            }
+
+            if (!mat.aoMap) {
+                const entry = pick("aoMap");
+                const tex = await this._loadTextureFromAbsPath(
+                    entry?.path,
+                    THREE.LinearSRGBColorSpace,
+                    textureCache
+                );
+                if (tex) {
+                    mat.aoMap = tex;
+                    mat.aoMapIntensity = 1.0;
+                    needsUv2 = true;
+                    changed = true;
+                }
+            }
+
+            if (mat.roughness !== undefined && !mat.roughnessMap) {
+                const entry = pick("roughnessMap");
+                const tex = await this._loadTextureFromAbsPath(
+                    entry?.path,
+                    THREE.LinearSRGBColorSpace,
+                    textureCache
+                );
+                if (tex) {
+                    mat.roughnessMap = tex;
+                    mat.roughness = Math.max(0.45, mat.roughness);
+                    changed = true;
+                }
+            }
+
+            if (mat.metalness !== undefined && !mat.metalnessMap) {
+                const entry = pick("metalnessMap");
+                const tex = await this._loadTextureFromAbsPath(
+                    entry?.path,
+                    THREE.LinearSRGBColorSpace,
+                    textureCache
+                );
+                if (tex) {
+                    mat.metalnessMap = tex;
+                    mat.metalness = Math.min(0.2, mat.metalness);
+                    changed = true;
+                }
+            }
+
+            if (!mat.bumpMap) {
+                const entry = pick("bumpMap");
+                const tex = await this._loadTextureFromAbsPath(
+                    entry?.path,
+                    THREE.LinearSRGBColorSpace,
+                    textureCache
+                );
+                if (tex) {
+                    mat.bumpMap = tex;
+                    mat.bumpScale = 0.05;
+                    changed = true;
+                }
+            }
+
+            if (changed) {
+                mat.needsUpdate = true;
+                applied += 1;
+            }
+        }
+
+        // AO maps require uv2 in Three.js. Copy uv -> uv2 when missing.
+        if (needsUv2) {
+            object.traverse((child) => {
+                if (!child.isMesh || !child.geometry) return;
+                if (child.geometry.hasAttribute("uv") && !child.geometry.hasAttribute("uv2")) {
+                    child.geometry.setAttribute("uv2", child.geometry.getAttribute("uv").clone());
+                }
+            });
+        }
+
+        return applied;
+    }
+
+    _isTextureFilePath(path) {
+        const lower = path.toLowerCase();
+        return (
+            lower.endsWith(".png") ||
+            lower.endsWith(".jpg") ||
+            lower.endsWith(".jpeg") ||
+            lower.endsWith(".tga") ||
+            lower.endsWith(".bmp") ||
+            lower.endsWith(".webp") ||
+            lower.endsWith(".gif") ||
+            lower.endsWith(".tif") ||
+            lower.endsWith(".tiff")
+        );
+    }
+
+    _buildTextureEntry(path) {
+        const file = path.split("/").pop().split("\\").pop();
+        const fileLower = file.toLowerCase();
+        const stemLower = fileLower.replace(/\.[^.]+$/, "");
+        return {
+            path,
+            fileLower,
+            stemLower,
+            slot: this._classifyTextureSlotFromPath(path),
+            tokens: this._tokenizeName(stemLower),
+            isDirectX: stemLower.includes("directx") || stemLower.includes("_dx"),
+            isOpenGL: stemLower.includes("opengl") || stemLower.includes("_ogl"),
+        };
+    }
+
+    _tokenizeName(name) {
+        const raw = (name || "")
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, " ")
+            .trim()
+            .split(/\s+/)
+            .filter(Boolean);
+
+        // Normalize numeric tokens so "01" and "1" match.
+        return raw.map((tok) => (/^\d+$/.test(tok) ? String(parseInt(tok, 10)) : tok));
+    }
+
+    _scoreTextureEntry(materialName, entry, targetSlot) {
+        const materialTokens = this._tokenizeName(materialName);
+        const tokenSet = new Set(materialTokens);
+
+        let score = 0;
+
+        // Slot fitness
+        if (entry.slot === targetSlot) {
+            score += 60;
+        } else if (targetSlot === "map" && entry.slot === "other") {
+            score += 25;
+        } else if (entry.slot === "other") {
+            score += 5;
+        } else {
+            score -= 15;
+        }
+
+        // Token overlap between material and texture names
+        let overlap = 0;
+        for (const token of entry.tokens) {
+            if (tokenSet.has(token)) {
+                overlap += 1;
+                score += /^\d+$/.test(token) ? 10 : 6;
+            }
+        }
+
+        // Weak fallback by compact-string containment
+        if (overlap === 0) {
+            const matCompact = materialTokens.join("");
+            const texCompact = entry.tokens.join("");
+            if (matCompact && texCompact) {
+                if (matCompact.includes(texCompact) || texCompact.includes(matCompact)) {
+                    score += 8;
+                }
+            }
+        } else {
+            score += overlap * 2;
+        }
+
+        // Prefer OpenGL normals over DirectX normals in Three.js.
+        if (targetSlot === "normalMap") {
+            if (entry.isOpenGL) score += 8;
+            if (entry.isDirectX) score -= 4;
+        }
+
+        // Avoid obviously wrong diffuse picks.
+        if (targetSlot === "map") {
+            if (/(wire|mask|id|height|normal|rough|metal|ao|occlusion)/.test(entry.stemLower)) {
+                score -= 18;
+            }
+        }
+
+        return score;
+    }
+
+    _pickBestTextureEntry(entries, materialName, targetSlot) {
+        if (!entries || entries.length === 0) return null;
+
+        let best = null;
+        let bestScore = -Infinity;
+        for (const entry of entries) {
+            const score = this._scoreTextureEntry(materialName, entry, targetSlot);
+            if (score > bestScore) {
+                bestScore = score;
+                best = entry;
+            }
+        }
+
+        // If scoring is weak, prefer deterministic slot fallback.
+        if (bestScore < 15) {
+            const slotCandidates = entries.filter((entry) => (
+                entry.slot === targetSlot ||
+                (targetSlot === "map" && entry.slot === "other")
+            ));
+            if (slotCandidates.length === 0) return null;
+            if (targetSlot === "normalMap") {
+                return (
+                    slotCandidates.find((entry) => entry.isOpenGL) ||
+                    slotCandidates.find((entry) => !entry.isDirectX) ||
+                    slotCandidates[0]
+                );
+            }
+            return slotCandidates[0];
+        }
+
+        return best;
+    }
+
+    async _loadTextureFromAbsPath(absPath, colorSpace, cache = null) {
+        if (!absPath) return null;
+
+        const cacheKey = `${absPath}|${colorSpace || "none"}`;
+        if (cache && cache.has(cacheKey)) {
+            return cache.get(cacheKey);
+        }
+
+        const promise = new Promise((resolve) => {
+            const url = `/api/asset/related?path=${encodeURIComponent(absPath)}`;
+            const lower = absPath.toLowerCase();
+            const onLoad = (tex) => {
+                if (!tex) return resolve(null);
+                if (colorSpace) tex.colorSpace = colorSpace;
+                tex.needsUpdate = true;
+                resolve(tex);
+            };
+            const onError = () => resolve(null);
+
+            if (lower.endsWith(".tga")) {
+                const loader = new TGALoader();
+                loader.load(url, onLoad, undefined, onError);
+            } else {
+                const loader = new THREE.TextureLoader();
+                loader.load(url, onLoad, undefined, onError);
+            }
+        });
+
+        if (cache) {
+            cache.set(cacheKey, promise);
+        }
+        return promise;
+    }
+
+    /**
+     * Classify a texture file into the most likely material slot.
+     */
+    _classifyTextureSlotFromPath(path) {
+        const file = path.split("/").pop().split("\\").pop().toLowerCase();
+        const stem = file.replace(/\.[^.]+$/, "");
+
+        if (/(^|[_\-\s])(n|nor|nrm|normal|normalmap)([_\-\s]|$)/.test(stem)) {
+            return "normalMap";
+        }
+        if (/(^|[_\-\s])(ao|occlusion|ambientocclusion)([_\-\s]|$)/.test(stem)) {
+            return "aoMap";
+        }
+        if (/(^|[_\-\s])(rough|roughness|rgh)([_\-\s]|$)/.test(stem)) {
+            return "roughnessMap";
+        }
+        if (/(^|[_\-\s])(metal|metallic|mtl|met)([_\-\s]|$)/.test(stem)) {
+            return "metalnessMap";
+        }
+        if (/(^|[_\-\s])(height|disp|displacement|bump)([_\-\s]|$)/.test(stem)) {
+            return "bumpMap";
+        }
+        if (/(^|[_\-\s])(d|diff|diffuse|albedo|basecolor|base_color|color|col)([_\-\s]|$)/.test(stem)) {
+            return "map";
+        }
+
+        // For unlabeled color textures (e.g. "Asteroids_01.jpg"), default to map.
+        if (/\.(png|jpg|jpeg|tga|bmp|webp|gif|tif|tiff)$/.test(file)) {
+            return "map";
+        }
+
+        return "other";
     }
 
     _loadSTL(url) {
@@ -1067,17 +1447,20 @@ export class Viewer3D {
             material.isMeshStandardMaterial ||
             material.isMeshPhysicalMaterial
         ) {
-            // Just ensure good defaults
+            // Fix unreasonably dark colors that make the model invisible
+            this._fixDarkColor(material);
             material.envMapIntensity = 0.5;
             material.needsUpdate = true;
             return material;
         }
 
         // Create a new MeshStandardMaterial preserving existing properties
+        let color = material.color
+            ? material.color.clone()
+            : new THREE.Color(0x808080);
+
         const params = {
-            color: material.color
-                ? material.color.clone()
-                : new THREE.Color(0x808080),
+            color: color,
             roughness: 0.6,
             metalness: 0.1,
             envMapIntensity: 0.5,
@@ -1092,12 +1475,106 @@ export class Viewer3D {
         if (material.transparent) params.transparent = true;
         if (material.opacity !== undefined) params.opacity = material.opacity;
 
+        // If material has specular/emissive color but very dark diffuse,
+        // use the specular or emissive as the base color instead
+        if (material.specular && this._isVeryDark(color)) {
+            if (!this._isVeryDark(material.specular)) {
+                params.color = material.specular.clone();
+            }
+        }
+        if (material.emissive && this._isVeryDark(color)) {
+            if (!this._isVeryDark(material.emissive)) {
+                params.color = material.emissive.clone();
+            }
+        }
+
         const upgraded = new THREE.MeshStandardMaterial(params);
+
+        // Fix dark color after creation
+        this._fixDarkColor(upgraded);
 
         // Dispose old material
         material.dispose();
 
         return upgraded;
+    }
+
+    /**
+     * Check if a color is unreasonably dark (nearly black).
+     */
+    _isVeryDark(color) {
+        if (!color) return true;
+        const lum = color.r * 0.299 + color.g * 0.587 + color.b * 0.114;
+        return lum < 0.15;
+    }
+
+    /**
+     * Fix materials that are too dark to see properly.
+     *
+     * Many FBX models from asset stores use very dark diffuse colors
+     * because they were designed for engines with IBL/environment maps.
+     * In our PBR setup without env maps, these appear nearly black.
+     *
+     * For untextured materials: enforce a minimum brightness.
+     */
+    _fixDarkColor(material) {
+        let changed = false;
+
+        // Some FBX exports set transparent=true with very low opacity even for
+        // opaque meshes. In a preview viewer this makes assets nearly invisible.
+        if (material.transparent && !material.alphaMap && material.opacity < 0.2) {
+            material.transparent = false;
+            material.opacity = 1.0;
+            changed = true;
+        }
+
+        // In a no-IBL preview environment, very metallic materials can look
+        // almost black. Clamp extreme values when no metalness/roughness maps
+        // are provided.
+        if (
+            material.metalness !== undefined &&
+            material.roughness !== undefined &&
+            !material.envMap
+        ) {
+            if (!material.metalnessMap && material.metalness > 0.75) {
+                material.metalness = material.map ? 0.35 : 0.15;
+                changed = true;
+            }
+            if (!material.roughnessMap && material.roughness < 0.25) {
+                material.roughness = 0.45;
+                changed = true;
+            }
+        }
+
+        if (material.color) {
+            const lum = material.color.r * 0.299 + material.color.g * 0.587 + material.color.b * 0.114;
+
+            if (material.map) {
+                // Textured materials should usually use a neutral (white)
+                // diffuse multiplier. Near-black multipliers crush textures.
+                if (lum < 0.25) {
+                    material.color.set(0xffffff);
+                    changed = true;
+                }
+            } else {
+                if (lum < 0.15) {
+                    // Boost to a visible neutral gray
+                    material.color.set(0x808080);
+                    changed = true;
+                } else if (lum < 0.3) {
+                    // Slightly dark — brighten proportionally
+                    const boost = 0.3 / lum;
+                    material.color.r = Math.min(1, material.color.r * boost);
+                    material.color.g = Math.min(1, material.color.g * boost);
+                    material.color.b = Math.min(1, material.color.b * boost);
+                    changed = true;
+                }
+            }
+        }
+
+        if (changed) {
+            material.needsUpdate = true;
+        }
     }
 
     // ==========================================
@@ -1822,38 +2299,50 @@ export class Viewer3D {
         return stats.vertices;
     }
 
-    simplifyModel(targetRatio) {
+    /**
+     * Simplify model geometry — async, cancellable, processes one mesh at a time.
+     *
+     * @param {number} targetRatio - 0.0–1.0 ratio of vertices to keep
+     * @param {AbortSignal} signal - AbortController signal to cancel
+     * @returns {Promise<{before: number, after: number}>}
+     */
+    async simplifyModel(targetRatio, signal) {
         if (!this._currentModel) return { before: 0, after: 0 };
 
         const modifier = new SimplifyModifier();
         let totalBefore = 0;
         let totalAfter = 0;
 
-        // If normals are displayed, turn them off during simplification
         const hadNormals = this._normalsVisible;
         if (hadNormals) this.setNormalsVisible(false);
 
-        // Bake world transforms first so mergeVertices works correctly
+        // Bake world transforms first
         this._bakeWorldTransforms();
 
+        // Collect meshes to process
+        const meshes = [];
         this._currentModel.traverse((child) => {
-            if (!child.isMesh || !child.geometry) return;
+            if (child.isMesh && child.geometry) meshes.push(child);
+        });
 
+        // Process one mesh at a time with yield to UI between each
+        for (let i = 0; i < meshes.length; i++) {
+            // Check for cancellation
+            if (signal && signal.aborted) {
+                return { before: totalBefore, after: totalAfter, cancelled: true };
+            }
+
+            const child = meshes[i];
             let geo = child.geometry;
 
-            // Step 1: Merge vertices to create indexed topology.
-            // SimplifyModifier requires shared vertices (indexed geometry)
-            // to perform meaningful edge collapses.
-            // Remove normals first so vertices at UV seams can merge.
+            // Merge vertices
             geo.deleteAttribute("normal");
-            const hadUV = geo.hasAttribute("uv");
-            if (hadUV) geo.deleteAttribute("uv");
+            if (geo.hasAttribute("uv")) geo.deleteAttribute("uv");
             geo = BufferGeometryUtils.mergeVertices(geo, 0.0001);
 
             const vertCount = geo.attributes.position.count;
             totalBefore += vertCount;
 
-            // Step 2: Calculate vertices to remove
             const targetCount = Math.max(4, Math.floor(vertCount * targetRatio));
             const removeCount = vertCount - targetCount;
 
@@ -1862,38 +2351,162 @@ export class Viewer3D {
                 child.geometry = geo;
                 child.geometry.computeVertexNormals();
                 totalAfter += vertCount;
-                return;
+            } else {
+                try {
+                    const simplified = modifier.modify(geo, removeCount);
+                    child.geometry.dispose();
+                    child.geometry = simplified;
+                    totalAfter += simplified.attributes.position.count;
+                } catch (err) {
+                    console.warn(`Simplification failed for mesh ${child.name}:`, err);
+                    child.geometry.dispose();
+                    child.geometry = geo;
+                    totalAfter += vertCount;
+                }
+
+                child.geometry.computeVertexNormals();
+                child.geometry.computeBoundingBox();
+                child.geometry.computeBoundingSphere();
             }
 
-            try {
-                // Step 3: Simplify the indexed geometry
-                const simplified = modifier.modify(geo, removeCount);
-                child.geometry.dispose();
-                child.geometry = simplified;
-                totalAfter += simplified.attributes.position.count;
-            } catch (err) {
-                console.warn(`Simplification failed for mesh ${child.name}:`, err);
-                child.geometry.dispose();
-                child.geometry = geo;
-                totalAfter += vertCount;
-            }
-
-            // Step 4: Recompute normals on the result
-            child.geometry.computeVertexNormals();
-            child.geometry.computeBoundingBox();
-            child.geometry.computeBoundingSphere();
-        });
+            // Yield to UI after each mesh (allows cancel button to be clicked)
+            await new Promise((r) => setTimeout(r, 10));
+        }
 
         this._modelModified = true;
-
-        // Refresh normals display if it was on
         if (hadNormals) this.setNormalsVisible(true);
 
-        // Update stats
         const stats = this._computeStats(this._currentModel);
         this._onInfoUpdate(stats);
 
         return { before: totalBefore, after: totalAfter };
+    }
+
+    /**
+     * Apply textures from a scanned texture folder.
+     *
+     * Takes a map of lowercase filename → server path (from /api/scan_textures),
+     * scans all materials for missing texture maps, and attempts to load
+     * matching textures by filename (case-insensitive).
+     *
+     * @param {Object} textureMap - { "filename.png": "/abs/path/filename.png", ... }
+     * @returns {number} Number of textures applied
+     */
+    async applyTextureFolder(textureMap) {
+        if (!this._currentModel) return 0;
+
+        let applied = 0;
+        const textureCache = new Map();
+
+        const loadTexture = async (path, prop) => {
+            const colorSpace = (prop === "map" || prop === "emissiveMap")
+                ? THREE.SRGBColorSpace
+                : THREE.LinearSRGBColorSpace;
+            return this._loadTextureFromAbsPath(path, colorSpace, textureCache);
+        };
+
+        // Scan all materials for missing maps
+        const mapProps = ["map", "normalMap", "roughnessMap", "metalnessMap",
+                          "aoMap", "emissiveMap", "bumpMap", "displacementMap",
+                          "alphaMap", "envMap", "lightMap"];
+
+        for (const matInfo of this.getMaterialsInfo()) {
+            const mat = matInfo.material;
+            let matChanged = false;
+
+            // Check each texture slot
+            for (const prop of mapProps) {
+                // Skip if already has a texture loaded
+                if (mat[prop]) continue;
+
+                // Check if there's a reference we can try to resolve
+                // For materials without explicit references, try common naming
+                // conventions: {materialName}_diffuse, {materialName}_normal, etc.
+                const conventions = this._getTextureConventions(matInfo.name, prop);
+
+                for (const name of conventions) {
+                    const match = textureMap[name.toLowerCase()];
+                    if (match) {
+                        const tex = await loadTexture(match, prop);
+                        if (tex) {
+                            mat[prop] = tex;
+                            matChanged = true;
+                            applied++;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Also try to assign a diffuse map if nothing was found via conventions
+            // by matching any texture with a similar name to the material
+            if (!mat.map && !matChanged) {
+                const matName = matInfo.name.toLowerCase().replace(/[_\s-]/g, "");
+                for (const [filename, filepath] of Object.entries(textureMap)) {
+                    const cleanFile = filename.replace(/[_\s-]/g, "").replace(/\.\w+$/, "");
+                    if (cleanFile.includes(matName) || matName.includes(cleanFile)) {
+                        const tex = await loadTexture(filepath, "map");
+                        if (tex) {
+                            mat.map = tex;
+                            matChanged = true;
+                            applied++;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (matChanged) {
+                mat.needsUpdate = true;
+            }
+        }
+
+        return applied;
+    }
+
+    /**
+     * Generate texture filename conventions for a material + channel.
+     * Tries common naming patterns used by 3D tools.
+     */
+    _getTextureConventions(materialName, channel) {
+        const name = materialName.replace(/\s+/g, "_");
+        const channelNames = {
+            map: ["diffuse", "basecolor", "base_color", "color", "albedo", "diff", "col"],
+            normalMap: ["normal", "norm", "nrm", "bump"],
+            roughnessMap: ["roughness", "rough", "rgh"],
+            metalnessMap: ["metalness", "metallic", "metal", "met"],
+            aoMap: ["ao", "ambient_occlusion", "occlusion", "occ"],
+            emissiveMap: ["emissive", "emission", "emit", "glow"],
+            bumpMap: ["bump", "height", "disp"],
+            displacementMap: ["displacement", "disp", "height"],
+            alphaMap: ["alpha", "opacity", "mask", "transparency"],
+        };
+
+        const suffixes = channelNames[channel] || [];
+        const results = [];
+        const exts = [".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tiff"];
+
+        for (const suffix of suffixes) {
+            for (const ext of exts) {
+                results.push(`${name}_${suffix}${ext}`);
+                results.push(`${suffix}${ext}`);
+            }
+        }
+
+        return results;
+    }
+
+    /**
+     * Capture the current 3D view as a PNG and trigger download.
+     */
+    screenshot() {
+        // Render one frame with preserveDrawingBuffer
+        this._renderer.render(this._scene, this._camera);
+        const dataUrl = this._renderer.domElement.toDataURL("image/png");
+        const link = document.createElement("a");
+        link.download = "meshvault_screenshot.png";
+        link.href = dataUrl;
+        link.click();
     }
 
     exportAsOBJ() {
@@ -2008,10 +2621,17 @@ export class Viewer3D {
 
         const uniqueVerts = uniqueSet.size;
 
+        // Compute bounding box dimensions
+        const box = new THREE.Box3().setFromObject(object);
+        const size = box.getSize(new THREE.Vector3());
+
         return {
             vertices: Math.round(uniqueVerts),
             faces: Math.round(faces),
             bufferVertices: Math.round(bufferVerts),
+            width: size.x,
+            height: size.y,
+            depth: size.z,
         };
     }
 }

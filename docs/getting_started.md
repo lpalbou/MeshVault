@@ -1,112 +1,77 @@
 # Getting Started
 
-This guide walks you through installing, running, and using MeshVault for the first time.
-
 ---
 
 ## Prerequisites
 
-### Required
+- **Python 3.10+** · **Poetry** (`curl -sSL https://install.python-poetry.org | python3 -`)
+- Optional: `bsdtar`/`unrar`/`7z`/`unar` for RAR support, **Blender** for `.blend` files
 
-- **Python 3.10 or newer** — Check with `python3 --version`
-- **Poetry** — `curl -sSL https://install.python-poetry.org | python3 -`
-
-### Optional (for RAR support)
-
-| Tool | macOS | Linux |
-|------|-------|-------|
-| `bsdtar` | Often pre-installed | `sudo apt install libarchive-tools` |
-| `unrar` | `brew install unrar` | `sudo apt install unrar` |
-| `7z` | `brew install p7zip` | `sudo apt install p7zip-full` |
-| `unar` | `brew install unar` | `sudo apt install unar` |
-
----
-
-## Installation
+## Installation & Run
 
 ```bash
-git clone https://github.com/lpalbou/meshvault.git
-cd meshvault
+git clone https://github.com/lpalbou/meshvault.git && cd meshvault
 poetry install --no-root
-poetry run pytest tests/ -v   # All 12 tests should pass
+poetry run meshvault          # → http://localhost:8420
+PORT=9000 poetry run meshvault  # Custom port
 ```
 
 ---
 
-## Running
+## Supported Formats
 
-```bash
-poetry run meshvault
-# Custom port:
-PORT=9000 poetry run meshvault
-```
-
-Open **http://localhost:8420** in your browser.
+| Format | Badge | Notes |
+|--------|-------|-------|
+| `.obj` | 🟢 Green | + `.mtl` materials and textures |
+| `.fbx` | 🟠 Orange | v7000+ native, older auto-converted to OBJ |
+| `.gltf`/`.glb` | 🔵 Cyan | GL Transmission Format |
+| `.stl` | 🟣 Violet | Stereolithography |
+| `.blend` | 🟠 Deep orange | Requires Blender installed (auto-converts to GLB) |
+| `.max` | ⚫ Gray | Detection only — convert in 3ds Max first |
+| `.zip`/`.rar` | 📦 | Archive scanning |
+| `.unitypackage` | 📦 | Unity package parsing (GUID-based structure) |
 
 ---
 
 ## The Interface
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│ MeshVault  [🔄][↺] | [⊕][⏚][◇] | [X± Y± Z±] | [◆ Simplify][⊛][✱] | [Export] │
-├──────────────┬───────────────────────────────────────────────────────────────────┤
-│ [Sort ▾]     │                                           [👁][▦][⚐][◇][↕][⊙][☀] │
-│ [≡] [⊞]     │                                                                   │
-│ [Filter...]  │              3D Viewer (Three.js)                                 │
-│              │                                                                   │
-│  File        │                                                                   │
-│  Browser     │  [bg swatches]                                          [scale]   │
-│  (sidebar)   │  [stats]                                                          │
-└──────────────┴───────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│ MeshVault  [🔄][↺] | [⊕][⏚][◇] | [X± Y± Z±] | [◆][⊛] | [Export]  │
+├──────────────┬─────────────────────────────────────────────────────────┤
+│ [Sort][≡][⊞] │                    [📷][👁][▦][⚐][◇][↕][🖼][⊙][☀]   │
+│ [Filter...]  │                                                         │
+│              │              3D Viewer                                   │
+│  File        │                                                         │
+│  Browser     │  [bg swatches]                              [scale]     │
+│              │  [stats]                                                │
+└──────────────┴─────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Browsing Files
+## File Browser (sidebar)
 
-- **Navigate**: Double-click folders, ◀ to go up, 🏠 to go home
-- **Sort**: Dropdown selector — A–Z, Z–A, Size ↑, Size ↓, Type
-- **View**: Toggle between list and grid views
-- **Filter**: Type to filter folders and assets by name
-- **Right-click**: Context menu with Rename, Duplicate, Delete, Show in file manager
-
-### Asset Types
-
-| Badge | Format |
-|-------|--------|
-| 🟢 OBJ | Wavefront OBJ |
-| 🟠 FBX | Autodesk FBX |
-| 🔵 GLTF/GLB | GL Transmission Format |
-| 🟣 STL | Stereolithography |
-| 📦 Purple | Asset inside ZIP/RAR archive |
+- **Navigate**: Double-click folders, ◀ up, 🏠 home
+- **Sort**: A–Z, Z–A, Size ↑/↓, Type (persisted)
+- **View**: List or grid toggle (persisted)
+- **Filter**: Type to filter by name
+- **Right-click**: Rename (inline), Duplicate, Delete, Show in file manager
+- **Remember**: Opens to last visited directory on restart
 
 ---
 
-## Camera Controls
+## Camera
 
-### Orbit Mode (default)
+| Orbit (default) | FPV Drone |
+|-----------------|-----------|
+| Left-drag: orbit | W/Shift: forward |
+| Scroll: zoom | S/Ctrl: backward |
+| Right-drag: pan | A/D, ←/→: yaw |
+| Right-click: set pivot | ↑/↓: pitch, E/Q: altitude |
+| | Left-drag: mouse look |
 
-| Input | Action |
-|-------|--------|
-| Left-click drag | Orbit around pivot |
-| Scroll | Zoom in/out |
-| Right-click drag | Pan |
-| Right-click (no drag) | Set new orbit pivot |
-| Spacebar | Reset camera |
-
-### FPV Mode (drone)
-
-| Input | Action |
-|-------|--------|
-| W / Shift | Fly forward |
-| S / Ctrl | Fly backward |
-| A / ← | Yaw left |
-| D / → | Yaw right |
-| ↑ / ↓ | Pitch up/down |
-| E / Q | Altitude up/down |
-| Left-click drag | Mouse look |
-| Spacebar | Reset camera (→ Orbit) |
+**Spacebar**: reset camera (model untouched)
 
 ---
 
@@ -114,15 +79,17 @@ Open **http://localhost:8420** in your browser.
 
 | Button | Function |
 |--------|----------|
+| 📷 Screenshot | Save current view as PNG |
 | Orbit/FPV | Toggle navigation mode |
 | Grid | Floor grid (scales to model, adapts to background) |
-| Axes | XYZ axis helper (X=red, Y=green, Z=blue with labels) |
+| Axes | XYZ helper (X=red, Y=green, Z=blue + labels) |
 | Wireframe | Wireframe overlay |
-| Normals | Vertex normals visualization (cyan lines) |
-| Materials | Draggable floating panel — lists all materials with PBR properties |
-| Light (☀) | Collapsible panel — direction, intensity, exposure |
+| Normals | Vertex normals visualization |
+| 🖼 Textures | Load textures from external folder (smart matching) |
+| Materials | Draggable panel — all PBR material properties |
+| ☀ Lights | Direction, intensity, exposure |
 
-Settings persist across model loads.
+All settings persist across model loads.
 
 ---
 
@@ -130,49 +97,44 @@ Settings persist across model loads.
 
 | Button | Action |
 |--------|--------|
-| **Reload** (🔄) | Reload model from disk (discard all changes) |
-| **Reset** (↺) | Undo all transforms (restore original geometry) |
-| **Center** (⊕) | Move bounding box center to (0,0,0) |
-| **Ground** (⏚) | Center X/Z, lowest point at Y=0 |
-| **Orient** (◇) | PCA auto-orient (smallest axis → Y up) |
-| **X± Y± Z±** | Rotate ±90° around each axis |
-| **Simplify** (◆) | LOD — reduce vertex count via edge collapse |
-| **Normals** (✱) | Recompute smooth vertex normals |
-| **Export** (⬆) | Save As dialog with folder browser |
+| 🔄 Reload | Re-fetch from disk |
+| ↺ Reset | Undo all transforms |
+| ⊕ Center | Bbox center → (0,0,0) |
+| ⏚ Ground | Center X/Z, bottom at Y=0 |
+| ◇ Orient | PCA auto-orient |
+| X±/Y±/Z± | Rotate ±90° |
+| ◆ Simplify | Edge collapse LOD (percentage slider) |
+| ⊛ Normals | Recompute smooth normals |
+| ⬆ Export | Save As dialog |
 
 ---
 
-## Background & Scale
+## Texture Folder Picker
 
-- **12 swatches** (bottom-left): neutral ramp + tinted options. Grid adapts.
-- **Scale slider** (bottom-right): 0.05×–5.0× with 0.05 steps.
+For models with textures in separate archives/folders:
+1. Load the model
+2. Click the **texture button** in the toolbar
+3. Navigate to the folder with textures
+4. Click **Apply textures**
+
+Matching: convention-based (`{name}_diffuse.png`) + fuzzy name matching, case-insensitive.
 
 ---
 
 ## Mesh Simplification
 
-Click **Simplify** → set target percentage → **Apply**. Merges vertices first for proper edge collapse. Normals are recomputed automatically. Full-screen processing overlay during computation.
+Click **Simplify** → set target % → **Apply**. Merges vertices → edge collapse → recompute normals. Full-screen overlay during processing.
 
 ---
 
-## Save As / Export
+## Export (Save As)
 
-Click **Export** → **Save As dialog**:
-- Folder browser to navigate directories
-- Filename pre-filled (original name + extension)
-- Modified models export as `.obj` with all transforms baked
-- File browser auto-refreshes after save
-
----
-
-## Stopping
-
-Press `Ctrl+C` in terminal. Temp files cleaned up automatically.
+Click **Export** → folder browser dialog → filename pre-filled → **Save**.
+- Unmodified: copies original file(s)
+- Modified (center/orient/rotate/simplify/scale): exports as `.obj` with baked transforms
 
 ---
 
 ## Next Steps
 
-- [Architecture](architecture.md) — System design
-- [API Reference](api.md) — Backend REST API
-- [FAQ](faq.md) — Troubleshooting
+- [Architecture](architecture.md) · [API Reference](api.md) · [FAQ](faq.md)
