@@ -64,12 +64,14 @@ export class FileBrowser {
      * @param {HTMLElement} pathDisplay - Element showing current path
      * @param {Function} onAssetSelect - Callback when an asset is selected
      * @param {Function} onStatusUpdate - Callback to update status text
+     * @param {Function} [onExportRequest] - Callback when user requests export from context menu
      */
-    constructor(container, pathDisplay, onAssetSelect, onStatusUpdate) {
+    constructor(container, pathDisplay, onAssetSelect, onStatusUpdate, onExportRequest = null) {
         this._container = container;
         this._pathDisplay = pathDisplay;
         this._onAssetSelect = onAssetSelect;
         this._onStatusUpdate = onStatusUpdate;
+        this._onExportRequest = onExportRequest;
         this._currentPath = null;
         this._parentPath = null;
         this._selectedElement = null;
@@ -87,6 +89,14 @@ export class FileBrowser {
         this._container.addEventListener("contextmenu", (e) => {
             e.preventDefault();
         });
+
+        // Hover tooltip (archive context) — created lazily.
+        this._archiveTooltipEl = null;
+        this._archiveTooltipTimer = null;
+        this._archiveTooltipAnchor = null;
+
+        // Hide tooltip on scroll (e.g. sidebar scroll)
+        this._container.addEventListener("scroll", () => this._hideArchiveTooltip(), { passive: true });
     }
 
     /** Get the current browsing path */
@@ -265,9 +275,20 @@ export class FileBrowser {
             folders = folders.filter((f) =>
                 f.name.toLowerCase().includes(filter)
             );
-            assets = assets.filter((a) =>
-                a.name.toLowerCase().includes(filter)
-            );
+            assets = assets.filter((a) => {
+                const n = (a.name || "").toLowerCase();
+                if (n.includes(filter)) return true;
+                // Archives can contain many similarly-named assets (e.g. Asteroid_2)
+                // across different packs. Include archive/container context in search
+                // so users can disambiguate by pack name or inner path.
+                if (a.is_in_archive) {
+                    const arch = this._basename(a.archive_path || "").toLowerCase();
+                    const inner = (a.inner_path || "").toLowerCase();
+                    if (arch && arch.includes(filter)) return true;
+                    if (inner && inner.includes(filter)) return true;
+                }
+                return false;
+            });
         }
 
         // Apply sorting
@@ -379,7 +400,8 @@ export class FileBrowser {
         const sizeTxt = this._formatSize(asset.size);
         let metaParts = [sizeTxt, asset.extension];
         if (asset.is_in_archive) {
-            metaParts.push("📦 in archive");
+            const arch = this._basename(asset.archive_path || "");
+            metaParts.push(arch ? `📦 ${arch}` : "📦 archive");
         }
         if (asset.related_files && asset.related_files.length > 0) {
             metaParts.push(`+${asset.related_files.length} files`);
@@ -408,13 +430,18 @@ export class FileBrowser {
             this._onAssetSelect(asset);
         });
 
+        // Hover tooltip (archive context) — delayed by 1s
+        if (asset.is_in_archive) {
+            this._attachArchiveTooltip(item, asset);
+        }
+
         // Right-click context menu
         const revealPath = asset.is_in_archive ? asset.archive_path : asset.path;
         const revealName = asset.is_in_archive
             ? asset.archive_path.split("/").pop()
             : asset.path.split("/").pop();
         item.addEventListener("contextmenu", (e) => {
-            this._showContextMenu(e, revealPath, revealName);
+            this._showContextMenu(e, revealPath, revealName, { kind: "asset", asset });
         });
 
         return item;
@@ -438,16 +465,27 @@ export class FileBrowser {
             <div class="asset-card-name">${this._escapeHtml(asset.name)}</div>
             <span class="file-item-badge ${badgeClass}">${badgeText}</span>
         `;
+        if (asset.is_in_archive) {
+            const arch = this._basename(asset.archive_path || "");
+            const inner = asset.inner_path || "";
+            // Tooltip disambiguation for assets coming from different archives.
+            card.title = arch ? `Archive: ${arch}\n${inner}` : `Archive\n${inner}`;
+        }
 
         card.addEventListener("click", () => {
             this._setSelected(card);
             this._onAssetSelect(asset);
         });
 
+        // Hover tooltip (archive context) — delayed by 1s
+        if (asset.is_in_archive) {
+            this._attachArchiveTooltip(card, asset);
+        }
+
         const cardRevealPath = asset.is_in_archive ? asset.archive_path : asset.path;
         const cardRevealName = cardRevealPath.split("/").pop();
         card.addEventListener("contextmenu", (e) => {
-            this._showContextMenu(e, cardRevealPath, cardRevealName);
+            this._showContextMenu(e, cardRevealPath, cardRevealName, { kind: "asset", asset });
         });
 
         return card;
@@ -473,13 +511,19 @@ export class FileBrowser {
         return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
     }
 
+    /** Return the last path component (supports / and \\). */
+    _basename(p) {
+        if (!p) return "";
+        return String(p).split(/[/\\\\]/).pop() || "";
+    }
+
     /**
      * Show a context menu with file operations.
      * @param {MouseEvent} event
      * @param {string} filePath - Absolute path to the file/folder
      * @param {string} [fileName] - Display name (for rename prompt)
      */
-    _showContextMenu(event, filePath, fileName) {
+    _showContextMenu(event, filePath, fileName, context = null) {
         event.preventDefault();
         event.stopPropagation();
         this._dismissContextMenu();
@@ -487,11 +531,32 @@ export class FileBrowser {
         const menu = document.createElement("div");
         menu.className = "context-menu";
 
+        const ctx = context || {};
+        const asset = ctx && ctx.asset ? ctx.asset : null;
+
+        // Header (archive name) — wrap, never truncate
+        if (asset && asset.is_in_archive) {
+            const archName = this._basename(asset.archive_path || "");
+            const header = document.createElement("div");
+            header.className = "context-menu-header";
+            header.innerHTML =
+                `<span class="ctx-archive-icon">📦</span>` +
+                `<span class="ctx-archive-name">${this._escapeHtml(archName || "Archive")}</span>`;
+            menu.appendChild(header);
+        }
+
         // Position — keep within viewport
         let x = event.clientX;
         let y = event.clientY;
         menu.style.left = `${x}px`;
         menu.style.top = `${y}px`;
+
+        // --- Export (Save As) ---
+        if (asset && typeof this._onExportRequest === "function") {
+            this._addContextMenuItem(menu, "Export…", () => {
+                this._onExportRequest(asset);
+            });
+        }
 
         // --- Show in file manager ---
         this._addContextMenuItem(menu, "Show in file manager", async () => {
@@ -697,6 +762,84 @@ export class FileBrowser {
         if (this._activeContextMenu) {
             this._activeContextMenu.remove();
             this._activeContextMenu = null;
+        }
+    }
+
+    // ==========================================================
+    // Hover tooltip (archive context)
+    // ==========================================================
+
+    _ensureArchiveTooltip() {
+        if (this._archiveTooltipEl) return;
+        const el = document.createElement("div");
+        el.className = "hover-tooltip";
+        el.style.display = "none";
+        document.body.appendChild(el);
+        this._archiveTooltipEl = el;
+    }
+
+    _attachArchiveTooltip(anchorEl, asset) {
+        const archName = this._basename(asset.archive_path || "");
+        if (!archName) return;
+
+        anchorEl.addEventListener("mouseenter", () => {
+            this._hideArchiveTooltip();
+            this._archiveTooltipAnchor = anchorEl;
+            clearTimeout(this._archiveTooltipTimer);
+            this._archiveTooltipTimer = setTimeout(() => {
+                // Guard: only show if still hovered
+                if (!anchorEl.matches(":hover")) return;
+                this._showArchiveTooltip(anchorEl, archName);
+            }, 1000);
+        });
+
+        anchorEl.addEventListener("mouseleave", () => {
+            if (this._archiveTooltipAnchor === anchorEl) {
+                clearTimeout(this._archiveTooltipTimer);
+                this._archiveTooltipTimer = null;
+                this._hideArchiveTooltip();
+            }
+        });
+
+        // Any click should dismiss tooltip immediately
+        anchorEl.addEventListener("mousedown", () => this._hideArchiveTooltip());
+    }
+
+    _showArchiveTooltip(anchorEl, archName) {
+        this._ensureArchiveTooltip();
+
+        const el = this._archiveTooltipEl;
+        el.textContent = `📦 ${archName}`;
+        el.style.display = "block";
+
+        const r = anchorEl.getBoundingClientRect();
+        const pad = 10;
+
+        // Position near the hovered item, slightly above if possible.
+        const desiredLeft = Math.round(r.left + pad);
+        const desiredTop = Math.round(r.top - 10);
+
+        // Measure after content applied.
+        const tr = el.getBoundingClientRect();
+
+        let left = desiredLeft;
+        let top = desiredTop - tr.height;
+
+        // Clamp to viewport, and if not enough space above, place below.
+        if (top < 8) top = Math.round(r.bottom + 8);
+        if (left + tr.width > window.innerWidth - 8) left = Math.max(8, window.innerWidth - tr.width - 8);
+        if (top + tr.height > window.innerHeight - 8) top = Math.max(8, window.innerHeight - tr.height - 8);
+
+        el.style.left = `${left}px`;
+        el.style.top = `${top}px`;
+    }
+
+    _hideArchiveTooltip() {
+        clearTimeout(this._archiveTooltipTimer);
+        this._archiveTooltipTimer = null;
+        this._archiveTooltipAnchor = null;
+        if (this._archiveTooltipEl) {
+            this._archiveTooltipEl.style.display = "none";
         }
     }
 

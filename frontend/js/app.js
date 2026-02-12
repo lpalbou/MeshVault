@@ -40,7 +40,8 @@ class App {
             this._elements.fileList,
             this._elements.currentPath,
             (asset) => this._onAssetSelected(asset),
-            (text) => this._updateStatus(text)
+            (text) => this._updateStatus(text),
+            (asset) => this._onExportRequested(asset),
         );
 
         this._viewer = new Viewer3D(
@@ -163,6 +164,33 @@ class App {
 
         // --- Start (resume last directory, or home) ---
         this._fileBrowser.goLastOrHome();
+    }
+
+    /**
+     * Export requested from the file browser context menu.
+     *
+     * Goal: same entry point as the top Export button (Save As modal),
+     * but anchored to the asset the user right-clicked.
+     */
+    async _onExportRequested(asset) {
+        if (!asset) {
+            this._showToast("No asset selected", "error");
+            return;
+        }
+
+        // If the requested asset isn't currently loaded, load it first so GLB export is available.
+        const sameAsset = this._lastLoadedAsset &&
+            this._lastLoadedAsset.path === asset.path &&
+            this._lastLoadedAsset.inner_path === asset.inner_path &&
+            this._lastLoadedAsset.archive_path === asset.archive_path;
+
+        if (!sameAsset) {
+            await this._onAssetSelected(asset);
+        }
+
+        // Open the Save As modal (same flow as top-bar Export button).
+        const exportBtn = document.getElementById("export-btn");
+        if (exportBtn) exportBtn.click();
     }
 
     /**

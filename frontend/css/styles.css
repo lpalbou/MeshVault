@@ -841,7 +841,41 @@ html, body {
     border-radius: var(--radius-md);
     box-shadow: var(--shadow-lg);
     padding: 4px 0;
-    min-width: 180px;
+    /* +20% width vs previous (180px) for better readability */
+    min-width: 216px;
+    max-width: min(420px, calc(100vw - 24px));
+}
+
+.context-menu-header {
+    padding: 9px 14px 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    background: rgba(74, 158, 255, 0.10);
+    border-left: 3px solid rgba(74, 158, 255, 0.50);
+    border-bottom: 1px solid rgba(74, 158, 255, 0.15);
+    margin-bottom: 2px;
+    white-space: normal;
+    word-break: break-word;
+    line-height: 1.35;
+    letter-spacing: 0.01em;
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+
+.context-menu-header .ctx-archive-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+    line-height: 1;
+    margin-top: 1px;
+    opacity: 0.7;
+}
+
+.context-menu-header .ctx-archive-name {
+    font-family: "SF Mono", "Cascadia Code", "Fira Code", "Consolas", monospace;
+    color: var(--text-secondary);
+    font-size: 11px;
 }
 
 .context-menu-item {
@@ -882,6 +916,23 @@ html, body {
     height: 1px;
     background: var(--border-color);
     margin: 4px 0;
+}
+
+/* --- Hover Tooltip (archive context) --- */
+.hover-tooltip {
+    position: fixed;
+    z-index: 3500;
+    background: rgba(20, 22, 32, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 12px;
+    color: var(--text-primary);
+    box-shadow: var(--shadow-lg);
+    pointer-events: none;
+    max-width: min(520px, calc(100vw - 24px));
+    word-break: break-word;
+    line-height: 1.25;
 }
 
 /* --- Sidebar Resize Handle --- */
