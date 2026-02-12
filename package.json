@@ -39,5 +39,8 @@
   },
   "engines": {
     "node": ">=16.0.0"
+  },
+  "dependencies": {
+    "playwright": "^1.58.2"
   }
 }

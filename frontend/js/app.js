@@ -474,7 +474,11 @@ class App {
             const val = parseFloat(e.target.value);
             display.textContent = `${val.toFixed(2)}×`;
             this._viewer.setModelScale(val);
+            this._updateScaleSliderVisual(val);
         });
+
+        // Initialize gradient fill for default value.
+        this._updateScaleSliderVisual(parseFloat(slider.value));
     }
 
     /**
@@ -485,6 +489,19 @@ class App {
         this._scaleDisplay.textContent = "1.00×";
         this._scaleContainer.style.display = "flex";
         this._viewer.setModelScale(1);
+        this._updateScaleSliderVisual(1);
+    }
+
+    /**
+     * Update scale slider visual fill based on current value.
+     */
+    _updateScaleSliderVisual(value) {
+        if (!this._scaleSlider) return;
+        const min = parseFloat(this._scaleSlider.min || "0");
+        const max = parseFloat(this._scaleSlider.max || "1");
+        const v = Math.min(max, Math.max(min, value));
+        const pct = ((v - min) / (max - min)) * 100;
+        this._scaleSlider.style.setProperty("--scale-pct", `${pct}%`);
     }
 
     /**
@@ -979,19 +996,76 @@ class App {
         let currentModalPath = "";
 
         const extLabel = document.querySelector(".modal-ext");
+        const formatHint = document.getElementById("format-hint");
+        const formatBtns = document.querySelectorAll("#export-format-toggle .format-btn");
+
+        // Track selected export format
+        let selectedFormat = "glb"; // default
+
+        const FORMAT_HINTS = {
+            original: "Copy source file(s) as-is",
+            obj: "Geometry only — no materials or textures",
+            glb: "Single file · geometry + materials + textures",
+        };
+
+        // Wire format toggle buttons
+        formatBtns.forEach((btn) => {
+            btn.addEventListener("click", () => {
+                formatBtns.forEach((b) => b.classList.remove("active"));
+                btn.classList.add("active");
+                selectedFormat = btn.dataset.format;
+                formatHint.textContent = FORMAT_HINTS[selectedFormat] || "";
+                // Update filename extension
+                updateFilenameForFormat();
+            });
+        });
+
+        const updateFilenameForFormat = () => {
+            const asset = this._exportPanel._currentAsset;
+            const baseName = asset ? asset.name : "model";
+            if (selectedFormat === "glb") {
+                nameInput.value = baseName + ".glb";
+                extLabel.textContent = "";
+            } else if (selectedFormat === "obj") {
+                nameInput.value = baseName + ".obj";
+                extLabel.textContent = "";
+            } else {
+                // original
+                const ext = asset ? asset.extension : ".obj";
+                nameInput.value = baseName + ext;
+                extLabel.textContent = "";
+            }
+        };
 
         const openModal = () => {
             const asset = this._exportPanel._currentAsset;
             // Pre-fill path with source directory
             currentModalPath = this._fileBrowser.currentPath || "";
 
-            // Pre-fill filename with original name + extension
-            // If model is modified, export will be .obj regardless
+            // Default to GLB if model has been modified, otherwise keep last choice
             const isModified = this._viewer.isModelModified;
-            const ext = isModified ? ".obj" : (asset ? asset.extension : ".obj");
-            const baseName = asset ? asset.name : "model";
-            nameInput.value = baseName + ext;
-            extLabel.textContent = isModified ? "(modified → .obj)" : "";
+            if (isModified && selectedFormat === "original") {
+                // Switch to GLB since original won't include modifications
+                selectedFormat = "glb";
+                formatBtns.forEach((b) => {
+                    b.classList.toggle("active", b.dataset.format === "glb");
+                });
+            }
+
+            // "Original" option disabled when model is modified
+            formatBtns.forEach((b) => {
+                if (b.dataset.format === "original") {
+                    b.disabled = isModified;
+                    b.title = isModified
+                        ? "Not available — model has been modified"
+                        : "Keep original format (copy source file)";
+                    if (isModified) b.style.opacity = "0.4";
+                    else b.style.opacity = "";
+                }
+            });
+
+            formatHint.textContent = FORMAT_HINTS[selectedFormat] || "";
+            updateFilenameForFormat();
 
             modal.style.display = "flex";
             loadFolder(currentModalPath);
@@ -1058,18 +1132,26 @@ class App {
                 return;
             }
 
-            // Strip extension for the export API (it adds .obj for modified)
+            // Strip extension for the export API
             const dotIdx = fullName.lastIndexOf(".");
             const newName = dotIdx > 0 ? fullName.substring(0, dotIdx) : fullName;
 
-            // Set the hidden inputs so export_panel can use them
-            document.getElementById("asset-name-input").value = newName;
-            document.getElementById("export-path-input").value = currentModalPath;
-
             closeModal();
 
-            // Trigger the export
-            await this._exportPanel._onExport();
+            if (selectedFormat === "glb") {
+                // GLB: export from viewer, send binary to backend
+                await this._exportGLB(currentModalPath, newName);
+            } else if (selectedFormat === "obj") {
+                // OBJ: export modified geometry as OBJ text
+                document.getElementById("asset-name-input").value = newName;
+                document.getElementById("export-path-input").value = currentModalPath;
+                await this._exportPanel._onExport();
+            } else {
+                // Original: copy source file(s)
+                document.getElementById("asset-name-input").value = newName;
+                document.getElementById("export-path-input").value = currentModalPath;
+                await this._exportPanel._onExport();
+            }
         });
 
         // Enter in name input triggers save
@@ -1099,6 +1181,53 @@ class App {
                 openModal();
             }
         });
+    }
+
+    /**
+     * Export current model as GLB (binary glTF) with embedded materials & textures.
+     * The GLB is generated client-side by Three.js GLTFExporter, then sent
+     * to the backend as binary to write to the chosen directory.
+     */
+    async _exportGLB(targetDir, baseName) {
+        const hide = this._showProcessing("Exporting GLB…");
+        try {
+            const glbData = await this._viewer.exportAsGLB();
+            if (!glbData) {
+                hide();
+                this._showToast("No model to export", "error");
+                return;
+            }
+
+            // Send binary GLB to backend for writing to disk
+            const blob = new Blob([glbData], { type: "model/gltf-binary" });
+            const formData = new FormData();
+            formData.append("file", blob, `${baseName}.glb`);
+            formData.append("target_dir", targetDir);
+            formData.append("file_name", `${baseName}.glb`);
+
+            const response = await fetch("/api/export_glb", {
+                method: "POST",
+                body: formData,
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || "GLB export failed");
+            }
+
+            const result = await response.json();
+            hide();
+            this._showToast(
+                `Exported ${baseName}.glb (${this._formatSize(result.file_size)}) to ${result.output_path}`,
+                "success"
+            );
+            // Refresh file browser
+            this._fileBrowser.browse(this._fileBrowser.currentPath);
+        } catch (err) {
+            hide();
+            console.error("GLB export error:", err);
+            this._showToast(`Export failed: ${err.message}`, "error");
+        }
     }
 
     _initSidebarResize() {

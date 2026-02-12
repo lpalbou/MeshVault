@@ -21,6 +21,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
 import { TGALoader } from "three/addons/loaders/TGALoader.js";
 import { OBJExporter } from "three/addons/exporters/OBJExporter.js";
+import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
 import { SimplifyModifier } from "three/addons/modifiers/SimplifyModifier.js";
 import { VertexNormalsHelper } from "three/addons/helpers/VertexNormalsHelper.js";
@@ -1875,6 +1876,96 @@ export class Viewer3D {
         this._moveSpeed = maxDim * 1.5;
     }
 
+    /**
+     * Re-sync spatial context (axes, ground, grid, lighting target, clipping,
+     * stats) after geometry/model transforms without reframing the camera.
+     *
+     * @param {boolean} syncOrbitTarget - If true, orbit pivot snaps to model center.
+     */
+    _syncModelSpatialState(syncOrbitTarget = false) {
+        if (!this._currentModel) return null;
+
+        this._currentModel.updateMatrixWorld(true);
+
+        const box = new THREE.Box3().setFromObject(this._currentModel);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z, 0.001);
+
+        // Core model anchors
+        this._modelCenter.copy(center);
+        this._keyLightRadius = maxDim * 3;
+
+        // Axis helper anchored at model bottom center
+        const axisSize = Math.max(maxDim * 0.5, 0.05);
+        this._buildAxisHelper(axisSize);
+        this._axisGroup.position.copy(center);
+        this._axisGroup.position.y = box.min.y;
+
+        // Ground/grid alignment
+        const minY = box.min.y;
+        this._ground.position.y = minY;
+        this._rebuildGrid(maxDim, minY);
+
+        // Shadow frustum and light target
+        const shadowPad = maxDim * 2;
+        this._keyLight.shadow.camera.left = -shadowPad;
+        this._keyLight.shadow.camera.right = shadowPad;
+        this._keyLight.shadow.camera.top = shadowPad;
+        this._keyLight.shadow.camera.bottom = -shadowPad;
+
+        const camDist = Math.max(this._camera.position.distanceTo(center), maxDim);
+        this._keyLight.shadow.camera.far = Math.max(camDist * 4, maxDim * 4);
+        this._keyLight.shadow.camera.updateProjectionMatrix();
+        this._updateKeyLightPosition();
+
+        // Fog and clipping planes (camera position unchanged)
+        this._scene.fog.density = 0.5 / maxDim;
+        this._camera.near = Math.max(0.001, camDist * 0.001);
+        this._camera.far = Math.max(camDist * 10, maxDim * 20);
+        this._camera.updateProjectionMatrix();
+
+        if (syncOrbitTarget) {
+            this._controls.target.copy(center);
+            this._controls.update();
+        }
+
+        this._moveSpeed = maxDim * 1.5;
+
+        const stats = this._computeStats(this._currentModel);
+        this._onInfoUpdate(stats);
+        return stats;
+    }
+
+    /**
+     * Approximate model center-of-gravity from vertex positions.
+     * Falls back to bounding-box center when no vertices are available.
+     */
+    _computeModelCentroid() {
+        if (!this._currentModel) return new THREE.Vector3(0, 0, 0);
+
+        const centroid = new THREE.Vector3();
+        let count = 0;
+
+        this._currentModel.traverse((child) => {
+            if (!child.isMesh || !child.geometry) return;
+            const posAttr = child.geometry.attributes?.position;
+            if (!posAttr) return;
+
+            for (let i = 0; i < posAttr.count; i++) {
+                centroid.x += posAttr.getX(i);
+                centroid.y += posAttr.getY(i);
+                centroid.z += posAttr.getZ(i);
+                count += 1;
+            }
+        });
+
+        if (count > 0) return centroid.divideScalar(count);
+        return new THREE.Box3()
+            .setFromObject(this._currentModel)
+            .getCenter(new THREE.Vector3());
+    }
+
     // ==========================================
     // Light Controls (public API)
     // ==========================================
@@ -1942,9 +2033,15 @@ export class Viewer3D {
      * @param {number} scale - Scale factor (e.g., 0.25, 0.5, 1.0, 2.0)
      */
     setModelScale(scale) {
-        if (this._currentModel) {
-            this._currentModel.scale.setScalar(scale);
-        }
+        if (!this._currentModel) return;
+        const s = Number(scale);
+        if (!Number.isFinite(s) || s <= 0) return;
+        this._currentModel.scale.setScalar(s);
+        this._currentModel.updateMatrixWorld(true);
+
+        // Keep live stats (including dimensions) in sync while scaling.
+        const stats = this._computeStats(this._currentModel);
+        this._onInfoUpdate(stats);
     }
 
     /**
@@ -2076,7 +2173,20 @@ export class Viewer3D {
 
     /** Whether the model has been modified (recentered, oriented, scaled). */
     get isModelModified() {
-        return this._modelModified || false;
+        return this._modelModified || this._isScaleModified();
+    }
+
+    /** Detect whether current root scale differs from the original snapshot. */
+    _isScaleModified() {
+        if (!this._currentModel || !this._originalRootScale) return false;
+        const s = this._currentModel.scale;
+        const o = this._originalRootScale;
+        const eps = 1e-6;
+        return (
+            Math.abs(s.x - o.x) > eps
+            || Math.abs(s.y - o.y) > eps
+            || Math.abs(s.z - o.z) > eps
+        );
     }
 
     /**
@@ -2136,8 +2246,10 @@ export class Viewer3D {
         this._currentModel.position.copy(this._originalRootPos);
         this._currentModel.rotation.copy(this._originalRootRot);
         this._currentModel.scale.copy(this._originalRootScale);
+        this._currentModel.updateMatrixWorld(true);
 
         this._modelModified = false;
+        this._syncModelSpatialState(false);
     }
 
     /**
@@ -2146,15 +2258,41 @@ export class Viewer3D {
      * and vertices contain actual world-space coordinates.
      */
     _bakeWorldTransforms() {
+        if (!this._currentModel) return;
+
         this._currentModel.updateMatrixWorld(true);
+
+        // Some assets reuse the same BufferGeometry across multiple meshes.
+        // If we bake world matrices directly into a shared geometry, each mesh
+        // pass re-applies transforms and corrupts positions. Clone shared
+        // geometries before baking so each mesh is transformed exactly once.
+        const geometryRefs = new Map();
+        this._currentModel.traverse((child) => {
+            if (child.isMesh && child.geometry) {
+                geometryRefs.set(
+                    child.geometry,
+                    (geometryRefs.get(child.geometry) || 0) + 1
+                );
+            }
+        });
 
         this._currentModel.traverse((child) => {
             if (child.isMesh && child.geometry) {
-                child.geometry.applyMatrix4(child.matrixWorld);
+                let geo = child.geometry;
+                const refCount = geometryRefs.get(geo) || 1;
+                if (refCount > 1) {
+                    geometryRefs.set(geo, refCount - 1);
+                    geo = geo.clone();
+                    child.geometry = geo;
+                }
+
+                geo.applyMatrix4(child.matrixWorld);
                 child.position.set(0, 0, 0);
                 child.rotation.set(0, 0, 0);
                 child.scale.set(1, 1, 1);
                 child.updateMatrix();
+                geo.computeBoundingBox();
+                geo.computeBoundingSphere();
             }
         });
 
@@ -2167,10 +2305,12 @@ export class Viewer3D {
                 node.updateMatrix();
             }
         });
+
+        this._currentModel.updateMatrixWorld(true);
     }
 
     /**
-     * Center the model so its bounding box center is at (0, 0, 0).
+     * Center the model so its approximate center-of-gravity is at (0, 0, 0).
      * Does NOT touch the camera.
      */
     recenterModel() {
@@ -2179,20 +2319,20 @@ export class Viewer3D {
         // Bake transforms so we work with clean geometry
         this._bakeWorldTransforms();
 
-        // Compute center
-        const box = new THREE.Box3().setFromObject(this._currentModel);
-        const center = box.getCenter(new THREE.Vector3());
+        // Compute center of gravity (vertex centroid)
+        const center = this._computeModelCentroid();
 
-        // Shift all vertices so center is at origin
-        this._currentModel.traverse((child) => {
-            if (child.isMesh && child.geometry) {
-                child.geometry.translate(-center.x, -center.y, -center.z);
-                child.geometry.computeBoundingBox();
-                child.geometry.computeBoundingSphere();
-            }
-        });
+        // Shift whole model so center is at origin
+        const t = new THREE.Matrix4().makeTranslation(
+            -center.x,
+            -center.y,
+            -center.z
+        );
+        this._currentModel.applyMatrix4(t);
+        this._currentModel.updateMatrixWorld(true);
 
         this._modelModified = true;
+        this._syncModelSpatialState(false);
     }
 
     /**
@@ -2202,8 +2342,8 @@ export class Viewer3D {
      * coincides with the Y axis. Does NOT touch the camera.
      */
     /**
-     * Ground the model: center on X/Z and place it on the ground plane.
-     * The lowest geometry point is at Y=0 (model sits on a surface).
+     * Ground the model by vertical translation only.
+     * The lowest geometry point is at Y=0 (on the XY plane).
      * Does NOT touch the camera.
      */
     groundModel() {
@@ -2212,22 +2352,15 @@ export class Viewer3D {
         this._bakeWorldTransforms();
 
         const box = new THREE.Box3().setFromObject(this._currentModel);
-        const center = box.getCenter(new THREE.Vector3());
-
-        // Center X and Z, shift Y so min.y = 0
-        const offsetX = -center.x;
-        const offsetZ = -center.z;
-        const offsetY = -box.min.y; // Lift so lowest point touches Y=0
-
-        this._currentModel.traverse((child) => {
-            if (child.isMesh && child.geometry) {
-                child.geometry.translate(offsetX, offsetY, offsetZ);
-                child.geometry.computeBoundingBox();
-                child.geometry.computeBoundingSphere();
-            }
-        });
+        // Only shift vertically so the lowest point sits on the XY plane (Y=0).
+        // X/Z remain unchanged: "ground" should not recentre horizontally.
+        const offsetY = -box.min.y;
+        const t = new THREE.Matrix4().makeTranslation(0, offsetY, 0);
+        this._currentModel.applyMatrix4(t);
+        this._currentModel.updateMatrixWorld(true);
 
         this._modelModified = true;
+        this._syncModelSpatialState(false);
     }
 
     /**
@@ -2283,44 +2416,48 @@ export class Viewer3D {
 
         // Re-enable normals display if it was on
         if (hadNormals) this.setNormalsVisible(true);
+
+        this._syncModelSpatialState(false);
     }
 
     rotateModel(axis, angleDeg) {
         if (!this._currentModel) return;
 
-        this._bakeWorldTransforms();
-
         const angleRad = (angleDeg * Math.PI) / 180;
-        const rotMatrix = new THREE.Matrix4();
+        let axisVec = null;
+        if (axis === "x") axisVec = new THREE.Vector3(1, 0, 0);
+        else if (axis === "y") axisVec = new THREE.Vector3(0, 1, 0);
+        else if (axis === "z") axisVec = new THREE.Vector3(0, 0, 1);
+        if (!axisVec) return;
 
-        if (axis === "x") rotMatrix.makeRotationX(angleRad);
-        else if (axis === "y") rotMatrix.makeRotationY(angleRad);
-        else if (axis === "z") rotMatrix.makeRotationZ(angleRad);
-
-        // Compute centroid to rotate around model center
+        // Rotate as a whole object around its current world-space center.
+        // This keeps all parts coherent even when the model has multiple
+        // child meshes/groups with distinct local origins.
+        this._currentModel.updateMatrixWorld(true);
         const box = new THREE.Box3().setFromObject(this._currentModel);
         const center = box.getCenter(new THREE.Vector3());
 
-        this._currentModel.traverse((child) => {
-            if (child.isMesh && child.geometry) {
-                const posAttr = child.geometry.attributes.position;
-                if (!posAttr) return;
+        const toOrigin = new THREE.Matrix4().makeTranslation(
+            -center.x,
+            -center.y,
+            -center.z
+        );
+        const rot = new THREE.Matrix4().makeRotationAxis(axisVec, angleRad);
+        const back = new THREE.Matrix4().makeTranslation(
+            center.x,
+            center.y,
+            center.z
+        );
+        const transform = new THREE.Matrix4()
+            .copy(back)
+            .multiply(rot)
+            .multiply(toOrigin);
 
-                for (let i = 0; i < posAttr.count; i++) {
-                    const v = new THREE.Vector3().fromBufferAttribute(posAttr, i);
-                    v.sub(center);
-                    v.applyMatrix4(rotMatrix);
-                    v.add(center);
-                    posAttr.setXYZ(i, v.x, v.y, v.z);
-                }
-                posAttr.needsUpdate = true;
-                child.geometry.computeVertexNormals();
-                child.geometry.computeBoundingBox();
-                child.geometry.computeBoundingSphere();
-            }
-        });
+        this._currentModel.applyMatrix4(transform);
+        this._currentModel.updateMatrixWorld(true);
 
         this._modelModified = true;
+        this._syncModelSpatialState(false);
     }
 
     autoOrientModel() {
@@ -2402,6 +2539,7 @@ export class Viewer3D {
         });
 
         this._modelModified = true;
+        this._syncModelSpatialState(false);
     }
 
     /**
@@ -2738,6 +2876,251 @@ export class Viewer3D {
         this._currentModel.updateMatrixWorld(true);
         const exporter = new OBJExporter();
         return exporter.parse(this._currentModel);
+    }
+
+    /**
+     * Export the current model as a self-contained GLB (binary glTF).
+     *
+     * GLB embeds geometry, PBR materials, and textures into a single file.
+     * This is the recommended format for sharing 3D assets with full fidelity.
+     *
+     * The export:
+     * 1. Clones the scene graph so the live model is not mutated
+     * 2. Converts UVs to glTF convention (v → 1-v)
+     * 3. Converts materials to glTF-safe MeshStandardMaterial (PBR)
+     * 4. Embeds supported texture maps as binary data
+     * 5. Preserves transforms via node matrices (no vertex baking)
+     *
+     * @returns {Promise<ArrayBuffer>} The GLB binary data
+     */
+    /**
+     * Export as GLB — self-contained binary glTF.
+     *
+     * Strategy: build a **new** scene with fresh geometry and materials that
+     * contain only what glTF can represent.
+     *
+     * Critical: glTF 2.0 defines the texture coordinate origin (0,0) at the
+     * **upper-left** of the image. Three.js/OpenGL-style sampling expects
+     * (0,0) at the **lower-left** for typical (flipY=true) textures.
+     *
+     * We export in glTF convention by:
+     * - Flipping UV V: v → 1-v
+     * - Exporting textures with flipY=false so GLTFExporter does NOT flip pixels
+     *
+     * What we copy per mesh:
+     *   geometry  → position, normal, uv (V-flipped), optional tangent (w-negated),
+     *               index (if present)
+     *   material  → color, map, normalMap, roughness, metalness, opacity
+     *   textures  → DataTexture → canvas for PNG serialisation, flipY=false
+     */
+    async exportAsGLB() {
+        if (!this._currentModel) return null;
+
+        const exportScene = new THREE.Scene();
+        exportScene.name = "MeshVault";
+        this._currentModel.updateMatrixWorld(true);
+
+        this._currentModel.traverse((child) => {
+            if (!child.isMesh || !child.geometry) return;
+
+            const srcGeo = child.geometry;
+            const geo = new THREE.BufferGeometry();
+
+            // ---- position (preserve source float32 values) ----
+            // We do NOT bake transforms into vertices. Baking introduces tiny
+            // numeric drift vs the original shader path (matrix multiply in GPU),
+            // which is enough to break pixel-perfect comparisons.
+            const srcPos = srcGeo.attributes.position;
+            if (srcPos) geo.setAttribute("position", srcPos.clone());
+
+            // ---- normal (preserve source float32 values) ----
+            const srcNorm = srcGeo.attributes.normal;
+            if (srcNorm) geo.setAttribute("normal", srcNorm.clone());
+
+            // ---- uv (copy primary channel only — "uv") ----
+            const srcUV = srcGeo.attributes.uv;
+            if (srcUV) {
+                // glTF 2.0 defines (0,0) at the **upper-left** of the image.
+                // Three.js/OpenGL sampling expects (0,0) at the **lower-left**.
+                // To export a glTF that re-imports identically, we flip V here
+                // and export textures with flipY=false (no exporter-side image flip).
+                const uvArr = new Float32Array(srcUV.array);
+                for (let i = 0; i < uvArr.length; i += 2) {
+                    uvArr[i + 1] = 1.0 - uvArr[i + 1];
+                }
+                geo.setAttribute("uv", new THREE.BufferAttribute(uvArr, 2));
+            }
+
+            // ---- tangent (copy + transform if source has them) ----
+            // Tangent vectors are critical for normal-map seam continuity.
+            // Without them, viewers recompute tangents from UV derivatives
+            // and the tangent space flips at UV island boundaries, causing
+            // visible "fracture" lines in the normal mapping.
+            //
+            // We flip UV.v above. That reverses dP/dV, flipping bitangent
+            // direction, so we NEGATE tangent handedness (w component).
+            const srcTan = srcGeo.attributes.tangent;
+            if (srcTan && srcTan.itemSize === 4) {
+                // We flipped UV.v above. That flips dP/dV, so the bitangent
+                // direction in tangent space flips. Preserve continuity by
+                // negating handedness (w component).
+                const tanArr = new Float32Array(srcTan.array);
+                for (let i = 0; i < srcTan.count; i++) {
+                    tanArr[i * 4 + 3] = -tanArr[i * 4 + 3];
+                }
+                geo.setAttribute("tangent", new THREE.BufferAttribute(tanArr, 4));
+            }
+
+            // ---- index (copy if present) ----
+            if (srcGeo.index) {
+                geo.setIndex(srcGeo.index.clone());
+            }
+
+            // ---- material (new MeshStandardMaterial, only glTF-safe props) ----
+            const srcMat = Array.isArray(child.material)
+                ? child.material[0]
+                : child.material;
+
+            const matParams = {
+                roughness: srcMat.roughness !== undefined ? srcMat.roughness : 0.5,
+                metalness: srcMat.metalness !== undefined ? srcMat.metalness : 0.0,
+                side: THREE.DoubleSide,
+            };
+
+            // color — white when textured (prevents dark multiplier)
+            if (srcMat.map) {
+                matParams.color = 0xffffff;
+                matParams.map = this._prepTextureForGLB(srcMat.map);
+            } else if (srcMat.color) {
+                matParams.color = srcMat.color.clone();
+            }
+
+            // normal map
+            if (srcMat.normalMap) {
+                matParams.normalMap = this._prepTextureForGLB(srcMat.normalMap);
+            }
+
+            // emissive
+            if (srcMat.emissiveMap) {
+                matParams.emissiveMap = this._prepTextureForGLB(srcMat.emissiveMap);
+                matParams.emissive = new THREE.Color(0xffffff);
+            }
+
+            // ao
+            if (srcMat.aoMap) {
+                matParams.aoMap = this._prepTextureForGLB(srcMat.aoMap);
+                // AO needs uv1 in the geometry
+                if (srcUV) {
+                    // In Three.js the second UV set is `uv2` (exported as TEXCOORD_1).
+                    // Keep it consistent with our flipped primary UVs.
+                    const uv2Arr = new Float32Array(srcUV.array);
+                    for (let i = 0; i < uv2Arr.length; i += 2) {
+                        uv2Arr[i + 1] = 1.0 - uv2Arr[i + 1];
+                    }
+                    geo.setAttribute("uv2", new THREE.BufferAttribute(uv2Arr, 2));
+                }
+            }
+
+            // opacity
+            if (srcMat.opacity !== undefined && srcMat.opacity < 1) {
+                matParams.opacity = srcMat.opacity;
+                matParams.transparent = true;
+            }
+
+            const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial(matParams));
+            mesh.name = child.name || "mesh";
+            // Preserve the original world transform without baking it into vertices.
+            mesh.matrixAutoUpdate = false;
+            mesh.matrix.copy(child.matrixWorld);
+            exportScene.add(mesh);
+        });
+
+        if (exportScene.children.length === 0) return null;
+
+        const exporter = new GLTFExporter();
+        return new Promise((resolve, reject) => {
+            exporter.parse(
+                exportScene,
+                (result) => resolve(result),
+                (error) => reject(error),
+                { binary: true, maxTextureSize: 4096 }
+            );
+        });
+    }
+
+    /**
+     * Prepare a texture for GLB export.
+     *
+     * Ensures the image data is on an HTMLCanvasElement (not DataTexture
+     * or ImageBitmap) so the GLTFExporter can serialise it to PNG.
+     *
+     * We export in glTF convention: textures with flipY=false and UV.v flipped
+     * in geometry. This avoids GLTFExporter doing implicit pixel flips.
+     */
+    _prepTextureForGLB(tex) {
+        if (!tex || !tex.image) return tex;
+
+        const t = tex.clone();
+        // glTF textures are imported by Three.js with flipY=false, matching the
+        // glTF spec's upper-left UV origin. We export in that convention.
+        //
+        // IMPORTANT: GLTFExporter flips pixel rows when texture.flipY === true.
+        // We avoid exporter-side pixel flips and instead flip UV.v above.
+        t.flipY = false;
+        t.needsUpdate = true;
+
+        const img = t.image;
+
+        // HTMLImageElement / HTMLCanvasElement — already usable by GLTFExporter
+        if (img instanceof HTMLImageElement || img instanceof HTMLCanvasElement) {
+            return t;
+        }
+
+        // DataTexture (from TGALoader etc.): img = { data, width, height }
+        // Must convert to canvas for PNG serialisation.
+        //
+        // We want the exported PNG to match the source image orientation
+        // (top-left origin). If the source texture used flipY=false, the
+        // underlying rows are typically bottom-to-top, so we flip them here.
+        if (img.data && img.width) {
+            const w = img.width;
+            const h = img.height;
+            const channels = img.data.length / (w * h); // 3 or 4
+            const cv = document.createElement("canvas");
+            cv.width = w;
+            cv.height = h;
+            const ctx = cv.getContext("2d");
+
+            const srcFlipY = !!tex.flipY;
+            const rgba = new Uint8ClampedArray(w * h * 4);
+            for (let y = 0; y < h; y++) {
+                const srcRow = srcFlipY ? y : (h - 1 - y);
+                for (let x = 0; x < w; x++) {
+                    const si = (srcRow * w + x) * channels;
+                    const di = (y * w + x) * 4;
+                    rgba[di]     = img.data[si];     // R
+                    rgba[di + 1] = img.data[si + 1]; // G
+                    rgba[di + 2] = img.data[si + 2]; // B
+                    rgba[di + 3] = channels === 4 ? img.data[si + 3] : 255; // A
+                }
+            }
+            ctx.putImageData(new ImageData(rgba, w, h), 0, 0);
+
+            t.image = cv;
+            return t;
+        }
+
+        // ImageBitmap
+        if (img instanceof ImageBitmap) {
+            const cv = document.createElement("canvas");
+            cv.width = img.width;
+            cv.height = img.height;
+            cv.getContext("2d").drawImage(img, 0, 0);
+            t.image = cv;
+            return t;
+        }
+
+        return t; // unknown — pass through
     }
 
     /** Get axis helper visibility. */

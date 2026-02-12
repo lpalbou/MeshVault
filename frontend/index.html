@@ -62,14 +62,14 @@
             <span class="top-bar-sep"></span>
             <!-- Position group -->
             <div class="toolbar-group">
-                <button id="btn-recenter" class="btn btn-tool" title="Center bounding box at origin (0, 0, 0)">
+                <button id="btn-recenter" class="btn btn-tool" title="Center model centroid at origin (0, 0, 0)">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <circle cx="12" cy="12" r="3"/>
                         <path d="M12 2v4"/><path d="M12 18v4"/>
                         <path d="M2 12h4"/><path d="M18 12h4"/>
                     </svg>
                 </button>
-                <button id="btn-ground" class="btn btn-tool" title="Ground model: center X/Z, lowest point at Y=0">
+                <button id="btn-ground" class="btn btn-tool" title="Ground model: lowest point at Y=0 (no X/Z shift)">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="2" y1="20" x2="22" y2="20"/>
                         <path d="M12 16V6"/>
@@ -389,17 +389,12 @@
             <!-- Scale control (bottom-right) -->
             <div id="scale-control" style="display: none;">
                 <label for="model-scale">Scale</label>
-                <input type="range" id="model-scale" min="0.05" max="5.0" value="1" step="0.05" list="scale-ticks" />
+                <div class="scale-slider-wrap">
+                    <span class="scale-bound">0.05×</span>
+                    <input type="range" id="model-scale" min="0.05" max="10.0" value="1" step="0.05" />
+                    <span class="scale-bound">10×</span>
+                </div>
                 <span id="model-scale-val">1.00×</span>
-                <datalist id="scale-ticks">
-                    <option value="0.05"></option>
-                    <option value="0.25"></option>
-                    <option value="0.5"></option>
-                    <option value="1"></option>
-                    <option value="2"></option>
-                    <option value="3"></option>
-                    <option value="5"></option>
-                </datalist>
             </div>
 
             <!-- Background color swatches -->
@@ -442,7 +437,16 @@
             <div class="modal-filename">
                 <label for="modal-name-input">File name:</label>
                 <input type="text" id="modal-name-input" placeholder="model_name" />
-                <span class="modal-ext">.obj</span>
+                <span class="modal-ext"></span>
+            </div>
+            <div class="modal-format-row">
+                <label>Format:</label>
+                <div class="format-toggle" id="export-format-toggle">
+                    <button class="format-btn" data-format="original" title="Keep original format (copy source file)">Original</button>
+                    <button class="format-btn" data-format="obj" title="OBJ — geometry only, no materials/textures">OBJ</button>
+                    <button class="format-btn active" data-format="glb" title="GLB — single file with geometry, materials &amp; textures embedded">GLB</button>
+                </div>
+                <span class="format-hint" id="format-hint">Single file · geometry + materials + textures</span>
             </div>
             <div class="modal-path" id="folder-modal-path"></div>
             <div class="modal-list" id="folder-modal-list">

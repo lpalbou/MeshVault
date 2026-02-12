@@ -4,6 +4,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · [Semantic Ve
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **GLB export**: Corrected texture coordinate convention to match glTF spec (upper-left UV origin) by flipping $v \rightarrow 1-v$ for exported UVs and exporting textures with `flipY=false`. This fixes vertically flipped textures and restores texture fidelity on round-trip export (e.g., `Asteroid_1.fbx` from `uploads_files_775776_asteroid_pack_2.zip`).
+- **GLB export**: Fixed AO UV set export (`uv2` / `TEXCOORD_1`) — previously attempted to use a non-standard `uv1` attribute.
+- **Dev**: Repaired the GLB visual regression harness (`test_glb_export.mjs` + `test_compare.py`) and added an optional pytest integration test (skipped by default).
+
 ## [0.1.0] — 2026-02-11
 
 Initial public release of MeshVault.
@@ -36,6 +43,13 @@ MeshVault is a local tool for 3D artists and game developers to browse, preview,
 - Fixed FBX regression: internal model URL (`/api/asset/file?...`) is no longer rewritten to `/api/asset/related`, preventing load failures
 - FBX fallback now detects likely non-color diffuse assignments (e.g. gloss/spec `_g`) and can rebind to better color maps when available
 - Emissive textures are now classified/bound in fallback and preserved during legacy material → PBR upgrade
+- Rotation robustness improved for multi-part models: rotate now applies one world-pivot transform to the whole object, preventing per-part origin drift
+- Bake-world-transform now safely clones shared geometries before baking to avoid double-transform corruption on reused mesh buffers
+- Recenter/ground/auto-orient/reset now re-sync spatial state (axis anchor, ground plane, grid, light target, stats) after transforms without changing camera pose
+- Recenter now aligns model center-of-gravity (vertex centroid) to world origin; ground now shifts only vertically so lowest point sits on Y=0
+- Scale now counts as a model modification for Save/Export decisions, so scaled models export through modified OBJ flow correctly
+- Filesystem export now gracefully handles source==destination paths (no SameFile copy error on Save to same file)
+- Scale slider upgraded to 0.05×–10× with improved visual styling and filled-progress track
 
 ### Model Transforms
 - Reload, reset (geometry snapshot restore), center, ground, PCA auto-orient, rotate ±90° per axis
@@ -52,7 +66,10 @@ MeshVault is a local tool for 3D artists and game developers to browse, preview,
 
 ### Export
 - Save As dialog with folder browser, filename pre-filled with original name + extension
-- Modified models export as OBJ (transforms baked via Three.js OBJExporter)
+- **GLB export (new)**: single self-contained file with geometry, PBR materials, and textures embedded — powered by Three.js GLTFExporter
+- Format selector in Save dialog: **Original** (copy source), **OBJ** (geometry only), **GLB** (full scene)
+- "Original" option auto-disabled when model has been modified (transforms/simplification/normals)
+- Modified models also exportable as OBJ (transforms baked via Three.js OBJExporter)
 - File browser auto-refreshes after save
 
 ### UI/UX

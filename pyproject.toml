@@ -49,6 +49,9 @@ meshvault = "backend.app:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: end-to-end / Playwright / WebGL tests (skipped by default)",
+]
 
 [build-system]
 requires = ["poetry-core"]

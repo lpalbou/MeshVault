@@ -110,9 +110,18 @@ class ArchiveInspector:
         # Cache of temporary extraction directories: archive_path -> temp_dir
         self._temp_dirs: dict[str, str] = {}
 
+    # Format preference order: higher index = preferred when duplicates exist.
+    # When the same model ships as both FBX and OBJ (common in asset packs),
+    # we keep only the preferred format to avoid cluttering the browser.
+    _FORMAT_PRIORITY = {".stl": 0, ".obj": 1, ".gltf": 2, ".glb": 3, ".fbx": 4}
+
     def inspect(self, archive_path: str) -> list[AssetInfo]:
         """
         Inspect an archive and return a list of 3D assets found inside.
+
+        Deduplicates assets: when the same model stem exists in multiple
+        formats within the same directory (e.g. Model.fbx + Model.obj),
+        only the highest-priority format is kept.
 
         Args:
             archive_path: Path to the archive file.
@@ -124,12 +133,47 @@ class ArchiveInspector:
         ext = path.suffix.lower()
 
         if ext == ".zip":
-            return self._inspect_zip(archive_path)
+            raw = self._inspect_zip(archive_path)
         elif ext == ".rar":
-            return self._inspect_rar(archive_path)
+            raw = self._inspect_rar(archive_path)
         elif ext == ".unitypackage":
-            return self._inspect_unitypackage(archive_path)
-        return []
+            raw = self._inspect_unitypackage(archive_path)
+        else:
+            return []
+
+        return self._deduplicate_formats(raw)
+
+    @staticmethod
+    def _deduplicate_formats(assets: list[AssetInfo]) -> list[AssetInfo]:
+        """
+        Remove duplicate assets where the same model ships in multiple formats.
+
+        Groups by (parent_directory, stem) — e.g. two files named
+        ``scenes/Asteroid_1/Asteroid_1.fbx`` and
+        ``scenes/Asteroid_1/Asteroid_1.obj`` share the key
+        ``("scenes/Asteroid_1", "Asteroid_1")``.
+
+        Within each group, only the highest-priority format is kept
+        (FBX > GLB > GLTF > OBJ > STL).
+        """
+        prio = ArchiveInspector._FORMAT_PRIORITY
+        groups: dict[tuple[str, str], AssetInfo] = {}
+
+        for asset in assets:
+            inner = getattr(asset, "inner_path", "") or ""
+            parent = str(PurePosixPath(inner).parent)
+            key = (parent, asset.name.lower())
+
+            if key not in groups:
+                groups[key] = asset
+            else:
+                existing = groups[key]
+                existing_prio = prio.get(existing.extension.lower(), -1)
+                new_prio = prio.get(asset.extension.lower(), -1)
+                if new_prio > existing_prio:
+                    groups[key] = asset
+
+        return list(groups.values())
 
     def extract_asset(
         self, archive_path: str, inner_path: str

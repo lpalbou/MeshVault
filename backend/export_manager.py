@@ -33,6 +33,17 @@ class ExportResult:
 class ExportManager:
     """Handles exporting and renaming of 3D assets."""
 
+    @staticmethod
+    def _is_same_path(a: Path, b: Path) -> bool:
+        """
+        Return True if both paths refer to the same filesystem location.
+        Uses strict=False so the comparison works even before destination exists.
+        """
+        try:
+            return a.resolve(strict=False) == b.resolve(strict=False)
+        except Exception:
+            return os.path.abspath(str(a)) == os.path.abspath(str(b))
+
     def export_asset(
         self,
         source_path: str,
@@ -105,7 +116,8 @@ class ExportManager:
 
             # Copy main asset
             dest = asset_dir / f"{new_name}{ext}"
-            shutil.copy2(str(src), str(dest))
+            if not self._is_same_path(src, dest):
+                shutil.copy2(str(src), str(dest))
             exported.append(str(dest))
 
             # Copy related files, preserving their extensions
@@ -115,12 +127,14 @@ class ExportManager:
                 # If multiple related files share an extension, use original name
                 if rel_dest.exists():
                     rel_dest = asset_dir / rel_src.name
-                shutil.copy2(str(rel_src), str(rel_dest))
+                if not self._is_same_path(rel_src, rel_dest):
+                    shutil.copy2(str(rel_src), str(rel_dest))
                 exported.append(str(rel_dest))
         else:
             # Single file => just copy with new name
             dest = target_dir / f"{new_name}{ext}"
-            shutil.copy2(str(src), str(dest))
+            if not self._is_same_path(src, dest):
+                shutil.copy2(str(src), str(dest))
             exported.append(str(dest))
 
         return ExportResult(
