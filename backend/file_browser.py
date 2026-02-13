@@ -247,28 +247,54 @@ class FileBrowser:
             }
             max_candidates = 300
 
-            # 1) Texture files in the same directory
+            # 1) Texture files in the same directory — but ONLY those whose stem
+            #    matches the model name (e.g. "station_99730_diffuse.png" for
+            #    "station_99730.fbx").  We do NOT blindly include every image
+            #    in the directory because unrelated files (screenshots, exports
+            #    from other models) would be incorrectly auto-bound as textures.
             try:
                 for entry in parent.iterdir():
-                    if entry.is_file() and entry.suffix.lower() in texture_ext_set:
+                    if not entry.is_file():
+                        continue
+                    if entry.suffix.lower() not in texture_ext_set:
+                        continue
+                    # Must share the model stem as a prefix
+                    if entry.stem.lower().startswith(stem.lower()):
                         add_related(entry)
                         if len(related) >= max_candidates:
                             return related
             except (PermissionError, OSError):
                 pass
 
-            # 2) Texture files in common texture subdirectories
+            # 2) Texture files in common texture subdirectories.
+            #    We check two patterns:
+            #    a) Direct texture dirs:  <parent>/textures/, <parent>/maps/, ...
+            #    b) Model-prefixed dirs:  <parent>/Station/Maps/ for station_99730.fbx
+            #       (FBX files often reference "Station\Maps\tex.jpg")
             try:
                 for entry in parent.iterdir():
                     if not entry.is_dir():
                         continue
-                    if entry.name.lower() not in texture_dir_names:
-                        continue
-                    for f in entry.rglob("*"):
-                        if f.is_file() and f.suffix.lower() in texture_ext_set:
-                            add_related(f)
-                            if len(related) >= max_candidates:
-                                return related
+                    ename = entry.name.lower()
+                    if ename in texture_dir_names:
+                        # Direct texture dir — include everything
+                        for f in entry.rglob("*"):
+                            if f.is_file() and f.suffix.lower() in texture_ext_set:
+                                add_related(f)
+                                if len(related) >= max_candidates:
+                                    return related
+                    else:
+                        # Check for texture subdirs inside (e.g. Station/Maps/)
+                        try:
+                            for sub in entry.iterdir():
+                                if sub.is_dir() and sub.name.lower() in texture_dir_names:
+                                    for f in sub.rglob("*"):
+                                        if f.is_file() and f.suffix.lower() in texture_ext_set:
+                                            add_related(f)
+                                            if len(related) >= max_candidates:
+                                                return related
+                        except (PermissionError, OSError):
+                            pass
             except (PermissionError, OSError):
                 pass
 
