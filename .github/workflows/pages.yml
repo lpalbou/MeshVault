@@ -1,8 +1,9 @@
 name: Deploy viewer to GitHub Pages
 
-# Builds the standalone, server-less MeshVault viewer and publishes the static site in
-# web/ to the `gh-pages` branch. Runs on pushes to main that touch the viewer/site, and
-# can be triggered manually.
+# Builds the standalone, server-less MeshVault viewer and publishes web/ to GitHub Pages
+# via the official GitHub Actions deployment (Pages source = "GitHub Actions"). This is
+# GitHub's recommended path for built (non-Jekyll) sites: the deploy happens in THIS run
+# (visible + retryable) instead of a hidden native branch-rebuild.
 
 on:
   push:
@@ -16,16 +17,16 @@ on:
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
-# Least-privilege: only allow writing to the repo contents (for the gh-pages branch).
 permissions:
-  contents: write
+  contents: read
 
+# One deployment at a time; let an in-progress production deploy finish.
 concurrency:
-  group: pages-deploy
-  cancel-in-progress: true
+  group: pages
+  cancel-in-progress: false
 
 jobs:
-  build-and-deploy:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,21 +42,32 @@ jobs:
         run: npm run build
 
       - name: Assemble the static site
-        # web/index.html + the freshly built web/meshvault-viewer.js. A .nojekyll file
-        # stops GitHub Pages' Jekyll from touching the assets.
+        # web/index.html + the freshly built web/meshvault-viewer.js. .nojekyll stops
+        # GitHub Pages' Jekyll from touching the assets.
         run: |
           mkdir -p site
           cp web/index.html site/index.html
           cp web/meshvault-viewer.js site/meshvault-viewer.js
           touch site/.nojekyll
 
-      - name: Deploy to gh-pages branch
-        uses: peaceiris/actions-gh-pages@v4
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./site
-          publish_branch: gh-pages
-          # Neutral committer identity — no self-attribution.
-          user_name: "github-actions[bot]"
-          user_email: "github-actions[bot]@users.noreply.github.com"
-          commit_message: "Deploy viewer site"
+          path: ./site
+
+  deploy:
+    needs: build
+    permissions:
+      pages: write        # create the Pages deployment
+      id-token: write     # OIDC verification for deploy-pages
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
