@@ -1,0 +1,198 @@
+# MeshVault Viewer — Control API (full reference for AI agents)
+
+> A self-describing, JSON-driven API for controlling MeshVault's embeddable 3D viewer with
+> no human and no server. This document is the authoritative, single-fetch reference. The
+> API is also self-describing at runtime via `listCommands()`, which returns the same
+> parameter schemas described here.
+
+================================================================================
+## 1. Setup
+
+The viewer core ships as a standalone ES-module bundle (`meshvault-viewer.js`) that
+includes Three.js and has NO backend dependency.
+
+Browser / module:
+```js
+import { createViewer } from "/static/dist/meshvault-viewer.js";
+const mv = createViewer(document.getElementById("app"));
+```
+Non-module / agent bridge (global):
+```js
+const mv = window.MeshVaultViewer.createViewer(document.getElementById("app"));
+```
+Live harness for experimentation: open `/static/viewer.html`; `window.mv` is a ready
+instance.
+
+`createViewer(container, options)` returns an object with:
+- `execute(command)` → Promise<{ok, result|error}> — the one command entry point.
+- `getState()` → JSON snapshot (also available as the `get_state` command).
+- `getSceneInfo()` → per-mesh/material info (also the `get_scene_info` command).
+- `listCommands()` → array of { action, description, params } for every command.
+- `on(event, cb)` → subscribe to events: `loaded`, `error`, `animations`, `measurement`,
+  `executed`, `navmodechange`, or `*` for all.
+- `loadFile(File)` → load a local File (drag-drop / file input) with no server.
+- `destroy()` → fully release the WebGL context and listeners.
+
+================================================================================
+## 2. The command contract
+
+Call: `await mv.execute({ action: "<name>", params: { ... } })`
+Returns: `{ ok: true, result: <any JSON> }` or `{ ok: false, error: "<message>" }`.
+
+Rules an agent can rely on:
+- It NEVER throws. Failures are always `{ ok: false, error }`.
+- Unknown actions and unknown params are rejected with a helpful message.
+- Params are type-checked/coerced against the schema (number/boolean/string/array, with
+  min/max/enum/required/default). Out-of-range or wrong-enum values return an error.
+- Commands that need a loaded model return `{ ok:false, error:"... requires a loaded model" }`
+  when none is loaded — so "did nothing because empty" is distinguishable from success.
+- `screenshot` / `capture_views` / `turntable` / `export_glb` return image/geometry data as
+  strings (PNG data URLs / OBJ text / base64 GLB) — always JSON-safe.
+
+================================================================================
+## 3. Observing state (no vision required)
+
+- `get_state` → {
+    model: { loaded, name, vertices, faces, dimensions{w,h,d}, bounds{min,max,center,size}, scale, modified },
+    camera: { mode, position[3], target[3], fov, presets[] },
+    display: { wireframe, grid, axes, normals, background, renderMode, clip, fog },
+    animation: { hasAnimations, clips[], playing, time, duration }
+  }
+- `get_scene_info` → { meshes:[{name, vertices, faces, materials[]}], materials:[{name,type,color,roughness,metalness}] }
+- `get_bounds` → { min[3], max[3], center[3], size[3] } (world units) or null.
+
+After any command, re-read `get_state` to verify the effect. To SEE the result, call
+`screenshot` and read the returned PNG data URL.
+
+================================================================================
+## 4. Loading
+
+- `load { url:string, extension?:string, name?:string }` — load from a URL (extension
+  inferred if omitted). Resolves only when the model is render-ready. Returns {stats, state}.
+  Formats: .obj .fbx .gltf .glb .stl .ply .dae .3mf .usdz.
+- `unload` — clear the model, reset to an empty scene.
+- Local files (no URL): use `mv.loadFile(file)` (not an execute command).
+
+================================================================================
+## 5. Finding the "front" of a model  (IMPORTANT)
+
+There is no universal geometric "front" for an arbitrary mesh — it is semantic, and many
+models are baked in odd orientations (lying down, facing an unexpected axis). Therefore:
+
+- The presets `front/back/left/right/top/bottom` are WORLD-AXIS directions
+  (front = +Z). They are convenient but WRONG for mis-oriented models.
+- To find the real, semantic front, MEASURE it:
+
+  `score_views { azimuths?:number[], elevations?:number[], size?:number, fill?:number }`
+    → ranked [{ azimuth, elevation, score, coverage }], best first.
+    Scoring is LIGHTING-INDEPENDENT and blends geometric detail (normal-material edges,
+    good for panels/bezels) with albedo/texture detail (good for faces' eyes/mouth), so it
+    works for both mechanical parts and organic/scanned models.
+
+  `find_best_view { apply?=true, upright?=true, fill?, size? }`
+    → moves the camera to the top-scored angle AND auto-uprights it (corrects camera roll
+    so a lying-down model appears the right way up, without modifying the model). Returns
+    { azimuth, elevation, score, coverage, ranked }.
+
+  `auto_upright` — correct only the camera roll for the CURRENT view (uses left-right
+  symmetry of the framed subject). Useful after a manual `orbit`/`set_view`.
+
+Recommended agent recipe for a hero shot of an unknown model:
+```js
+await mv.execute({ action: "load", params: { url } });
+await mv.execute({ action: "find_best_view", params: { fill: 0.85 } }); // front + upright
+await mv.execute({ action: "set_background", params: { color: "#33373f" } });
+const shot = await mv.execute({ action: "screenshot", params: { width: 1024, height: 1024 } });
+// shot.result is a PNG data URL
+```
+
+================================================================================
+## 6. Camera
+
+- `set_view { preset: front|back|left|right|top|bottom|iso, fill?:0.1..1 }` — world-axis preset. `fill` = framing tightness (higher = tighter).
+- `orbit { azimuth:deg, elevation?:deg=15, fill? }` — spherical angle around the model (azimuth 0 = +Z).
+- `set_camera { position:[x,y,z], target?:[x,y,z] }` — explicit camera placement.
+- `frame { fill?, keep_direction?=true }` — fit the model; keeps the current view direction by default.
+- `reset_camera` — restore the initial framed view (orbit mode).
+- `set_nav_mode { mode: orbit|fpv }`.
+- `get_camera` → { position, target, fov, mode, presets }.
+
+================================================================================
+## 7. Display, mesh inspection, cross-section
+
+- `set_render_mode { mode: textured|solid|wireframe|normals }` — HOW the model is drawn:
+    textured = mesh + texture (lit PBR surface, the default); solid = the mesh only
+    (uniform matte, no texture — read pure form/topology); wireframe = edges only.
+    Also 'normals' = per-face normal colors for geometry inspection.
+    Aliases: shaded→textured, clay→solid.
+- `set_wireframe { enabled }`, `set_grid { visible }`, `set_axes { visible }`,
+  `set_normals { visible }` (vertex-normal lines).
+- `set_clip { enabled, axis?:x|y|z|camera=camera, position?:0..1=0.5, flip?=false }` —
+  cutting plane. 'camera' cuts relative to the current view (keeps the near side, cutting
+  away geometry farther from the camera — i.e. "see only the front mesh"); x/y/z cut along
+  model axes for cross-sections. `position` is normalized across the model bbox. Set
+  `enabled:false` to clear.
+- `set_fog { enabled, density? }` — exponential scene fog (off in hero captures by default).
+- `set_background { color: "#rrggbb" }`, `set_scale { scale }`.
+- `set_lighting { azimuth?, elevation?, key_intensity?, fill_intensity?, ambient?, exposure? }`
+  — studio light rig for a hero look (degrees / multipliers; only provided fields apply).
+
+================================================================================
+## 8. Transforms (mutate the model geometry)
+
+- `center` — center the centroid at the origin.
+- `ground` — drop so the lowest point sits on Y=0.
+- `auto_orient` — PCA orient (NOTE: can worsen orientation for heads/faces; prefer
+  `find_best_view` + `auto_upright`, or `rotate`).
+- `rotate { axis: x|y|z, degrees:number }`.
+- `simplify { ratio: 0.01..1 }` → { before, after } vertex counts (UV-preserving).
+- `recompute_normals` — merge vertices + recompute smooth normals (UV-preserving).
+- `reset` — undo all transforms (restore original geometry).
+
+================================================================================
+## 9. Animation
+
+- `play_animation { index?=0 }`, `pause_animation`,
+  `set_animation_time { seconds }`, `set_animation_speed { multiplier }`.
+- Check `get_state().animation.hasAnimations` first; commands error cleanly if none.
+
+================================================================================
+## 10. Measurement
+
+- `measure { a:[x,y,z], b:[x,y,z] }` → { distance } and draws the line.
+- `set_measure_mode { enabled }` — interactive click-to-measure.
+
+================================================================================
+## 11. Capture / hero shots
+
+- `screenshot { width?, height?, transparent?=false, fog?=false, hideGround?=false, ssao?=true }`
+    → PNG data URL. Explicit resolution (one dimension may be omitted, derived from aspect).
+    `transparent` = alpha cutout for compositing. Fog is suppressed by default for clean shots;
+    `ssao:true` renders through the SSAO/tone-mapping composer for hero quality.
+- `capture_views { views?=["front","left","right","back"], width?=1024, height?=1024, transparent?, fill?, hideGround? }`
+    → { <label>: <PNG data URL> }. `views` accepts preset names and/or {azimuth,elevation}.
+    Auto-hides grid/axes and suppresses fog.
+- `turntable { frames?=8, elevation?=15, width?=512, height?=512, fill?, transparent?, hideGround? }`
+    → { azN: <PNG data URL> } evenly spaced around the model.
+
+================================================================================
+## 12. Export
+
+- `export_obj` → OBJ text (string).
+- `export_glb` → GLB as a `data:model/gltf-binary;base64,...` URL.
+
+================================================================================
+## 13. Events
+
+`mv.on("loaded", d => ...)`, `"error"`, `"animations"`, `"measurement"`, `"executed"`,
+`"navmodechange"`, or `"*"`. Handlers receive `(data, eventName)`.
+
+================================================================================
+## 14. Notes & limitations
+
+- The standalone viewer is server-less; loading a URL with external textures needs those
+  resources reachable (or inject `resolveResource(ref)=>url` in `createViewer` options).
+- Transparent captures bypass the SSAO composer, so their tonality differs slightly from
+  opaque captures of the same view.
+- `find_best_view` handles azimuth + camera roll (upright). It does not permanently
+  re-orient the model; use `rotate` if you need the geometry itself re-oriented.

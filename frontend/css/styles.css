@@ -1742,6 +1742,22 @@ html, body {
     pointer-events: none;
 }
 
+/* --- Render-mode cycle badge --- */
+.viewer-tool-btn { position: relative; }
+.rendermode-badge {
+    position: absolute;
+    right: 2px;
+    bottom: 1px;
+    font-size: 8px;
+    font-weight: 700;
+    line-height: 1;
+    padding: 1px 2px;
+    border-radius: 3px;
+    background: var(--accent, #4a9eff);
+    color: #fff;
+    pointer-events: none;
+}
+
 /* --- Animation bar (017) --- */
 .animation-bar {
     position: absolute;

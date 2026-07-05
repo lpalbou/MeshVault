@@ -1,0 +1,558 @@
+/**
+ * ViewerControlAPI — a single, self-describing command surface for driving the 3D
+ * viewer programmatically. Designed for AI agents and embedders:
+ *
+ * - ONE entry point: `execute({action, params})` → `{ok, result?|error?}` (JSON in/out).
+ * - DISCOVERABLE: `listCommands()` returns every action with its parameter schema, so an
+ *   agent can enumerate capabilities without prior knowledge.
+ * - OBSERVABLE: `getState()` returns a JSON snapshot; `execute({action:'screenshot'})`
+ *   returns a PNG data URL so the agent can *see* the result of its actions.
+ * - EVENTS: `on(event, cb)` for async signals (loaded, error, animations, measurement).
+ *
+ * The API is a thin, defensive wrapper over the Viewer3D engine — it validates inputs,
+ * coerces types, and never lets an engine exception escape as anything other than a
+ * structured `{ok:false, error}`. It adds no rendering logic of its own.
+ */
+
+export class ViewerControlAPI {
+    /**
+     * @param {import("../viewer_3d.js").Viewer3D} viewer
+     * @param {object} [opts]
+     * @param {(event:string, data:any)=>void} [opts.onEvent] - optional global event sink
+     */
+    constructor(viewer, opts = {}) {
+        this._viewer = viewer;
+        this._listeners = new Map();
+        if (opts.onEvent) this.on("*", opts.onEvent);
+
+        // Bridge engine DOM events → API events (loaded/animations/measurement).
+        // Track them so destroy() can detach and not leak the viewer via the container.
+        this._containerListeners = [];
+        const el = viewer._container;
+        if (el && el.addEventListener) {
+            const bind = (type) => {
+                const handler = (e) => this._emit(type, e.detail);
+                el.addEventListener(type, handler);
+                this._containerListeners.push({ type, handler });
+            };
+            bind("animations");
+            bind("measurement");
+            bind("navmodechange");
+        }
+
+        this._commands = this._buildRegistry();
+    }
+
+    // ---- public surface -----------------------------------------------------
+
+    /** Enumerate every command with its parameter schema (for agent discovery). */
+    listCommands() {
+        return Object.entries(this._commands).map(([action, def]) => ({
+            action,
+            description: def.description,
+            params: def.params || {},
+        }));
+    }
+
+    /** JSON snapshot of the viewer (model, camera, display, animation). */
+    getState() {
+        return this._viewer.getState();
+    }
+
+    /** Per-mesh + per-material breakdown of the loaded model. */
+    getSceneInfo() {
+        return this._viewer.getSceneInfo();
+    }
+
+    /**
+     * Execute one command. Always resolves to a structured result; never throws.
+     * @param {{action:string, params?:object}} command
+     * @returns {Promise<{ok:boolean, result?:any, error?:string}>}
+     */
+    async execute(command) {
+        if (!command || typeof command.action !== "string") {
+            return { ok: false, error: "command.action (string) is required" };
+        }
+        const def = this._commands[command.action];
+        if (!def) {
+            return {
+                ok: false,
+                error: `Unknown action '${command.action}'. Use listCommands() to discover valid actions.`,
+            };
+        }
+        // Commands that act on a model must fail clearly when none is loaded, so an
+        // agent can distinguish "did nothing because empty" from "succeeded".
+        if (def.requiresModel && !this._viewer.getState().model.loaded) {
+            return { ok: false, error: `'${command.action}' requires a loaded model. Call 'load' first.` };
+        }
+
+        const params = command.params || {};
+        const validation = this._validate(def.params || {}, params);
+        if (validation.error) return { ok: false, error: validation.error };
+
+        try {
+            const result = await def.handler(validation.values);
+            this._emit("executed", { action: command.action, params });
+            return { ok: true, result: result === undefined ? null : result };
+        } catch (err) {
+            const message = String(err && err.message ? err.message : err);
+            this._emit("error", { action: command.action, error: message });
+            return { ok: false, error: message };
+        }
+    }
+
+    /** Detach all listeners this API put on the container (call from the host destroy). */
+    destroy() {
+        for (const { type, handler } of this._containerListeners || []) {
+            this._viewer._container.removeEventListener(type, handler);
+        }
+        this._containerListeners = [];
+        this._listeners.clear();
+    }
+
+    /** Subscribe to an event ('loaded','error','animations','measurement','executed','*'). */
+    on(event, cb) {
+        if (!this._listeners.has(event)) this._listeners.set(event, new Set());
+        this._listeners.get(event).add(cb);
+        return () => this._listeners.get(event)?.delete(cb);
+    }
+
+    _emit(event, data) {
+        for (const cb of this._listeners.get(event) || []) {
+            try { cb(data, event); } catch { /* listener errors are their own problem */ }
+        }
+        for (const cb of this._listeners.get("*") || []) {
+            try { cb(data, event); } catch { /* ignore */ }
+        }
+    }
+
+    // ---- input validation ---------------------------------------------------
+
+    /**
+     * Validate + coerce params against a schema. Schema entry:
+     *   { type: 'number'|'string'|'boolean'|'array', required?, default?, enum?, min?, max? }
+     */
+    _validate(schema, params) {
+        const values = {};
+        // Reject unknown params rather than silently ignoring them — otherwise an agent
+        // that mistypes a param (or assumes a capability) gets a misleading ok:true.
+        for (const key of Object.keys(params)) {
+            if (!(key in schema)) {
+                const valid = Object.keys(schema);
+                return { error: `Unknown param '${key}'. Valid params: ${valid.length ? valid.join(", ") : "(none)"}` };
+            }
+        }
+        for (const [key, spec] of Object.entries(schema)) {
+            let v = params[key];
+            if (v === undefined || v === null) {
+                if (spec.required) return { error: `Missing required param '${key}'` };
+                if (spec.default !== undefined) v = spec.default;
+                else { values[key] = undefined; continue; }
+            }
+            if (spec.type === "number") {
+                const n = Number(v);
+                if (Number.isNaN(n)) return { error: `Param '${key}' must be a number` };
+                if (spec.min !== undefined && n < spec.min) return { error: `Param '${key}' must be >= ${spec.min}` };
+                if (spec.max !== undefined && n > spec.max) return { error: `Param '${key}' must be <= ${spec.max}` };
+                v = n;
+            } else if (spec.type === "boolean") {
+                v = (v === true || v === "true" || v === 1 || v === "1");
+            } else if (spec.type === "array") {
+                if (!Array.isArray(v)) return { error: `Param '${key}' must be an array` };
+            } else if (spec.type === "string") {
+                v = String(v);
+            }
+            if (spec.enum && !spec.enum.includes(v)) {
+                return { error: `Param '${key}' must be one of: ${spec.enum.join(", ")}` };
+            }
+            values[key] = v;
+        }
+        return { values };
+    }
+
+    // ---- command registry ---------------------------------------------------
+
+    _buildRegistry() {
+        const v = this._viewer;
+        return {
+            // --- observation ---
+            get_state: {
+                description: "Return a JSON snapshot of the viewer (model, camera, display, animation).",
+                handler: () => v.getState(),
+            },
+            get_scene_info: {
+                description: "Return per-mesh and per-material details of the loaded model.",
+                handler: () => v.getSceneInfo(),
+            },
+            get_bounds: {
+                description: "Return the model's world-space bounding box {min,max,center,size} or null.",
+                handler: () => v.getBounds(),
+            },
+            score_views: {
+                description: "Score candidate camera angles by how much visible surface DETAIL each shows (edge energy), and return them ranked. Use this to find a model's semantic 'front' when it is not axis-aligned (e.g. a face): the most detailed side ranks first. Returns [{azimuth, elevation, score, coverage}]. NOTE: presets front/back/left/right are WORLD-AXIS conventions, not the model's real front — this command discovers the real one.",
+                params: {
+                    azimuths: { type: "array" },
+                    elevations: { type: "array" },
+                    size: { type: "number", min: 32, max: 512 },
+                    fill: { type: "number", min: 0.1, max: 1 },
+                },
+                requiresModel: true,
+                handler: (p) => v.scoreViews({ azimuths: p.azimuths, elevations: p.elevations, size: p.size, fill: p.fill }),
+            },
+            find_best_view: {
+                description: "Find the best 'hero'/front angle (highest visible geometric detail, lighting-independent) and move the camera there. Auto-uprights by default (corrects camera roll so a lying-down/mis-oriented model appears the right way up); pass upright:false to skip, apply:false to only compute. Returns {azimuth, elevation, score, coverage, ranked}.",
+                params: {
+                    apply: { type: "boolean", default: true },
+                    upright: { type: "boolean", default: true },
+                    fill: { type: "number", min: 0.1, max: 1 },
+                    size: { type: "number", min: 32, max: 512 },
+                },
+                requiresModel: true,
+                handler: (p) => v.findBestView({ apply: p.apply, upright: p.upright, fill: p.fill, size: p.size }),
+            },
+            auto_upright: {
+                description: "Correct the camera roll for the CURRENT view so a mis-oriented (e.g. lying-down) subject appears upright, without modifying the model. Uses left-right symmetry of the framed subject.",
+                requiresModel: true,
+                handler: () => v.autoUpright(),
+            },
+            list_commands: {
+                description: "List all available commands and their parameters.",
+                handler: () => this.listCommands(),
+            },
+            screenshot: {
+                description: "Render the current view and return a PNG data URL. Options: width/height (explicit output resolution; one may be omitted and is derived from aspect), transparent (alpha background, for cutouts), fog (default false — scene fog is suppressed for cleaner hero shots), hideGround (hide the ground/shadow plane), ssao (default true — render through the SSAO/tone-mapping composer for hero quality).",
+                params: {
+                    width: { type: "number", min: 16, max: 8192 },
+                    height: { type: "number", min: 16, max: 8192 },
+                    transparent: { type: "boolean", default: false },
+                    fog: { type: "boolean", default: false },
+                    hideGround: { type: "boolean", default: false },
+                    ssao: { type: "boolean", default: true },
+                },
+                handler: (p) => v.captureImage({
+                    width: p.width, height: p.height,
+                    transparent: p.transparent, fog: p.fog,
+                    hideGround: p.hideGround, ssao: p.ssao,
+                }),
+            },
+            capture_views: {
+                description: "Capture several views in one call (e.g. hero shots). `views` is a list of presets (front/back/left/right/top/bottom/iso) and/or {azimuth,elevation} objects. Returns { <label>: <PNG data URL> }. Hides grid/axes and suppresses fog for a clean shot, restoring them after.",
+                params: {
+                    views: { type: "array", default: ["front", "left", "right", "back"] },
+                    width: { type: "number", default: 1024, min: 16, max: 8192 },
+                    height: { type: "number", default: 1024, min: 16, max: 8192 },
+                    transparent: { type: "boolean", default: false },
+                    fill: { type: "number", min: 0.1, max: 1 },
+                    hideGround: { type: "boolean", default: false },
+                },
+                requiresModel: true,
+                handler: (p) => {
+                    const presets = ["front", "back", "left", "right", "top", "bottom", "iso"];
+                    // Pre-validate all views so bad input costs nothing.
+                    for (const view of p.views) {
+                        const ok = (typeof view === "string" && presets.includes(view)) ||
+                            (view && typeof view === "object" && typeof view.azimuth === "number");
+                        if (!ok) throw new Error(`Invalid view '${JSON.stringify(view)}' (preset name or {azimuth,elevation})`);
+                    }
+                    const grid = v.getGridVisible();
+                    const axes = v.getAxisVisible();
+                    v.setGridVisible(false);
+                    v.setAxisVisible(false);
+                    const out = {};
+                    try {
+                        p.views.forEach((view, i) => {
+                            let label;
+                            if (typeof view === "string") {
+                                v.setCameraView(view, { fill: p.fill });
+                                label = view;
+                            } else {
+                                v.orbitTo(view.azimuth, view.elevation ?? 15, { fill: p.fill });
+                                label = `az${view.azimuth}_el${view.elevation ?? 15}`;
+                            }
+                            out[label] = v.captureImage({
+                                width: p.width, height: p.height,
+                                transparent: p.transparent, hideGround: p.hideGround,
+                            });
+                        });
+                    } finally {
+                        v.setGridVisible(grid);
+                        v.setAxisVisible(axes);
+                    }
+                    return out;
+                },
+            },
+            turntable: {
+                description: "Capture N views evenly spaced around the model (turntable). Returns { <label>: <PNG data URL> }.",
+                params: {
+                    frames: { type: "number", default: 8, min: 1, max: 64 },
+                    elevation: { type: "number", default: 15 },
+                    width: { type: "number", default: 512, min: 16, max: 8192 },
+                    height: { type: "number", default: 512, min: 16, max: 8192 },
+                    fill: { type: "number", min: 0.1, max: 1 },
+                    transparent: { type: "boolean", default: false },
+                    hideGround: { type: "boolean", default: false },
+                },
+                requiresModel: true,
+                handler: (p) => {
+                    const grid = v.getGridVisible();
+                    const axes = v.getAxisVisible();
+                    v.setGridVisible(false);
+                    v.setAxisVisible(false);
+                    const out = {};
+                    try {
+                        for (let i = 0; i < p.frames; i++) {
+                            const az = Math.round((360 / p.frames) * i);
+                            v.orbitTo(az, p.elevation, { fill: p.fill });
+                            out[`az${az}`] = v.captureImage({
+                                width: p.width, height: p.height,
+                                transparent: p.transparent, hideGround: p.hideGround,
+                            });
+                        }
+                    } finally {
+                        v.setGridVisible(grid);
+                        v.setAxisVisible(axes);
+                    }
+                    return out;
+                },
+            },
+
+            // --- loading ---
+            load: {
+                description: "Load a 3D model from a URL. Extension is inferred if omitted.",
+                params: {
+                    url: { type: "string", required: true },
+                    extension: { type: "string" },
+                    name: { type: "string" },
+                },
+                handler: async (p) => {
+                    const ext = p.extension || "." + p.url.split(".").pop().split("?")[0].toLowerCase();
+                    const stats = await v.loadModel(p.url, ext, { name: p.name });
+                    this._emit("loaded", { name: v.getState().model.name, stats });
+                    return { stats, state: v.getState() };
+                },
+            },
+            unload: {
+                description: "Remove the current model and reset the viewer to an empty scene.",
+                handler: () => v.unload(),
+            },
+
+            // --- camera ---
+            get_camera: {
+                description: "Return camera position, target, fov, mode, and available presets.",
+                handler: () => v.getState().camera,
+            },
+            set_camera: {
+                description: "Set the camera to an explicit position and look-at target (world coords).",
+                params: {
+                    position: { type: "array", required: true },
+                    target: { type: "array" },
+                },
+                requiresModel: false,
+                handler: (p) => {
+                    if (p.position.length !== 3) throw new Error("position must be [x,y,z]");
+                    if (p.target && p.target.length !== 3) throw new Error("target must be [x,y,z]");
+                    return v.setCamera(p.position, p.target);
+                },
+            },
+            set_view: {
+                description: "Point the camera at a preset around the model. `fill` (0-1, higher = tighter framing) controls how much of the frame the model occupies.",
+                params: {
+                    preset: { type: "string", required: true, enum: ["front", "back", "left", "right", "top", "bottom", "iso"] },
+                    fill: { type: "number", min: 0.1, max: 1 },
+                },
+                requiresModel: true,
+                handler: (p) => v.setCameraView(p.preset, { fill: p.fill }),
+            },
+            orbit: {
+                description: "Orbit the camera to spherical angles around the model and frame it. azimuth: degrees around Y (0 = front); elevation: degrees above horizon.",
+                params: {
+                    azimuth: { type: "number", required: true },
+                    elevation: { type: "number", default: 15 },
+                    fill: { type: "number", min: 0.1, max: 1 },
+                },
+                requiresModel: true,
+                handler: (p) => v.orbitTo(p.azimuth, p.elevation, { fill: p.fill }),
+            },
+            frame: {
+                description: "Frame the model. Keeps the current view direction by default (keep_direction:false for an iso fit). `fill` (0-1) sets tightness.",
+                params: {
+                    fill: { type: "number", min: 0.1, max: 1 },
+                    keep_direction: { type: "boolean", default: true },
+                },
+                requiresModel: true,
+                handler: (p) => v.frameView({ fill: p.fill, keepDirection: p.keep_direction }),
+            },
+            set_lighting: {
+                description: "Adjust the studio lighting for hero shots. All params optional (degrees / multipliers).",
+                params: {
+                    azimuth: { type: "number", min: 0, max: 360 },
+                    elevation: { type: "number", min: 0, max: 90 },
+                    key_intensity: { type: "number", min: 0, max: 10 },
+                    fill_intensity: { type: "number", min: 0, max: 10 },
+                    ambient: { type: "number", min: 0, max: 10 },
+                    exposure: { type: "number", min: 0.1, max: 8 },
+                },
+                handler: (p) => v.setLighting({
+                    azimuth: p.azimuth, elevation: p.elevation,
+                    key_intensity: p.key_intensity, fill_intensity: p.fill_intensity,
+                    ambient: p.ambient, exposure: p.exposure,
+                }),
+            },
+            reset_camera: {
+                description: "Reset the camera to the initial framed view (orbit mode).",
+                handler: () => { v.resetView(); return true; },
+            },
+            set_nav_mode: {
+                description: "Set navigation mode: 'orbit' or 'fpv'.",
+                params: { mode: { type: "string", required: true, enum: ["orbit", "fpv"] } },
+                handler: (p) => { v.setNavMode(p.mode); return true; },
+            },
+
+            // --- display ---
+            set_wireframe: {
+                description: "Show/hide wireframe overlay.",
+                params: { enabled: { type: "boolean", required: true } },
+                handler: (p) => { v.setWireframe(p.enabled); return true; },
+            },
+            set_grid: {
+                description: "Show/hide the floor grid.",
+                params: { visible: { type: "boolean", required: true } },
+                handler: (p) => { v.setGridVisible(p.visible); return true; },
+            },
+            set_axes: {
+                description: "Show/hide the XYZ axes helper.",
+                params: { visible: { type: "boolean", required: true } },
+                handler: (p) => { v.setAxisVisible(p.visible); return true; },
+            },
+            set_normals: {
+                description: "Show/hide vertex-normals visualization (little lines per vertex).",
+                params: { visible: { type: "boolean", required: true } },
+                handler: (p) => { v.setNormalsVisible(p.visible); return true; },
+            },
+            set_render_mode: {
+                description: "How the model is drawn: 'textured' (mesh + texture, the lit PBR surface — default), 'solid' (the mesh only, uniform matte, no texture), or 'wireframe' (edges/topology only). Also accepts 'normals' (per-face normal colors) for geometry inspection. Aliases: 'shaded'=textured, 'clay'=solid.",
+                params: { mode: { type: "string", required: true, enum: ["textured", "solid", "wireframe", "normals", "shaded", "clay"] } },
+                requiresModel: true,
+                handler: (p) => v.setRenderMode(p.mode),
+            },
+            set_clip: {
+                description: "Cutting plane — hide part of the mesh on one side of a plane, e.g. to see only the front geometry and cut away what's behind, or make a cross-section. axis 'camera' cuts relative to the current view (near side kept); 'x'/'y'/'z' cut along model axes. position 0..1 across the model; flip keeps the other side. Set enabled:false to clear.",
+                params: {
+                    enabled: { type: "boolean", required: true },
+                    axis: { type: "string", enum: ["x", "y", "z", "camera"], default: "camera" },
+                    position: { type: "number", min: 0, max: 1, default: 0.5 },
+                    flip: { type: "boolean", default: false },
+                },
+                requiresModel: true,
+                handler: (p) => v.setClip({ enabled: p.enabled, axis: p.axis, position: p.position, flip: p.flip }),
+            },
+            set_fog: {
+                description: "Enable/disable exponential scene fog and set its density (fog is off in hero captures by default).",
+                params: {
+                    enabled: { type: "boolean", required: true },
+                    density: { type: "number", min: 0, max: 1 },
+                },
+                handler: (p) => v.setFog({ enabled: p.enabled, density: p.density }),
+            },
+            set_background: {
+                description: "Set the background color (CSS hex, e.g. #202030).",
+                params: { color: { type: "string", required: true } },
+                handler: (p) => { v.setBackground(p.color); return true; },
+            },
+            set_scale: {
+                description: "Set the uniform model scale.",
+                params: { scale: { type: "number", required: true, min: 0.001, max: 1000 } },
+                requiresModel: true,
+                handler: (p) => { v.setModelScale(p.scale); return true; },
+            },
+
+            // --- transforms ---
+            center: { description: "Center the model's centroid at the origin.", requiresModel: true, handler: () => { v.recenterModel(); return true; } },
+            ground: { description: "Drop the model so its lowest point sits on Y=0.", requiresModel: true, handler: () => { v.groundModel(); return true; } },
+            auto_orient: { description: "Auto-orient the model via PCA (smallest axis → up).", requiresModel: true, handler: () => { v.autoOrientModel(); return true; } },
+            rotate: {
+                description: "Rotate the model by an angle (degrees) around an axis.",
+                params: {
+                    axis: { type: "string", required: true, enum: ["x", "y", "z"] },
+                    degrees: { type: "number", required: true },
+                },
+                requiresModel: true,
+                handler: (p) => { v.rotateModel(p.axis, p.degrees); return true; },
+            },
+            simplify: {
+                description: "Simplify the mesh to a fraction of its vertices (0-1). Returns {before, after} vertex counts.",
+                params: { ratio: { type: "number", required: true, min: 0.01, max: 1 } },
+                requiresModel: true,
+                handler: async (p) => { const r = await v.simplifyModel(p.ratio); return r; },
+            },
+            recompute_normals: { description: "Merge vertices and recompute smooth normals.", requiresModel: true, handler: () => { v.recomputeNormals(); return true; } },
+            reset: { description: "Undo all transforms (restore original geometry).", requiresModel: true, handler: () => { v.resetModel(); return true; } },
+
+            // --- animation ---
+            play_animation: {
+                description: "Play the animation clip at the given index.",
+                params: { index: { type: "number", default: 0, min: 0 } },
+                requiresModel: true,
+                handler: (p) => {
+                    if (!v.hasAnimations()) throw new Error("Model has no animation clips");
+                    v.playAnimation(p.index); return true;
+                },
+            },
+            pause_animation: { description: "Pause the active animation.", requiresModel: true, handler: () => { v.setAnimationPlaying(false); return true; } },
+            set_animation_time: {
+                description: "Seek the active animation to a time (seconds).",
+                params: { seconds: { type: "number", required: true, min: 0 } },
+                requiresModel: true,
+                handler: (p) => {
+                    if (!v.hasAnimations()) throw new Error("Model has no animation clips");
+                    v.setAnimationTime(p.seconds); return true;
+                },
+            },
+            set_animation_speed: {
+                description: "Set animation playback speed multiplier.",
+                params: { multiplier: { type: "number", required: true, min: 0 } },
+                requiresModel: true,
+                handler: (p) => { v.setAnimationSpeed(p.multiplier); return true; },
+            },
+
+            // --- measurement ---
+            measure: {
+                description: "Measure the distance between two world-space points; draws the line.",
+                params: {
+                    a: { type: "array", required: true },
+                    b: { type: "array", required: true },
+                },
+                requiresModel: true,
+                handler: (p) => {
+                    if (p.a.length !== 3 || p.b.length !== 3) throw new Error("a and b must be [x,y,z]");
+                    return { distance: v.measureBetween(p.a, p.b) };
+                },
+            },
+            set_measure_mode: {
+                description: "Enable/disable interactive click-to-measure mode.",
+                params: { enabled: { type: "boolean", required: true } },
+                handler: (p) => {
+                    // toggleMeasureMode flips; drive it to the requested state.
+                    const cur = !!v._measureMode;
+                    if (cur !== p.enabled) v.toggleMeasureMode();
+                    return v._measureMode;
+                },
+            },
+
+            // --- export ---
+            export_obj: { description: "Export the model as OBJ text.", requiresModel: true, handler: () => v.exportAsOBJ() },
+            export_glb: {
+                description: "Export the model as a GLB (binary glTF); returns a base64 data URL.",
+                requiresModel: true,
+                handler: async () => {
+                    const buf = await v.exportAsGLB();
+                    if (!buf) return null;
+                    const bytes = new Uint8Array(buf);
+                    let bin = "";
+                    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+                    return "data:model/gltf-binary;base64," + btoa(bin);
+                },
+            },
+        };
+    }
+}

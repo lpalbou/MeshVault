@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeshVault Viewer (standalone)</title>
+    <style>
+        html, body { margin: 0; height: 100%; background: #0d0d1a; color: #e0e0e6;
+            font-family: system-ui, sans-serif; }
+        #app { position: absolute; inset: 0; }
+        #panel { position: absolute; top: 12px; left: 12px; z-index: 10;
+            background: rgba(20,20,30,0.85); backdrop-filter: blur(8px);
+            border: 1px solid #2a2a3a; border-radius: 10px; padding: 10px; width: 320px;
+            font-size: 12px; }
+        #panel h1 { font-size: 13px; margin: 0 0 8px; }
+        #panel input, #panel textarea, #panel button, #panel select {
+            width: 100%; box-sizing: border-box; margin: 3px 0; padding: 6px 8px;
+            background: #141420; color: #e0e0e6; border: 1px solid #2a2a3a; border-radius: 6px;
+            font-family: inherit; font-size: 12px; }
+        #panel button { cursor: pointer; }
+        #panel .row { display: flex; gap: 6px; }
+        #out { white-space: pre-wrap; max-height: 180px; overflow: auto; font-family: monospace;
+            font-size: 11px; color: #9ad; margin-top: 6px; }
+        .hint { opacity: 0.55; }
+    </style>
+</head>
+<body>
+    <div id="app"></div>
+    <div id="panel">
+        <h1>MeshVault Viewer — standalone (no server)</h1>
+        <input type="file" id="file" accept=".obj,.fbx,.gltf,.glb,.stl,.ply,.dae,.3mf,.usdz" />
+        <div class="row">
+            <input type="text" id="url" placeholder="…or a model URL" />
+            <button id="loadUrl" style="width:auto;">Load</button>
+        </div>
+        <textarea id="cmd" rows="3" placeholder='Command JSON, e.g. {"action":"set_view","params":{"preset":"iso"}}'></textarea>
+        <button id="run">execute(command)</button>
+        <div class="row">
+            <button id="state">getState()</button>
+            <button id="cmds">listCommands()</button>
+            <button id="shot">screenshot()</button>
+        </div>
+        <div id="out" class="hint">Ready. This page uses only the bundled viewer — no backend.</div>
+    </div>
+
+    <script type="module">
+        import { createViewer } from "/static/dist/meshvault-viewer.js";
+
+        const out = document.getElementById("out");
+        const log = (x) => { out.textContent = typeof x === "string" ? x : JSON.stringify(x, null, 2); };
+
+        const mv = createViewer(document.getElementById("app"), {
+            onEvent: (data, event) => { if (event === "loaded") log({ event, data: { name: data.name } }); },
+        });
+        // Expose for AI-agent bridges / console.
+        window.mv = mv;
+
+        document.getElementById("file").addEventListener("change", async (e) => {
+            const f = e.target.files[0];
+            if (f) log(await mv.loadFile(f));
+        });
+        document.getElementById("loadUrl").addEventListener("click", async () => {
+            const url = document.getElementById("url").value.trim();
+            if (url) log(await mv.execute({ action: "load", params: { url } }));
+        });
+        document.getElementById("run").addEventListener("click", async () => {
+            try {
+                log(await mv.execute(JSON.parse(document.getElementById("cmd").value)));
+            } catch (err) { log("Invalid JSON: " + err.message); }
+        });
+        document.getElementById("state").addEventListener("click", () => log(mv.getState()));
+        document.getElementById("cmds").addEventListener("click", () => log(mv.listCommands()));
+        document.getElementById("shot").addEventListener("click", async () => {
+            const r = await mv.execute({ action: "screenshot" });
+            log(r.ok ? "screenshot: " + r.result.slice(0, 64) + "… (" + r.result.length + " chars)" : r);
+        });
+    </script>
+</body>
+</html>

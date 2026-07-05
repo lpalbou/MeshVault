@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from backend.file_browser import FileBrowser
@@ -185,6 +185,18 @@ async def root():
     # so the SPA is authenticated without exposing the token to other origins.
     attach_session_cookie(response, security_config)
     return response
+
+
+@app.get("/llms.txt", response_class=PlainTextResponse)
+async def llms_txt():
+    """Agent-ready docs index (llmstxt.org convention). Served at the web root."""
+    return PlainTextResponse((frontend_dir / "llms.txt").read_text(encoding="utf-8"))
+
+
+@app.get("/llms-full.txt", response_class=PlainTextResponse)
+async def llms_full_txt():
+    """Full control-API reference for agents (single-fetch corpus)."""
+    return PlainTextResponse((frontend_dir / "llms-full.txt").read_text(encoding="utf-8"))
 
 
 @app.get("/api/browse")

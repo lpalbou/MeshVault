@@ -49,7 +49,15 @@ class App {
 
         this._viewer = new Viewer3D(
             this._elements.viewerContainer,
-            (stats) => this._updateViewerInfo(stats)
+            (stats) => this._updateViewerInfo(stats),
+            {
+                // The full app resolves a model's resource references (textures, MTL)
+                // through the backend, which confines and serves them. This is the same
+                // behavior as before — now injected explicitly so the viewer core stays
+                // backend-agnostic (the standalone bundle injects a client-only resolver).
+                resolveResource: (ref) =>
+                    `/api/asset/related?path=${encodeURIComponent(ref)}`,
+            }
         );
 
         this._exportPanel = new ExportPanel(
@@ -281,6 +289,9 @@ class App {
             // Record in recent files (dedup, most-recent-first, capped).
             this._pushRecentFile(asset);
 
+            // A fresh model loads as mesh+texture — reset the render-mode button.
+            if (this._resetRenderModeUI) this._resetRenderModeUI();
+
             this._updateStatus(`Loaded: ${asset.name}${asset.extension}`);
         } catch (err) {
             console.error("Failed to load asset:", err);
@@ -470,12 +481,34 @@ class App {
      * Initialize the wireframe toggle button.
      */
     _initWireframeToggle() {
-        const btn = document.getElementById("wireframe-toggle");
+        // Cycle the three view modes the user asked for: mesh+texture → mesh → wireframe.
+        const btn = document.getElementById("rendermode-toggle");
+        if (!btn) return;
+        const badge = document.getElementById("rendermode-badge");
+        const modes = [
+            { mode: "textured", label: "T", title: "Render mode: mesh + texture (click → mesh)" },
+            { mode: "solid", label: "M", title: "Render mode: mesh only (click → wireframe)" },
+            { mode: "wireframe", label: "W", title: "Render mode: wireframe (click → mesh + texture)" },
+        ];
+        let idx = 0;
+        const apply = () => {
+            const m = modes[idx];
+            this._viewer.setRenderMode(m.mode);
+            if (badge) badge.textContent = m.label;
+            btn.title = m.title;
+            btn.classList.toggle("active", m.mode !== "textured");
+        };
         btn.addEventListener("click", () => {
-            const current = this._viewer.getWireframe();
-            this._viewer.setWireframe(!current);
-            btn.classList.toggle("active", !current);
+            idx = (idx + 1) % modes.length;
+            apply();
         });
+        // A newly loaded model starts textured (the engine resets it); keep the button in sync.
+        this._resetRenderModeUI = () => {
+            idx = 0;
+            if (badge) badge.textContent = modes[0].label;
+            btn.title = modes[0].title;
+            btn.classList.remove("active");
+        };
     }
 
     /**
@@ -1403,18 +1436,32 @@ class App {
         if (!zone) return;
         const supported = [".obj", ".fbx", ".gltf", ".glb", ".stl", ".ply", ".dae", ".3mf", ".usdz"];
 
+        // `dragleave` fires when moving over child elements and doesn't fire reliably when
+        // a drag is abandoned outside the window, so tracking it directly leaves the
+        // overlay stuck. Instead we set the "drag-over" state on every `dragover` and
+        // clear it with a short watchdog timer that each `dragover` keeps resetting — once
+        // dragover events stop (drag left the zone, ended, or was cancelled anywhere), the
+        // timer fires and clears the state. Drop clears it immediately.
+        let clearTimer = null;
+        const setDrag = () => {
+            zone.classList.add("drag-over");
+            if (clearTimer) clearTimeout(clearTimer);
+            clearTimer = setTimeout(() => zone.classList.remove("drag-over"), 120);
+        };
+        const clearDrag = () => {
+            if (clearTimer) { clearTimeout(clearTimer); clearTimer = null; }
+            zone.classList.remove("drag-over");
+        };
+
         const onDragOver = (e) => {
             if (e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files")) {
                 e.preventDefault();
-                zone.classList.add("drag-over");
+                setDrag();
             }
-        };
-        const onDragLeave = (e) => {
-            if (e.target === zone) zone.classList.remove("drag-over");
         };
         const onDrop = async (e) => {
             e.preventDefault();
-            zone.classList.remove("drag-over");
+            clearDrag();
             const files = Array.from(e.dataTransfer.files || []);
             if (files.length === 0) return;
             const file = files[0];
@@ -1427,8 +1474,12 @@ class App {
         };
 
         zone.addEventListener("dragover", onDragOver);
-        zone.addEventListener("dragleave", onDragLeave);
         zone.addEventListener("drop", onDrop);
+        // Belt-and-suspenders: any drag ending/leaving the document clears the overlay.
+        zone.addEventListener("dragleave", (e) => { if (!e.relatedTarget) clearDrag(); });
+        window.addEventListener("dragend", clearDrag);
+        window.addEventListener("drop", clearDrag);
+        document.addEventListener("mouseleave", clearDrag);
     }
 
     /**
@@ -1446,6 +1497,7 @@ class App {
             this._elements.infoSize.textContent = this._formatSize(file.size);
             this._elements.viewerInfo.style.display = "flex";
             this._resetScaleControl();
+            if (this._resetRenderModeUI) this._resetRenderModeUI();
             this._updateStatus(`Loaded (dropped): ${file.name}`);
         } catch (err) {
             console.error("Drop load failed:", err);

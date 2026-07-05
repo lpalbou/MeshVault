@@ -24,8 +24,10 @@ const root = resolve(__dirname, "..");
 const ENTRIES = [
     // Full MeshVault app (talks to the local backend).
     { in: "frontend/js/app.js", out: "frontend/dist/app.bundle.js" },
-    // Future: standalone embeddable viewer (no backend) — uncomment once extracted.
-    // { in: "frontend/js/viewer/standalone.js", out: "frontend/dist/meshvault-viewer.js" },
+    // Standalone embeddable viewer core (no backend) — driven via the control API.
+    { in: "frontend/js/viewer/standalone.js", out: "frontend/dist/meshvault-viewer.js" },
+    // Same standalone bundle, emitted next to the static GitHub Pages site in web/.
+    { in: "frontend/js/viewer/standalone.js", out: "web/meshvault-viewer.js" },
 ];
 
 const watch = process.argv.includes("--watch");

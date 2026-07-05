@@ -27,6 +27,7 @@ import { TGALoader } from "three/addons/loaders/TGALoader.js";
 import { OBJExporter } from "three/addons/exporters/OBJExporter.js";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
+import { deinterleaveGeometry } from "three/addons/utils/BufferGeometryUtils.js";
 import { SimplifyModifier } from "three/addons/modifiers/SimplifyModifier.js";
 import { VertexNormalsHelper } from "three/addons/helpers/VertexNormalsHelper.js";
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
@@ -40,13 +41,35 @@ export class Viewer3D {
      * @param {HTMLElement} container - The container element for the 3D canvas
      * @param {Function} onInfoUpdate - Callback to update viewer info (vertices, faces)
      */
-    constructor(container, onInfoUpdate) {
+    constructor(container, onInfoUpdate, options = {}) {
         this._container = container;
-        this._onInfoUpdate = onInfoUpdate;
+        this._onInfoUpdate = onInfoUpdate || (() => {});
         this._animationId = null;
         this._currentModel = null;
         this._mixers = []; // Animation mixers for FBX
         this._clock = new THREE.Clock();
+
+        // Backend decoupling: how the viewer turns a resource reference (a texture/MTL
+        // path referenced by a model) into a fetchable URL. The full MeshVault app injects
+        // a resolver that points at its /api/asset/related endpoint; a standalone/embedded
+        // viewer can inject its own (or rely on the default below, which returns the ref
+        // as-is so relative URLs resolve against the host page). This is the single seam
+        // that makes the rendering core usable without a server.
+        this._resolveResource =
+            options.resolveResource ||
+            ((ref) => `/api/asset/related?path=${encodeURIComponent(ref)}`);
+
+        // Lightweight state tracking so the control API (and AI agents) can query a
+        // JSON snapshot without reaching into internals.
+        this._background = "#0d0d1a";
+        this._modelScale = 1;
+        this._lastModelName = null;
+        this._lastStats = { vertices: 0, faces: 0, width: 0, height: 0, depth: 0 };
+
+        // Track every DOM listener we attach to the container/canvas so destroy() can
+        // remove them. Anonymous listeners on the embedder's element would otherwise
+        // leak the whole scene graph and keep firing after teardown.
+        this._trackedListeners = [];
 
         // Load guard: prevents race conditions when clicking assets rapidly
         this._loadId = 0;
@@ -157,6 +180,11 @@ export class Viewer3D {
 
         // Compute stats
         const stats = this._computeStats(object);
+        this._lastStats = stats;
+        // Track a human-readable name for state queries (control API / AI agents).
+        const nameSource = options.name || options.sourcePath || url || "";
+        this._lastModelName =
+            String(nameSource).split(/[/\\]/).pop().split("?")[0] || "model";
         this._onInfoUpdate(stats);
 
         return stats;
@@ -165,6 +193,20 @@ export class Viewer3D {
     /** Remove the current model from the scene */
     _clearModel() {
         if (this._currentModel) {
+            // If a render-mode override is active (normals/clay), restore the ORIGINAL
+            // materials first, then dispose the (now-unused) override — otherwise the
+            // originals' GPU textures leak because _disposeObject only walks child.material.
+            this._currentModel.traverse((child) => {
+                if (child.isMesh && child._mvOriginalMaterial) {
+                    const override = child.material;
+                    child.material = child._mvOriginalMaterial;
+                    delete child._mvOriginalMaterial;
+                    if (override && override !== child.material) {
+                        (Array.isArray(override) ? override : [override])
+                            .forEach((m) => m && m.dispose && m.dispose());
+                    }
+                }
+            });
             this._scene.remove(this._currentModel);
             this._disposeObject(this._currentModel);
             this._currentModel = null;
@@ -177,6 +219,14 @@ export class Viewer3D {
         this._clearNormalsHelpers();
         // Drop any measurement overlay from the previous model.
         if (this._measureGroup) this._clearMeasurement();
+        // Reset clipping + render-mode trackers so a new model starts clean (textured).
+        if (this._renderer) {
+            this._renderer.clippingPlanes = [];
+            this._renderer.localClippingEnabled = false;
+        }
+        this._clip = null;
+        this._renderMode = "textured";
+        this._wireframeEnabled = false;
     }
 
     // ==========================================================
@@ -300,6 +350,12 @@ export class Viewer3D {
         // Reset modified flag
         this._modelModified = false;
 
+        // Reset control-API state trackers so getState() never reports stale values
+        // (e.g. a scale from a previous model, or a name after a failed load).
+        this._modelScale = 1;
+        this._lastModelName = null;
+        this._lastStats = { vertices: 0, faces: 0, width: 0, height: 0, depth: 0 };
+
         // Reset camera to default position (will be overridden by _frameModel)
         this._camera.position.set(3, 2.5, 4);
         this._controls.target.set(0, 0.5, 0);
@@ -349,16 +405,42 @@ export class Viewer3D {
         material.dispose();
     }
 
-    /** Clean up the entire viewer */
+    /**
+     * Fully tear down the viewer. Critical for embedders that create/destroy repeatedly:
+     * a WebGL context is a scarce resource (browsers cap ~16), so we must remove the
+     * canvas, force-lose the context, dispose GPU resources, and detach every listener
+     * we put on the embedder's container — otherwise old contexts get reclaimed and can
+     * corrupt other live viewers on the page.
+     */
     destroy() {
         if (this._animationId) {
             cancelAnimationFrame(this._animationId);
+            this._animationId = null;
         }
         this._keysPressed.clear();
-        this._resizeObserver.disconnect();
+        if (this._resizeObserver) this._resizeObserver.disconnect();
+
+        // Detach tracked container listeners (canvas listeners die with the canvas below).
+        for (const { target, type, handler, opts } of this._trackedListeners) {
+            target.removeEventListener(type, handler, opts);
+        }
+        this._trackedListeners = [];
+        // Restore the container attribute we mutated.
+        if (!this._hadTabIndex) this._container.removeAttribute("tabindex");
+
         this._clearModel();
-        this._renderer.dispose();
-        this._composer.dispose();
+
+        if (this._controls && this._controls.dispose) this._controls.dispose();
+        if (this._ssaoPass && this._ssaoPass.dispose) this._ssaoPass.dispose();
+        if (this._composer && this._composer.dispose) this._composer.dispose();
+
+        if (this._renderer) {
+            this._renderer.dispose();
+            // renderer.dispose() does NOT release the GL context — force it.
+            if (this._renderer.forceContextLoss) this._renderer.forceContextLoss();
+            const canvas = this._renderer.domElement;
+            if (canvas && canvas.parentNode) canvas.parentNode.removeChild(canvas);
+        }
     }
 
     // ==========================================
@@ -574,7 +656,7 @@ export class Viewer3D {
     _initRenderer() {
         this._renderer = new THREE.WebGLRenderer({
             antialias: true,
-            alpha: false,
+            alpha: true,  // enable transparent-background captures (normal view stays opaque)
             preserveDrawingBuffer: true,  // Required for screenshot (toDataURL)
             powerPreference: "high-performance",
         });
@@ -728,6 +810,19 @@ export class Viewer3D {
         return this._measureMode;
     }
 
+    /**
+     * Programmatic measurement between two world-space points (for the control API /
+     * AI agents). Draws the markers + line + label and returns the distance.
+     * @param {number[]} a - [x,y,z]
+     * @param {number[]} b - [x,y,z]
+     */
+    measureBetween(a, b) {
+        this._clearMeasurement();
+        this._addMeasurePoint(new THREE.Vector3(a[0], a[1], a[2]));
+        this._addMeasurePoint(new THREE.Vector3(b[0], b[1], b[2]));
+        return this._measurePoints[0].distanceTo(this._measurePoints[1]);
+    }
+
     _clearMeasurement() {
         this._measurePoints = [];
         while (this._measureGroup.children.length) {
@@ -818,12 +913,19 @@ export class Viewer3D {
      *   E/Shift = altitude up, Q/Ctrl = altitude down
      *   Spacebar = reset view
      */
+    /** Attach a listener to the embedder-owned container and track it for destroy(). */
+    _onContainer(type, handler, opts) {
+        this._container.addEventListener(type, handler, opts);
+        this._trackedListeners.push({ target: this._container, type, handler, opts });
+    }
+
     _initKeyboardNav() {
         // Make the container focusable so it captures keyboard events
+        this._hadTabIndex = this._container.hasAttribute("tabindex");
         this._container.setAttribute("tabindex", "0");
         this._container.style.outline = "none";
 
-        this._container.addEventListener("keydown", (e) => {
+        this._onContainer("keydown", (e) => {
             const key = e.key.toLowerCase();
 
             // Spacebar: reset view (both modes)
@@ -847,17 +949,17 @@ export class Viewer3D {
             }
         });
 
-        this._container.addEventListener("keyup", (e) => {
+        this._onContainer("keyup", (e) => {
             this._keysPressed.delete(e.key.toLowerCase());
         });
 
         // Clear keys when focus is lost to prevent stuck movement
-        this._container.addEventListener("blur", () => {
+        this._onContainer("blur", () => {
             this._keysPressed.clear();
         });
 
         // Auto-focus the viewer when mouse enters, so keyboard works immediately
-        this._container.addEventListener("mouseenter", () => {
+        this._onContainer("mouseenter", () => {
             this._container.focus();
         });
     }
@@ -1059,6 +1161,692 @@ export class Viewer3D {
         }
     }
 
+    // ==========================================================
+    // Control-API surface (used by the standalone viewer + AI agents)
+    // ==========================================================
+
+    /** Public wrapper: re-frame the camera to fit the current model. */
+    frameModel() {
+        if (this._currentModel) this._frameModel(this._currentModel);
+    }
+
+    /** Public wrapper: reset the camera to the initial framed view (orbit). */
+    resetView() {
+        this._resetView();
+    }
+
+    /**
+     * Set the camera to an explicit position and look-at target (world coords).
+     * @param {number[]} position - [x,y,z]
+     * @param {number[]} [target] - [x,y,z]; defaults to current target
+     */
+    setCamera(position, target) {
+        if (this._navMode === "fpv") this.setNavMode("orbit");
+        this._camera.position.set(position[0], position[1], position[2]);
+        if (target) this._controls.target.set(target[0], target[1], target[2]);
+        this._controls.update();
+        return true;
+    }
+
+    /** Remove the current model and reset viewer state (no model loaded afterwards). */
+    unload() {
+        this._clearModel();
+        this._lastModelName = null;
+        this._lastStats = { vertices: 0, faces: 0, width: 0, height: 0, depth: 0 };
+        this._modelScale = 1;
+        return true;
+    }
+
+    /** Distance from the model center that frames it to a target fill fraction. */
+    _frameDistance(maxDim, fill) {
+        const fov = this._camera.fov * (Math.PI / 180);
+        const base = maxDim / (2 * Math.tan(fov / 2));
+        // fill in (0,1]: higher = tighter. Default 0.55 reproduces the classic 1.8× pad.
+        const f = fill ? Math.max(0.1, Math.min(1, fill)) : 0.55;
+        return base / f;
+    }
+
+    /** Place the camera along a unit direction, framed to fill the current model. */
+    _placeCamera(dir, fill, up) {
+        const box = new THREE.Box3().setFromObject(this._currentModel);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z) || 1;
+        const distance = this._frameDistance(maxDim, fill);
+        if (this._navMode === "fpv") this.setNavMode("orbit");
+        // Reset roll to world-up by default so presets/orbit are consistent; autoUpright
+        // (or an explicit up) overrides it afterward.
+        this._camera.up.copy(up ? up.clone().normalize() : new THREE.Vector3(0, 1, 0));
+        this._camera.position.copy(center.clone().add(dir.clone().normalize().multiplyScalar(distance)));
+        this._controls.target.copy(center);
+        this._controls.update();
+        return true;
+    }
+
+    /**
+     * Auto-upright the CURRENT view by choosing the camera roll (up-vector) that makes
+     * the framed subject look correctly oriented. This solves the "model was baked lying
+     * down" case: score_views finds the right azimuth, but a lying-down face still
+     * appears sideways — rotating the camera up-vector around the view axis fixes it
+     * without mutating the model.
+     *
+     * Scoring per candidate roll: vertical bilateral symmetry (faces/heads/most subjects
+     * are left-right symmetric about their up axis) with a top-heaviness tie-break to
+     * reject the upside-down twin (visible detail sits in the upper half for real subjects).
+     */
+    autoUpright(opts = {}) {
+        if (!this._currentModel) return false;
+        const r = this._renderer, cam = this._camera;
+        const size = opts.size || 96;
+        const steps = opts.steps || 12; // roll candidates over 360°
+
+        const viewDir = cam.position.clone().sub(this._controls.target).normalize();
+        // A stable reference up perpendicular to the view direction.
+        let ref = new THREE.Vector3(0, 1, 0);
+        if (Math.abs(viewDir.dot(ref)) > 0.95) ref = new THREE.Vector3(0, 0, 1);
+        ref.sub(viewDir.clone().multiplyScalar(ref.dot(viewDir))).normalize();
+
+        // Snapshot state.
+        const prevUp = cam.up.clone();
+        const prevAspect = cam.aspect;
+        const prevBg = this._scene.background, prevFog = this._scene.fog;
+        const prevClear = r.getClearColor(new THREE.Color()), prevAlpha = r.getClearAlpha();
+        const prevGrid = this.getGridVisible(), prevAxes = this.getAxisVisible();
+        const prevGround = this._ground ? this._ground.visible : true;
+        const prevClip = r.clippingPlanes;
+        const scoreMat = new THREE.MeshNormalMaterial();
+        const savedMats = [];
+        const rt = new THREE.WebGLRenderTarget(size, size);
+        const buf = new Uint8Array(size * size * 4);
+
+        let bestUp = prevUp.clone(), bestScore = -Infinity;
+        try {
+            this._currentModel.traverse((c) => { if (c.isMesh) { savedMats.push([c, c.material]); c.material = scoreMat; } });
+            this.setGridVisible(false); this.setAxisVisible(false);
+            if (this._ground) this._ground.visible = false;
+            r.clippingPlanes = [];
+            this._scene.background = null; this._scene.fog = null;
+            r.setClearColor(0x000000, 0);
+            cam.aspect = 1; cam.updateProjectionMatrix();
+
+            for (let i = 0; i < steps; i++) {
+                const roll = (2 * Math.PI * i) / steps;
+                const up = ref.clone().applyAxisAngle(viewDir, roll);
+                cam.up.copy(up);
+                cam.lookAt(this._controls.target);
+                r.setRenderTarget(rt);
+                r.render(this._scene, cam);
+                r.readRenderTargetPixels(rt, 0, 0, size, size, buf);
+                r.setRenderTarget(null);
+                const s = this._uprightScore(buf, size);
+                if (s > bestScore) { bestScore = s; bestUp = up.clone(); }
+            }
+        } finally {
+            for (const [c, m] of savedMats) c.material = m;
+            scoreMat.dispose(); rt.dispose(); r.setRenderTarget(null);
+            this._scene.background = prevBg; this._scene.fog = prevFog;
+            r.setClearColor(prevClear, prevAlpha); r.clippingPlanes = prevClip;
+            this.setGridVisible(prevGrid); this.setAxisVisible(prevAxes);
+            if (this._ground) this._ground.visible = prevGround;
+            cam.aspect = prevAspect; cam.updateProjectionMatrix();
+        }
+
+        // Apply the winning up-vector.
+        cam.up.copy(bestUp);
+        this._controls.update();
+        return true;
+    }
+
+    /**
+     * Upright score for a rendered thumbnail: left-right (vertical-axis) symmetry of the
+     * coverage mask, plus a top-heaviness bonus so an upside-down subject scores lower.
+     */
+    _uprightScore(buf, size) {
+        let match = 0, total = 0;
+        let topCover = 0, botCover = 0;
+        const covered = (x, y) => buf[(y * size + x) * 4 + 3] > 16 ? 1 : 0;
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size / 2; x++) {
+                const a = covered(x, y), b = covered(size - 1 - x, y);
+                if (a || b) { total++; if (a === b) match++; }
+            }
+            for (let x = 0; x < size; x++) {
+                if (covered(x, y)) { if (y < size / 2) topCover++; else botCover++; }
+            }
+        }
+        const symmetry = total > 0 ? match / total : 0;
+        const totalCover = topCover + botCover;
+        // Real subjects (faces, busts, most props) carry a bit more mass/detail high up
+        // (head above chin/neck). Small bonus breaks the upright-vs-upside-down tie.
+        const topHeavy = totalCover > 0 ? topCover / totalCover : 0.5;
+        return symmetry + 0.15 * topHeavy;
+    }
+
+    /**
+     * Point the camera at a named preset around the current model.
+     * @param {'front'|'back'|'left'|'right'|'top'|'bottom'|'iso'} preset
+     * @param {object} [opts] - { fill } fraction (0..1, higher = tighter framing)
+     */
+    setCameraView(preset, opts = {}) {
+        if (!this._currentModel) return false;
+        const dirs = {
+            front: [0, 0, 1], back: [0, 0, -1],
+            left: [-1, 0, 0], right: [1, 0, 0],
+            top: [0, 1, 0], bottom: [0, -1, 0],
+            iso: [1, 0.6, 1],
+        };
+        const d = dirs[preset];
+        if (!d) return false;
+        return this._placeCamera(new THREE.Vector3(d[0], d[1], d[2]), opts.fill);
+    }
+
+    /**
+     * Orbit the camera to spherical angles around the model center and frame it.
+     * @param {number} azimuthDeg - rotation around Y (0 = +Z / "front")
+     * @param {number} elevationDeg - angle above the horizon
+     * @param {object} [opts] - { fill }
+     */
+    orbitTo(azimuthDeg, elevationDeg, opts = {}) {
+        if (!this._currentModel) return false;
+        const az = azimuthDeg * Math.PI / 180;
+        const el = elevationDeg * Math.PI / 180;
+        const dir = new THREE.Vector3(
+            Math.cos(el) * Math.sin(az),
+            Math.sin(el),
+            Math.cos(el) * Math.cos(az),
+        );
+        return this._placeCamera(dir, opts.fill);
+    }
+
+    /**
+     * Frame the model. By default keeps the CURRENT view direction (so "front then
+     * frame" works); pass keepDirection:false for an iso fit. `fill` controls tightness.
+     */
+    frameView(opts = {}) {
+        if (!this._currentModel) return false;
+        let dir;
+        if (opts.keepDirection === false) {
+            dir = new THREE.Vector3(1, 0.6, 1);
+        } else {
+            dir = this._camera.position.clone().sub(this._controls.target);
+            if (dir.lengthSq() < 1e-9) dir = new THREE.Vector3(1, 0.6, 1);
+        }
+        return this._placeCamera(dir, opts.fill);
+    }
+
+    // ==========================================================
+    // "Which way is front?" — there is no universal geometric front for an arbitrary
+    // mesh (it's semantic). The world-axis presets (front=+Z, etc.) are just a
+    // convention and are wrong for mis-oriented models. So instead of guessing, we let
+    // an agent MEASURE: render the model from many angles offscreen and score each by
+    // how much visible detail it shows (edge/contrast energy). The most "interesting"
+    // side — a face's features, a device's control panel — scores highest.
+    // ==========================================================
+
+    /**
+     * Score candidate camera directions by visible detail and return them ranked.
+     * @param {object} [opts]
+     * @param {number[]} [opts.azimuths] - degrees around Y to sample (default every 30°)
+     * @param {number[]} [opts.elevations] - degrees above horizon (default [0, 20])
+     * @param {number} [opts.size] - offscreen render size (default 96)
+     * @param {number} [opts.fill] - framing tightness for scoring (default 0.9)
+     * @returns {{azimuth:number, elevation:number, score:number, coverage:number}[]}
+     */
+    scoreViews(opts = {}) {
+        if (!this._currentModel) return [];
+        const azimuths = opts.azimuths || [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330];
+        const elevations = opts.elevations || [0, 20];
+        const size = opts.size || 96;
+        const fill = opts.fill || 0.9;
+
+        const r = this._renderer, cam = this._camera;
+        // Snapshot ALL state we touch, so a throw mid-loop can't leave the viewer broken.
+        const prevPos = cam.position.clone();
+        const prevTarget = this._controls.target.clone();
+        const prevAspect = cam.aspect;
+        const prevBg = this._scene.background;
+        const prevFog = this._scene.fog;
+        const prevClear = r.getClearColor(new THREE.Color());
+        const prevAlpha = r.getClearAlpha();
+        const prevGrid = this.getGridVisible();
+        const prevAxes = this.getAxisVisible();
+        const prevGround = this._ground ? this._ground.visible : true;
+        const prevClipPlanes = r.clippingPlanes;
+
+        const rt = new THREE.WebGLRenderTarget(size, size);
+        const buf = new Uint8Array(size * size * 4);
+        const results = [];
+
+        // A model's semantic "front" is not captured by any single signal:
+        //  - GEOMETRY detail (normal-material edges) finds a device's bezel/panel but is
+        //    fooled by hair strands (a face's back scores high geometrically).
+        //  - ALBEDO/texture detail (unlit basic-material edges) finds a face's eyes/mouth
+        //    but ignores smooth painted panels.
+        // Both are LIGHTING-INDEPENDENT (no directional light), fixing the earlier bias
+        // where the "best" view just tracked the key light. We render both per candidate
+        // and combine the normalized scores, so faces AND devices are handled.
+        const normalMat = new THREE.MeshNormalMaterial();
+        const savedMats = [];
+        const albedoMats = [];
+        this._currentModel.traverse((child) => {
+            if (!child.isMesh) return;
+            savedMats.push([child, child.material]);
+            const m0 = Array.isArray(child.material) ? child.material[0] : child.material;
+            albedoMats.push([child, new THREE.MeshBasicMaterial({
+                map: m0 && m0.map ? m0.map : null,
+                color: m0 && m0.color ? m0.color.clone() : new THREE.Color(0x999999),
+                side: THREE.DoubleSide,
+            })]);
+        });
+        const raw = [];
+        try {
+            this.setGridVisible(false);
+            this.setAxisVisible(false);
+            if (this._ground) this._ground.visible = false;
+            r.clippingPlanes = [];
+            this._scene.background = null;
+            this._scene.fog = null;
+            r.setClearColor(0x000000, 0);
+            cam.aspect = 1;
+            cam.updateProjectionMatrix();
+
+            const renderScore = () => {
+                r.setRenderTarget(rt);
+                r.render(this._scene, cam);
+                r.readRenderTargetPixels(rt, 0, 0, size, size, buf);
+                r.setRenderTarget(null);
+                return this._detailScore(buf, size);
+            };
+
+            for (const el of elevations) {
+                for (const az of azimuths) {
+                    this.orbitTo(az, el, { fill });
+                    // Geometry pass
+                    for (const [c] of savedMats) c.material = normalMat;
+                    const g = renderScore();
+                    // Albedo pass
+                    for (const [c, m] of albedoMats) c.material = m;
+                    const a = renderScore();
+                    raw.push({ azimuth: az, elevation: el, eg: g.score, ea: a.score, coverage: g.coverage });
+                }
+            }
+
+            // Normalize each channel across candidates, then blend, weighting by coverage
+            // so a tiny sliver can't win on ratio alone.
+            const maxEg = Math.max(1e-6, ...raw.map((x) => x.eg));
+            const maxEa = Math.max(1e-6, ...raw.map((x) => x.ea));
+            for (const x of raw) {
+                const blended = (0.55 * (x.eg / maxEg) + 0.45 * (x.ea / maxEa)) * (0.6 + 0.4 * x.coverage);
+                results.push({ azimuth: x.azimuth, elevation: x.elevation, score: blended, coverage: x.coverage });
+            }
+        } finally {
+            for (const [child, mat] of savedMats) child.material = mat;
+            normalMat.dispose();
+            for (const [, m] of albedoMats) m.dispose();
+            rt.dispose();
+            r.setRenderTarget(null);
+            this._scene.background = prevBg;
+            this._scene.fog = prevFog;
+            r.setClearColor(prevClear, prevAlpha);
+            r.clippingPlanes = prevClipPlanes;
+            this.setGridVisible(prevGrid);
+            this.setAxisVisible(prevAxes);
+            if (this._ground) this._ground.visible = prevGround;
+            cam.position.copy(prevPos);
+            this._controls.target.copy(prevTarget);
+            cam.aspect = prevAspect;
+            cam.updateProjectionMatrix();
+            this._controls.update();
+        }
+
+        const round = (v) => Math.round(v * 10000) / 10000;
+        results.forEach((x) => { x.score = round(x.score); x.coverage = round(x.coverage); });
+        results.sort((a, b) => b.score - a.score);
+        return results;
+    }
+
+    /**
+     * Detail score for a rendered thumbnail: mean Sobel edge energy over covered pixels,
+     * lightly boosted by silhouette coverage. High = lots of visible features (a face's
+     * eyes/nose, a device's panel); low = a smooth blank side (back of a head).
+     */
+    _detailScore(buf, size) {
+        // Luminance + coverage mask.
+        const lum = new Float32Array(size * size);
+        let covered = 0;
+        for (let i = 0; i < size * size; i++) {
+            const a = buf[i * 4 + 3];
+            if (a > 16) {
+                lum[i] = 0.299 * buf[i * 4] + 0.587 * buf[i * 4 + 1] + 0.114 * buf[i * 4 + 2];
+                covered++;
+            } else {
+                lum[i] = -1; // background marker
+            }
+        }
+        if (covered === 0) return { score: 0, coverage: 0 };
+
+        let edgeSum = 0, edgeCount = 0;
+        const at = (x, y) => lum[y * size + x];
+        for (let y = 1; y < size - 1; y++) {
+            for (let x = 1; x < size - 1; x++) {
+                if (at(x, y) < 0) continue; // only covered pixels
+                // Skip if any neighbor is background (silhouette edge would dominate);
+                // we want INTERNAL detail, not just the outline.
+                let bg = false;
+                for (let dy = -1; dy <= 1 && !bg; dy++)
+                    for (let dx = -1; dx <= 1; dx++)
+                        if (at(x + dx, y + dy) < 0) { bg = true; break; }
+                if (bg) continue;
+                const gx = (at(x + 1, y - 1) + 2 * at(x + 1, y) + at(x + 1, y + 1))
+                    - (at(x - 1, y - 1) + 2 * at(x - 1, y) + at(x - 1, y + 1));
+                const gy = (at(x - 1, y + 1) + 2 * at(x, y + 1) + at(x + 1, y + 1))
+                    - (at(x - 1, y - 1) + 2 * at(x, y - 1) + at(x + 1, y - 1));
+                edgeSum += Math.sqrt(gx * gx + gy * gy);
+                edgeCount++;
+            }
+        }
+        const meanEdge = edgeCount > 0 ? edgeSum / edgeCount : 0;
+        const coverage = covered / (size * size);
+        // Mean internal detail, gently scaled by coverage so a tiny sliver doesn't win.
+        return { score: meanEdge * (0.5 + 0.5 * coverage), coverage };
+    }
+
+    /**
+     * Find the best "hero"/front view by scoring, and optionally move the camera to it.
+     * @param {object} [opts] - passthrough to scoreViews + { apply=true, fill }
+     * @returns {{azimuth, elevation, score, coverage, ranked}}
+     */
+    findBestView(opts = {}) {
+        const ranked = this.scoreViews(opts);
+        if (ranked.length === 0) return null;
+        const best = ranked[0];
+        if (opts.apply !== false) {
+            this.orbitTo(best.azimuth, best.elevation, { fill: opts.fill });
+            // Auto-upright by default: correct the camera roll so a mis-oriented
+            // (e.g. lying-down) model appears the right way up. Pass upright:false to skip.
+            if (opts.upright !== false) this.autoUpright({ size: opts.size });
+        }
+        return { ...best, ranked: ranked.slice(0, 6) };
+    }
+
+    /** Set lighting for hero shots. All params optional; only provided ones apply. */
+    setLighting(opts = {}) {
+        if (opts.azimuth !== undefined) this.setKeyLightAzimuth(opts.azimuth);
+        if (opts.elevation !== undefined) this.setKeyLightElevation(opts.elevation);
+        if (opts.key_intensity !== undefined) this.setKeyLightIntensity(opts.key_intensity);
+        if (opts.fill_intensity !== undefined) this.setFillLightIntensity(opts.fill_intensity);
+        if (opts.ambient !== undefined) this.setAmbientIntensity(opts.ambient);
+        if (opts.exposure !== undefined) this.setExposure(opts.exposure);
+        return true;
+    }
+
+    // ==========================================================
+    // Render mode (see the mesh, not just the lit surface) + clipping + fog
+    // ==========================================================
+
+    /**
+     * Switch how the model is drawn:
+     *  - 'shaded'    : original PBR materials (default)
+     *  - 'wireframe' : wireframe overlay on the lit material (shows edges/topology)
+     *  - 'normals'   : per-face normal colors (inspect surface orientation / mesh)
+     *  - 'clay'      : uniform matte material (read pure form, ignore textures)
+     * Original materials are preserved and restored when returning to 'shaded'.
+     */
+    setRenderMode(mode) {
+        if (!this._currentModel) return false;
+        // Canonical modes + friendly aliases:
+        //   textured (= mesh + texture, the lit PBR surface)   [aliases: shaded]
+        //   solid    (= mesh only, uniform matte, no texture)  [aliases: clay]
+        //   wireframe(= edges/topology only)
+        //   normals  (= per-face normal colors; geometry inspection)
+        const alias = {
+            textured: "textured", shaded: "textured",
+            solid: "solid", clay: "solid",
+            wireframe: "wireframe", normals: "normals",
+        };
+        const m = alias[mode];
+        if (!m) return false;
+
+        // Restore original materials first (idempotent).
+        this._currentModel.traverse((child) => {
+            if (child.isMesh && child._mvOriginalMaterial) {
+                if (child.material && child.material !== child._mvOriginalMaterial) {
+                    (Array.isArray(child.material) ? child.material : [child.material])
+                        .forEach((mat) => mat && mat.dispose && mat.dispose());
+                }
+                child.material = child._mvOriginalMaterial;
+                delete child._mvOriginalMaterial;
+            }
+        });
+        this.setWireframe(false);
+
+        if (m === "textured") { this._renderMode = "textured"; return true; }
+        if (m === "wireframe") { this.setWireframe(true); this._renderMode = "wireframe"; return true; }
+
+        // solid / normals: override the material (keep the original for restore).
+        this._currentModel.traverse((child) => {
+            if (!child.isMesh) return;
+            child._mvOriginalMaterial = child.material;
+            if (m === "normals") {
+                child.material = new THREE.MeshNormalMaterial({ flatShading: false });
+            } else { // solid (matte clay)
+                child.material = new THREE.MeshStandardMaterial({
+                    color: 0xcfd2d6, roughness: 0.85, metalness: 0.0,
+                    side: THREE.DoubleSide,
+                });
+            }
+        });
+        this._renderMode = m;
+        return true;
+    }
+
+    getRenderMode() {
+        // Wireframe is also a persistent toggle that survives loads; report it faithfully
+        // so the state snapshot never says "textured" while the mesh renders as wireframe.
+        if ((this._renderMode || "textured") === "textured" && this._wireframeEnabled) {
+            return "wireframe";
+        }
+        return this._renderMode || "textured";
+    }
+
+    /** Recompute a camera-relative clip plane; needed before synchronous offscreen renders
+     *  (capture_views/scoreViews) where the rAF loop that normally refreshes it never runs. */
+    _refreshCameraClip() {
+        if (this._clip && this._clip.axis === "camera") {
+            const plane = this._computeClipPlane();
+            if (plane) this._renderer.clippingPlanes = [plane];
+        }
+    }
+
+    /**
+     * Cutting plane — hide the part of the mesh on one side of a plane, e.g. to see the
+     * front of a model with the far/back geometry cut away, or a cross-section.
+     * @param {object} opts
+     * @param {boolean} opts.enabled
+     * @param {'x'|'y'|'z'|'camera'} [opts.axis='camera'] - plane orientation
+     * @param {number} [opts.position=0.5] - cut location, 0..1 across the model bbox
+     *        (for 'camera', 0=near side .. 1=far side of the bbox along the view)
+     * @param {boolean} [opts.flip=false] - keep the other side
+     */
+    setClip(opts = {}) {
+        const r = this._renderer;
+        if (!opts.enabled) {
+            r.clippingPlanes = [];
+            r.localClippingEnabled = false;
+            this._clip = null;
+            return true;
+        }
+        if (!this._currentModel) return false;
+
+        const axis = opts.axis || "camera";
+        const t = opts.position !== undefined ? Math.max(0, Math.min(1, opts.position)) : 0.5;
+        const flip = !!opts.flip;
+
+        const box = new THREE.Box3().setFromObject(this._currentModel);
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+
+        this._clip = { axis, t, flip };
+        r.localClippingEnabled = true;
+        r.clippingPlanes = [this._computeClipPlane()];
+        // Camera-relative planes must follow the camera; the render loop refreshes them.
+        return true;
+    }
+
+    /** Build the current clipping plane (called on set and, for 'camera', each frame). */
+    _computeClipPlane() {
+        if (!this._clip || !this._currentModel) return null;
+        const { axis, t, flip } = this._clip;
+        const box = new THREE.Box3().setFromObject(this._currentModel);
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        const sign = flip ? -1 : 1;
+
+        let normal, point;
+        if (axis === "camera") {
+            // Normal points from the model toward the camera; keep the near side.
+            normal = this._camera.position.clone().sub(center).normalize().multiplyScalar(sign);
+            const radius = size.length() / 2;
+            // t=0 → near side (keep almost everything), t=1 → far side (keep a thin slice).
+            point = center.clone().add(normal.clone().multiplyScalar(radius * (1 - 2 * t)));
+        } else {
+            const axisVec = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] }[axis] || [0, 0, 1];
+            normal = new THREE.Vector3(axisVec[0], axisVec[1], axisVec[2]).multiplyScalar(sign);
+            const half = axis === "x" ? size.x / 2 : axis === "y" ? size.y / 2 : size.z / 2;
+            const cc = axis === "x" ? center.x : axis === "y" ? center.y : center.z;
+            const coord = cc - half + t * (half * 2);
+            point = center.clone();
+            if (axis === "x") point.x = coord; else if (axis === "y") point.y = coord; else point.z = coord;
+        }
+        const plane = new THREE.Plane();
+        plane.setFromNormalAndCoplanarPoint(normal, point);
+        return plane;
+    }
+
+    /** Enable/disable/adjust exponential scene fog. */
+    setFog(opts = {}) {
+        if (opts.enabled === false) {
+            this._scene.fog = null;
+            return true;
+        }
+        if (!this._scene.fog) {
+            this._scene.fog = new THREE.FogExp2(
+                new THREE.Color(this._background), 0.008
+            );
+        }
+        if (opts.density !== undefined) this._scene.fog.density = opts.density;
+        this._scene.fog.color.copy(new THREE.Color(this._background));
+        return true;
+    }
+
+    /**
+     * World-space bounding box of the current model: {min, max, center, size} as
+     * [x,y,z] arrays, or null if nothing is loaded. Agents need this to compute
+     * framing/orbit radii without clipping.
+     */
+    getBounds() {
+        if (!this._currentModel) return null;
+        const box = new THREE.Box3().setFromObject(this._currentModel);
+        if (box.isEmpty()) return null;
+        const r = (v) => Math.round(v * 1000) / 1000;
+        const min = box.min, max = box.max;
+        const c = box.getCenter(new THREE.Vector3());
+        const s = box.getSize(new THREE.Vector3());
+        return {
+            min: [r(min.x), r(min.y), r(min.z)],
+            max: [r(max.x), r(max.y), r(max.z)],
+            center: [r(c.x), r(c.y), r(c.z)],
+            size: [r(s.x), r(s.y), r(s.z)],
+        };
+    }
+
+    /**
+     * JSON-serializable snapshot of the viewer. This is the primary observation
+     * surface for AI agents: model stats, camera pose, display toggles, animation.
+     */
+    getState() {
+        const round = (v) => Math.round(v * 1000) / 1000;
+        const pos = this._camera.position;
+        const tgt = this._controls.target;
+        return {
+            model: {
+                loaded: !!this._currentModel,
+                name: this._lastModelName,
+                vertices: this._lastStats.vertices || 0,
+                faces: this._lastStats.faces || 0,
+                dimensions: {
+                    width: round(this._lastStats.width || 0),
+                    height: round(this._lastStats.height || 0),
+                    depth: round(this._lastStats.depth || 0),
+                },
+                bounds: this.getBounds(),
+                scale: this._modelScale,
+                modified: !!this._modelModified,
+            },
+            camera: {
+                mode: this._navMode,
+                position: [round(pos.x), round(pos.y), round(pos.z)],
+                target: [round(tgt.x), round(tgt.y), round(tgt.z)],
+                fov: this._camera.fov,
+                presets: ["front", "back", "left", "right", "top", "bottom", "iso"],
+            },
+            display: {
+                wireframe: !!this._wireframeEnabled,
+                grid: this.getGridVisible(),
+                axes: this.getAxisVisible(),
+                normals: !!this._normalsVisible,
+                background: this._background,
+                renderMode: this.getRenderMode(),
+                clip: this._clip ? { axis: this._clip.axis, position: this._clip.t, flip: this._clip.flip } : null,
+                fog: !!this._scene.fog,
+            },
+            animation: {
+                hasAnimations: this.hasAnimations(),
+                clips: (this._animationClips || []).map((c, i) => c.name || `Clip ${i + 1}`),
+                playing: !!this._animationPlaying,
+                time: round(this.getAnimationTime()),
+                duration: round(this.getAnimationDuration()),
+            },
+        };
+    }
+
+    /**
+     * Detailed per-mesh + per-material breakdown of the loaded model.
+     * Lets an agent reason about the object it is looking at.
+     */
+    getSceneInfo() {
+        const meshes = [];
+        const materials = [];
+        if (this._currentModel) {
+            this._currentModel.traverse((child) => {
+                if (child.isMesh && child.geometry) {
+                    const pos = child.geometry.getAttribute("position");
+                    const vertices = pos ? pos.count : 0;
+                    const index = child.geometry.getIndex();
+                    const faces = index ? index.count / 3 : vertices / 3;
+                    const matNames = (Array.isArray(child.material)
+                        ? child.material : [child.material])
+                        .filter(Boolean).map((m) => m.name || "(unnamed)");
+                    meshes.push({
+                        name: child.name || "(unnamed)",
+                        vertices,
+                        faces: Math.floor(faces),
+                        materials: matNames,
+                    });
+                }
+            });
+        }
+        try {
+            for (const m of this.getMaterialsInfo()) {
+                materials.push({
+                    name: m.name, type: m.type,
+                    color: m.color, roughness: m.roughness, metalness: m.metalness,
+                });
+            }
+        } catch { /* getMaterialsInfo may vary; meshes are the primary signal */ }
+        return { meshes, materials };
+    }
+
     _initPostProcessing() {
         this._composer = new EffectComposer(this._renderer);
 
@@ -1101,7 +1889,7 @@ export class Viewer3D {
 
             if (mtlFile) {
                 // Load with material
-                const mtlUrl = `/api/asset/related?path=${encodeURIComponent(mtlFile)}`;
+                const mtlUrl = this._resolveResource(mtlFile);
 
                 // We need to determine the base path for the MTL loader
                 // to resolve texture paths relative to the MTL file
@@ -1187,7 +1975,7 @@ export class Viewer3D {
                     textureMap
                 );
                 if (resolvedPath) {
-                    return `/api/asset/related?path=${encodeURIComponent(resolvedPath)}`;
+                    return this._resolveResource(resolvedPath);
                 }
                 return resourceUrl;
             });
@@ -1710,7 +2498,7 @@ export class Viewer3D {
         }
 
         const promise = new Promise((resolve) => {
-            const url = `/api/asset/related?path=${encodeURIComponent(absPath)}`;
+            const url = this._resolveResource(absPath);
             const lower = absPath.toLowerCase();
             const onLoad = (tex) => {
                 if (!tex) return resolve(null);
@@ -1926,7 +2714,7 @@ export class Viewer3D {
                     const texPath = trimmed.substring(keyword.length + 1).trim();
                     // Build full path
                     const fullPath = mtlDir + texPath;
-                    const apiUrl = `/api/asset/related?path=${encodeURIComponent(fullPath)}`;
+                    const apiUrl = this._resolveResource(fullPath);
                     return `${keyword} ${apiUrl}`;
                 }
             }
@@ -2189,8 +2977,8 @@ export class Viewer3D {
         // Position the key light using azimuth/elevation
         this._updateKeyLightPosition();
 
-        // Update fog density based on model size
-        this._scene.fog.density = 0.5 / maxDim;
+        // Update fog density based on model size (fog may be disabled via setFog)
+        if (this._scene.fog) this._scene.fog.density = 0.5 / maxDim;
 
         // Update camera near/far
         this._camera.near = distance * 0.001;
@@ -2276,6 +3064,11 @@ export class Viewer3D {
         if (this._currentModel) {
             this._currentModel.scale.setScalar(scale);
         }
+        this._modelScale = scale;
+    }
+
+    getModelScale() {
+        return this._modelScale;
     }
 
     /**
@@ -2357,8 +3150,9 @@ export class Viewer3D {
     setBackground(hex) {
         const color = new THREE.Color(hex);
         this._scene.background = color;
-        this._scene.fog.color.copy(color);
+        if (this._scene.fog) this._scene.fog.color.copy(color);  // fog may be disabled
         this._currentBgHex = hex;
+        this._background = hex;
 
         // Adapt grid colors based on background luminance
         this._updateGridColors();
@@ -2588,32 +3382,34 @@ export class Viewer3D {
 
         this._currentModel.traverse((child) => {
             if (child.isMesh && child.geometry) {
-                const geo = child.geometry;
+                const orig = child.geometry;
+                try {
+                    // Work on a CLONE, and only swap it in on success. Cloning also
+                    // de-interleaves interleaved attributes (common in GLB), which
+                    // mergeVertices cannot process — this both fixes the crash on such
+                    // models and keeps the op atomic (a failure leaves the mesh intact
+                    // instead of stripping its normals and rendering it black).
+                    const geo = this._mergeableClone(orig);
 
-                // 1. Remove per-face normals AND tangents. Both are per-face-derived
-                //    attributes that differ across faceted duplicate vertices; if
-                //    either remains, mergeVertices refuses to merge those vertices and
-                //    smoothing fails. Tangents are recomputed by loaders when needed
-                //    and are invalidated by new normals anyway, so dropping them is
-                //    correct. We deliberately KEEP the UVs.
-                geo.deleteAttribute("normal");
-                if (geo.hasAttribute("tangent")) geo.deleteAttribute("tangent");
+                    // Remove per-face normals AND tangents. Both are per-face-derived
+                    // attributes that differ across faceted duplicate vertices; if
+                    // either remains, mergeVertices refuses to merge and smoothing
+                    // fails. Tangents are recomputed/invalidated anyway. KEEP the UVs so
+                    // the texture mapping survives (merge splits only at genuine seams).
+                    geo.deleteAttribute("normal");
+                    if (geo.hasAttribute("tangent")) geo.deleteAttribute("tangent");
 
-                // 2. Merge vertices that share position AND UV. This preserves the
-                //    texture mapping: a genuine UV seam legitimately keeps two
-                //    vertices, so smoothing stops at seams (correct) while all
-                //    non-seam edges are smoothed. Meshes without UVs merge purely
-                //    by position, so untextured models behave exactly as before.
-                const merged = BufferGeometryUtils.mergeVertices(geo, 0.0001);
+                    const merged = BufferGeometryUtils.mergeVertices(geo, 0.0001);
+                    merged.computeVertexNormals();
+                    merged.computeBoundingBox();
+                    merged.computeBoundingSphere();
 
-                // 3. Compute smooth normals on the merged geometry
-                merged.computeVertexNormals();
-                merged.computeBoundingBox();
-                merged.computeBoundingSphere();
-
-                // 4. Swap in the new geometry and release the old GPU buffers.
-                child.geometry = merged;
-                geo.dispose();
+                    child.geometry = merged;
+                    orig.dispose();
+                    if (geo !== merged) geo.dispose();
+                } catch (err) {
+                    console.warn("recomputeNormals: skipped a mesh (left unchanged):", err);
+                }
             }
         });
 
@@ -2621,6 +3417,28 @@ export class Viewer3D {
 
         // Re-enable normals display if it was on
         if (hadNormals) this.setNormalsVisible(true);
+
+        // Keep the state snapshot honest (vertex/face counts may have changed).
+        const stats = this._computeStats(this._currentModel);
+        this._lastStats = stats;
+        this._onInfoUpdate(stats);
+    }
+
+    /**
+     * Return a geometry safe to feed to mergeVertices/SimplifyModifier: a clone with
+     * plain (non-interleaved) attributes. BufferGeometry.clone() de-interleaves
+     * InterleavedBufferAttributes, so this both avoids the interleaved-buffer crash and
+     * protects the original from partial mutation.
+     */
+    _mergeableClone(geometry) {
+        const clone = geometry.clone();
+        // Belt-and-suspenders: if any attribute is still interleaved, de-interleave.
+        for (const key in clone.attributes) {
+            if (clone.attributes[key].isInterleavedBufferAttribute) {
+                return deinterleaveGeometry(clone);
+            }
+        }
+        return clone;
     }
 
     rotateModel(axis, angleDeg) {
@@ -2895,16 +3713,24 @@ export class Viewer3D {
             }
 
             const child = meshes[i];
-            let geo = child.geometry;
-
-            // Merge vertices before decimation. Drop per-face normals AND tangents so
-            // faceted duplicate vertices collapse (either attribute would otherwise
-            // block the merge); keep UVs so the merge splits only at genuine UV seams.
-            // SimplifyModifier (r170) carries the `uv` attribute through decimation,
-            // so preserving it here keeps textured meshes textured.
-            geo.deleteAttribute("normal");
-            if (geo.hasAttribute("tangent")) geo.deleteAttribute("tangent");
-            geo = BufferGeometryUtils.mergeVertices(geo, 0.0001);
+            const origGeo = child.geometry;
+            let geo;
+            try {
+                // Clone (de-interleaves GLB interleaved buffers) so mergeVertices works
+                // and the original stays intact if anything fails. Drop per-face normals
+                // AND tangents so faceted duplicates collapse; keep UVs (SimplifyModifier
+                // r170 carries `uv` through decimation, so textures survive).
+                geo = this._mergeableClone(origGeo);
+                geo.deleteAttribute("normal");
+                if (geo.hasAttribute("tangent")) geo.deleteAttribute("tangent");
+                geo = BufferGeometryUtils.mergeVertices(geo, 0.0001);
+            } catch (err) {
+                console.warn(`Simplify: skipped mesh ${child.name} (unchanged):`, err);
+                totalBefore += origGeo.attributes.position ? origGeo.attributes.position.count : 0;
+                totalAfter += origGeo.attributes.position ? origGeo.attributes.position.count : 0;
+                await new Promise((r) => setTimeout(r, 0));
+                continue;
+            }
 
             const vertCount = geo.attributes.position.count;
             totalBefore += vertCount;
@@ -3065,14 +3891,105 @@ export class Viewer3D {
     /**
      * Capture the current 3D view as a PNG and trigger download.
      */
-    screenshot() {
-        // Render one frame with preserveDrawingBuffer
-        this._renderer.render(this._scene, this._camera);
-        const dataUrl = this._renderer.domElement.toDataURL("image/png");
+    /**
+     * Render one frame and return the view as a PNG data URL (no download).
+     * This is the capture primitive used by the control API / AI agents to "see".
+     *
+     * For a hero-quality shot it renders THROUGH the postprocessing composer (SSAO +
+     * tone mapping), so the capture matches the on-screen image instead of a flatter
+     * direct render. Options let a caller pick an explicit output resolution (decoupled
+     * from the on-screen canvas) and a transparent background for compositing.
+     *
+     * @param {object} [opts]
+     * @param {number} [opts.width]  - output width in px (defaults to canvas width)
+     * @param {number} [opts.height] - output height in px (defaults to canvas height)
+     * @param {boolean} [opts.transparent=false] - transparent background (disables SSAO)
+     * @param {boolean} [opts.ssao=true] - render through the SSAO composer for depth
+     */
+    captureImage(opts = {}) {
+        const r = this._renderer;
+        const cam = this._camera;
+
+        // --- snapshot everything we may touch, restore it all afterwards ---
+        const prevSize = new THREE.Vector2();
+        r.getSize(prevSize);
+        const prevPixelRatio = r.getPixelRatio();
+        const prevComposerPR = this._composer ? this._composer._pixelRatio : 1;
+        const prevAspect = cam.aspect;
+        const prevBg = this._scene.background;
+        const prevFog = this._scene.fog;
+        const prevClear = r.getClearColor(new THREE.Color());
+        const prevClearAlpha = r.getClearAlpha();
+        const prevGroundVisible = this._ground ? this._ground.visible : true;
+        const prevSsao = this._ssaoPass
+            ? { w: this._ssaoPass.width, h: this._ssaoPass.height } : null;
+
+        // Derive a missing dimension from the current aspect so width-only / height-only
+        // still work instead of being silently ignored.
+        let width = opts.width, height = opts.height;
+        if (width && !height) height = Math.round(width / prevAspect);
+        if (height && !width) width = Math.round(height * prevAspect);
+        const resize = !!(width && height);
+
+        const transparent = !!opts.transparent;
+        // Fog blends the model toward the background and washes out hero shots (badly on
+        // light backgrounds). Suppress it unless the caller explicitly wants it.
+        const suppressFog = opts.fog === false || transparent;
+        const hideGround = !!opts.hideGround || transparent;
+        // Transparent captures bypass the composer (SSAO/OutputPass don't preserve alpha);
+        // opaque captures use the composer so they match on-screen quality.
+        const useComposer = (opts.ssao !== false) && this._composer && !transparent;
+
+        if (resize) {
+            r.setPixelRatio(1);
+            if (this._composer && this._composer.setPixelRatio) this._composer.setPixelRatio(1);
+            r.setSize(width, height, false);
+            if (this._composer) this._composer.setSize(width, height);
+            if (this._ssaoPass) this._ssaoPass.setSize(width, height);
+            cam.aspect = width / height;
+            cam.updateProjectionMatrix();
+        }
+        if (suppressFog) this._scene.fog = null;
+        if (hideGround && this._ground) this._ground.visible = false;
+        if (transparent) {
+            this._scene.background = null;
+            r.setClearColor(0x000000, 0);
+        }
+
+        // A camera-relative clip plane is normally refreshed by the rAF loop, which does
+        // not run during a synchronous capture — refresh it here so the cut matches THIS
+        // camera (fixes stale clips in capture_views/turntable).
+        this._refreshCameraClip();
+
+        if (useComposer) this._composer.render();
+        else r.render(this._scene, cam);
+
+        const dataUrl = r.domElement.toDataURL("image/png");
+
+        // --- restore ---
+        this._scene.background = prevBg;
+        this._scene.fog = prevFog;
+        r.setClearColor(prevClear, prevClearAlpha);
+        if (this._ground) this._ground.visible = prevGroundVisible;
+        if (resize) {
+            r.setPixelRatio(prevPixelRatio);
+            if (this._composer && this._composer.setPixelRatio) this._composer.setPixelRatio(prevComposerPR);
+            r.setSize(prevSize.x, prevSize.y, false);
+            if (this._composer) this._composer.setSize(prevSize.x, prevSize.y);
+            if (this._ssaoPass && prevSsao) this._ssaoPass.setSize(prevSsao.w, prevSsao.h);
+            cam.aspect = prevAspect;
+            cam.updateProjectionMatrix();
+        }
+        return dataUrl;
+    }
+
+    screenshot(opts = {}) {
+        const dataUrl = this.captureImage(opts);
         const link = document.createElement("a");
         link.download = "meshvault_screenshot.png";
         link.href = dataUrl;
         link.click();
+        return dataUrl;
     }
 
     exportAsOBJ() {
@@ -3292,6 +4209,12 @@ export class Viewer3D {
             // Update animation mixers (FBX)
             for (const mixer of this._mixers) {
                 mixer.update(delta);
+            }
+
+            // A camera-relative cutting plane must track the moving camera each frame.
+            if (this._clip && this._clip.axis === "camera") {
+                const plane = this._computeClipPlane();
+                if (plane) this._renderer.clippingPlanes = [plane];
             }
 
             // Render with postprocessing

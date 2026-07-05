@@ -64,6 +64,42 @@ Modified → `/api/export_modified` (OBJ). Original → `/api/export`. Auto-refr
 
 ---
 
+## Viewer core: standalone + control API
+
+The rendering engine (`viewer_3d.js`) is **backend-agnostic**: its only coupling to a server
+is an injected `resolveResource(ref) => url` callback (the full app points it at
+`/api/asset/related`; a standalone embed returns the ref as-is). This lets the same engine
+ship two ways, both built by esbuild (`scripts/build.mjs`):
+
+```
+frontend/dist/app.bundle.js        → full MeshVault app (backend-connected)
+frontend/dist/meshvault-viewer.js  → standalone, server-less, embeddable viewer
+```
+
+### `viewer/control_api.js` — `ViewerControlAPI`
+A single, self-describing command surface designed to be driven by AI agents or embedders:
+
+- `execute({action, params})` → `{ok, result|error}` — one JSON entry point; never throws.
+- `listCommands()` — every action with its parameter schema (discoverable with no prior knowledge).
+- `getState()` / `getSceneInfo()` — JSON snapshots (model, camera+fov+presets, display, animation; per-mesh/material).
+- `on(event, cb)` — `loaded`, `error`, `animations`, `measurement`, `executed`.
+- Commands: `load`/`unload`, `get_camera`/`set_camera`/`set_view`/`orbit`/`frame`/`reset_camera`/`set_nav_mode`,
+  `set_render_mode` (textured/solid/wireframe/normals)/`set_wireframe`/`set_grid`/`set_axes`/`set_normals`/`set_clip`/`set_fog`/`set_background`/`set_scale`/`set_lighting`,
+  `center`/`ground`/`auto_orient`/`rotate`/`simplify`/`recompute_normals`/`reset`,
+  `play_animation`/`pause_animation`/`set_animation_time`/`set_animation_speed`,
+  `measure`/`set_measure_mode`, `export_obj`/`export_glb`,
+  `screenshot`/`capture_views`/`turntable` (hero shots: resolution, transparency, fog/ground/SSAO control),
+  `get_state`/`get_scene_info`/`get_bounds`.
+  Model-dependent commands return `{ok:false}` when no model is loaded; unknown params are rejected.
+
+### `viewer/standalone.js` — `createViewer(container, options)`
+Instantiates the engine + control API with a client-only resolver and exposes
+`window.MeshVaultViewer.createViewer`. Includes `loadFile(File)` for local drag-drop/file-input
+(object URL, no server) and a `destroy()` that fully releases the WebGL context.
+Demo/harness: `frontend/viewer.html`.
+
+---
+
 ## Rendering Pipeline
 
 ```

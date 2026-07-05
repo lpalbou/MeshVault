@@ -1,734 +1,3 @@
-// frontend/js/file_browser.js
-var ICONS = {
-  folder: `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none">
-        <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
-    </svg>`,
-  obj: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-        <path d="M2 17l10 5 10-5"/>
-        <path d="M2 12l10 5 10-5"/>
-    </svg>`,
-  fbx: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <rect x="3" y="3" width="18" height="18" rx="2"/>
-        <path d="M12 8v8"/>
-        <path d="M8 12h8"/>
-    </svg>`,
-  gltf: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <circle cx="12" cy="12" r="9"/>
-        <path d="M12 3v18"/>
-        <path d="M3 12h18"/>
-        <path d="M12 3c4 3.5 4 14.5 0 18"/>
-        <path d="M12 3c-4 3.5-4 14.5 0 18"/>
-    </svg>`,
-  glb: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <circle cx="12" cy="12" r="9"/>
-        <path d="M12 3v18"/>
-        <path d="M3 12h18"/>
-        <path d="M12 3c4 3.5 4 14.5 0 18"/>
-        <path d="M12 3c-4 3.5-4 14.5 0 18"/>
-    </svg>`,
-  stl: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5"/>
-        <line x1="12" y1="22" x2="12" y2="15.5"/>
-        <line x1="22" y1="8.5" x2="12" y2="15.5"/>
-        <line x1="2" y1="8.5" x2="12" y2="15.5"/>
-    </svg>`,
-  max: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <rect x="3" y="3" width="18" height="18" rx="2"/>
-        <path d="M7 8l5 4-5 4"/><line x1="14" y1="16" x2="18" y2="16"/>
-    </svg>`,
-  ply: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5"/>
-        <circle cx="12" cy="12" r="2" fill="currentColor"/>
-    </svg>`,
-  dae: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
-    </svg>`,
-  "3mf": `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M12 2L2 7v10l10 5 10-5V7L12 2z"/><path d="M12 12L2 7"/><path d="M12 12l10-5"/><path d="M12 12v10"/>
-    </svg>`,
-  usdz: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <circle cx="12" cy="12" r="9"/><path d="M8 12a4 4 0 018 0"/><path d="M12 3v3"/>
-    </svg>`,
-  unity: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M12 2L2 7v10l10 5 10-5V7L12 2z"/>
-        <path d="M12 12L2 7"/><path d="M12 12l10-5"/>
-        <path d="M12 12v10"/>
-    </svg>`,
-  archive: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <rect x="2" y="4" width="20" height="16" rx="2"/>
-        <path d="M12 4v16"/>
-        <rect x="10" y="9" width="4" height="4" rx="1"/>
-    </svg>`
-};
-var FileBrowser = class {
-  /**
-   * @param {HTMLElement} container - The file list container element
-   * @param {HTMLElement} pathDisplay - Element showing current path
-   * @param {Function} onAssetSelect - Callback when an asset is selected
-   * @param {Function} onStatusUpdate - Callback to update status text
-   * @param {Function} [onExportRequest] - Callback when user requests export from context menu
-   */
-  constructor(container, pathDisplay, onAssetSelect, onStatusUpdate, onExportRequest = null, thumbnailer = null) {
-    this._container = container;
-    this._pathDisplay = pathDisplay;
-    this._onAssetSelect = onAssetSelect;
-    this._onStatusUpdate = onStatusUpdate;
-    this._onExportRequest = onExportRequest;
-    this._thumbnailer = thumbnailer;
-    this._thumbObserver = null;
-    this._currentPath = null;
-    this._parentPath = null;
-    this._selectedElement = null;
-    this._currentFolders = [];
-    this._currentAssets = [];
-    this._viewMode = localStorage.getItem("meshvault_viewMode") || "list";
-    this._sortMode = localStorage.getItem("meshvault_sortMode") || "name";
-    this._filterText = "";
-    this._container.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-    });
-    this._archiveTooltipEl = null;
-    this._archiveTooltipTimer = null;
-    this._archiveTooltipAnchor = null;
-    this._container.addEventListener("scroll", () => this._hideArchiveTooltip(), { passive: true });
-  }
-  /** Get the current browsing path */
-  get currentPath() {
-    return this._currentPath;
-  }
-  /**
-   * Browse to a specific directory.
-   * Fetches the directory contents from the API and renders them.
-   */
-  async browse(path) {
-    try {
-      this._onStatusUpdate("Loading...");
-      const url = path ? `/api/browse?path=${encodeURIComponent(path)}` : "/api/browse";
-      const response = await fetch(url);
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || "Failed to browse directory");
-      }
-      const data = await response.json();
-      this._currentPath = data.current_path;
-      this._parentPath = data.parent_path;
-      localStorage.setItem("meshvault_lastDir", this._currentPath);
-      this._currentFolders = data.folders;
-      this._currentAssets = data.assets;
-      this._filterText = "";
-      if (this._filterInput) this._filterInput.value = "";
-      this._pathDisplay.textContent = this._currentPath;
-      this._pathDisplay.title = this._currentPath;
-      this._renderFiltered();
-      const assetCount = data.assets.length;
-      const folderCount = data.folders.length;
-      this._onStatusUpdate(
-        `${folderCount} folder${folderCount !== 1 ? "s" : ""}, ${assetCount} asset${assetCount !== 1 ? "s" : ""}`
-      );
-    } catch (err2) {
-      console.error("Browse error:", err2);
-      this._onStatusUpdate(`Error: ${err2.message}`);
-      this._container.innerHTML = `
-                <div class="empty-state">
-                    <p>Could not load directory</p>
-                    <p style="font-size: 11px; margin-top: 8px;">${err2.message}</p>
-                </div>
-            `;
-    }
-  }
-  /** Navigate to the parent directory */
-  goUp() {
-    if (this._parentPath) {
-      this.browse(this._parentPath);
-    }
-  }
-  /** Navigate to the home directory */
-  async goHome() {
-    try {
-      const response = await fetch("/api/default_path");
-      const data = await response.json();
-      this.browse(data.path);
-    } catch {
-      this.browse(null);
-    }
-  }
-  /** Navigate to the last visited directory, or home if none saved. */
-  async goLastOrHome() {
-    const lastDir = localStorage.getItem("meshvault_lastDir");
-    if (lastDir) {
-      try {
-        await this.browse(lastDir);
-        return;
-      } catch {
-      }
-    }
-    await this.goHome();
-  }
-  /** Set the sort mode and re-render. */
-  setSortMode(mode) {
-    this._sortMode = mode;
-    localStorage.setItem("meshvault_sortMode", mode);
-    this._renderFiltered();
-  }
-  /** Get the current sort mode. */
-  getSortMode() {
-    return this._sortMode;
-  }
-  /**
-   * Sort arrays of folders and assets based on the current sort mode.
-   */
-  _applySorting(folders, assets) {
-    const mode = this._sortMode;
-    const nameDir = mode === "name-desc" ? -1 : 1;
-    folders.sort((a, b) => nameDir * a.name.localeCompare(b.name, void 0, { sensitivity: "base" }));
-    switch (mode) {
-      case "name":
-        assets.sort((a, b) => a.name.localeCompare(b.name, void 0, { sensitivity: "base" }));
-        break;
-      case "name-desc":
-        assets.sort((a, b) => b.name.localeCompare(a.name, void 0, { sensitivity: "base" }));
-        break;
-      case "size":
-        assets.sort((a, b) => a.size - b.size);
-        break;
-      case "size-desc":
-        assets.sort((a, b) => b.size - a.size);
-        break;
-      case "type":
-        assets.sort((a, b) => a.extension.localeCompare(b.extension) || a.name.localeCompare(b.name));
-        break;
-      default:
-        break;
-    }
-    return { folders, assets };
-  }
-  /**
-   * Set a reference to the filter input element (called by App after DOM init).
-   */
-  setFilterInput(input) {
-    this._filterInput = input;
-    input.addEventListener("input", () => {
-      this._filterText = input.value.trim().toLowerCase();
-      this._renderFiltered();
-    });
-  }
-  /** Set the view mode ('list' or 'grid'). */
-  setViewMode(mode) {
-    this._viewMode = mode;
-    localStorage.setItem("meshvault_viewMode", mode);
-    this._renderFiltered();
-  }
-  /** Get the current view mode. */
-  getViewMode() {
-    return this._viewMode;
-  }
-  /**
-   * Re-render with current filter applied.
-   */
-  _renderFiltered() {
-    const filter = this._filterText;
-    let folders = [...this._currentFolders];
-    let assets = [...this._currentAssets];
-    if (filter) {
-      folders = folders.filter(
-        (f) => f.name.toLowerCase().includes(filter)
-      );
-      assets = assets.filter((a) => {
-        const n = (a.name || "").toLowerCase();
-        if (n.includes(filter)) return true;
-        if (a.is_in_archive) {
-          const arch = this._basename(a.archive_path || "").toLowerCase();
-          const inner = (a.inner_path || "").toLowerCase();
-          if (arch && arch.includes(filter)) return true;
-          if (inner && inner.includes(filter)) return true;
-        }
-        return false;
-      });
-    }
-    const sorted = this._applySorting(folders, assets);
-    this._render(sorted.folders, sorted.assets);
-  }
-  /**
-   * Render the file list from folders and assets data.
-   */
-  _render(folders, assets) {
-    for (const img of this._container.querySelectorAll(".asset-card-thumb")) {
-      if (img._mvObjectUrl) {
-        URL.revokeObjectURL(img._mvObjectUrl);
-        img._mvObjectUrl = null;
-      }
-    }
-    this._container.innerHTML = "";
-    this._selectedElement = null;
-    this._resetThumbObserver();
-    const isGrid = this._viewMode === "grid";
-    this._container.classList.toggle("grid-view", isGrid);
-    if (folders.length > 0) {
-      const label = document.createElement("div");
-      label.className = "section-label";
-      label.textContent = "Folders";
-      this._container.appendChild(label);
-      for (const folder of folders) {
-        this._container.appendChild(this._createFolderItem(folder));
-      }
-    }
-    if (assets.length > 0) {
-      const label = document.createElement("div");
-      label.className = "section-label";
-      label.textContent = "3D Assets";
-      this._container.appendChild(label);
-      if (isGrid) {
-        const grid = document.createElement("div");
-        grid.className = "asset-grid";
-        for (const asset of assets) {
-          grid.appendChild(this._createAssetCard(asset));
-        }
-        this._container.appendChild(grid);
-      } else {
-        for (const asset of assets) {
-          this._container.appendChild(this._createAssetItem(asset));
-        }
-      }
-    }
-    if (folders.length === 0 && assets.length === 0) {
-      const msg = this._filterText ? "No results matching filter" : "No folders or 3D assets found";
-      this._container.innerHTML = `
-                <div class="empty-state">${msg}</div>
-            `;
-    }
-  }
-  /**
-   * Create a folder list item element.
-   */
-  _createFolderItem(folder) {
-    const item = document.createElement("div");
-    item.className = "file-item";
-    item.dataset.path = folder.path;
-    item.dataset.type = "folder";
-    item.innerHTML = `
-            <div class="file-item-icon folder">${ICONS.folder}</div>
-            <div class="file-item-info">
-                <div class="file-item-name">${this._escapeHtml(folder.name)}</div>
-            </div>
-        `;
-    item.addEventListener("dblclick", () => {
-      this.browse(folder.path);
-    });
-    item.addEventListener("click", () => {
-      this._setSelected(item);
-    });
-    item.addEventListener("contextmenu", (e) => {
-      this._showContextMenu(e, folder.path, folder.name);
-    });
-    return item;
-  }
-  /**
-   * Create an asset list item element.
-   */
-  _createAssetItem(asset) {
-    const item = document.createElement("div");
-    item.className = "file-item";
-    item.dataset.type = "asset";
-    const ext = asset.extension.replace(".", "").toLowerCase();
-    const iconClass = `asset-${ext}`;
-    const icon = ICONS[ext] || ICONS.obj;
-    const sizeTxt = this._formatSize(asset.size);
-    let metaParts = [sizeTxt, asset.extension];
-    if (asset.is_in_archive) {
-      const arch = this._basename(asset.archive_path || "");
-      metaParts.push(arch ? `\u{1F4E6} ${arch}` : "\u{1F4E6} archive");
-    }
-    if (asset.related_files && asset.related_files.length > 0) {
-      metaParts.push(`+${asset.related_files.length} files`);
-    }
-    const badgeClass = asset.is_in_archive ? "badge-archive" : `badge-${ext}`;
-    const badgeText = asset.is_in_archive ? `${ext} \u{1F4E6}` : ext;
-    item.innerHTML = `
-            <div class="file-item-icon ${asset.is_in_archive ? "archive" : iconClass}">${asset.is_in_archive ? ICONS.archive : icon}</div>
-            <div class="file-item-info">
-                <div class="file-item-name">${this._escapeHtml(asset.name)}</div>
-                <div class="file-item-meta">${metaParts.join(" \xB7 ")}</div>
-            </div>
-            <span class="file-item-badge ${badgeClass}">${badgeText}</span>
-        `;
-    item.addEventListener("click", () => {
-      this._setSelected(item);
-      this._onAssetSelect(asset);
-    });
-    if (asset.is_in_archive) {
-      this._attachArchiveTooltip(item, asset);
-    }
-    const revealPath = asset.is_in_archive ? asset.archive_path : asset.path;
-    const revealName = asset.is_in_archive ? asset.archive_path.split("/").pop() : asset.path.split("/").pop();
-    item.addEventListener("contextmenu", (e) => {
-      this._showContextMenu(e, revealPath, revealName, { kind: "asset", asset });
-    });
-    return item;
-  }
-  /**
-   * Create an asset card element (for grid view).
-   */
-  _createAssetCard(asset) {
-    const card = document.createElement("div");
-    card.className = "asset-card";
-    card.dataset.type = "asset";
-    const ext = asset.extension.replace(".", "").toLowerCase();
-    const icon = ICONS[ext] || ICONS.obj;
-    const badgeClass = asset.is_in_archive ? "badge-archive" : `badge-${ext}`;
-    const badgeText = asset.is_in_archive ? `${ext} \u{1F4E6}` : ext;
-    card.innerHTML = `
-            <div class="asset-card-icon asset-${ext}">
-                ${icon}
-                <img class="asset-card-thumb" alt="" />
-            </div>
-            <div class="asset-card-name">${this._escapeHtml(asset.name)}</div>
-            <span class="file-item-badge ${badgeClass}">${badgeText}</span>
-        `;
-    if (this._thumbnailer && this._thumbObserver) {
-      const img = card.querySelector(".asset-card-thumb");
-      card._thumbAsset = asset;
-      card._thumbImg = img;
-      this._thumbObserver.observe(card);
-    }
-    if (asset.is_in_archive) {
-      const arch = this._basename(asset.archive_path || "");
-      const inner = asset.inner_path || "";
-      card.title = arch ? `Archive: ${arch}
-${inner}` : `Archive
-${inner}`;
-    }
-    card.addEventListener("click", () => {
-      this._setSelected(card);
-      this._onAssetSelect(asset);
-    });
-    if (asset.is_in_archive) {
-      this._attachArchiveTooltip(card, asset);
-    }
-    const cardRevealPath = asset.is_in_archive ? asset.archive_path : asset.path;
-    const cardRevealName = cardRevealPath.split("/").pop();
-    card.addEventListener("contextmenu", (e) => {
-      this._showContextMenu(e, cardRevealPath, cardRevealName, { kind: "asset", asset });
-    });
-    return card;
-  }
-  /**
-   * Rebuild the IntersectionObserver used to lazily render grid thumbnails.
-   * Called on every render so observers never leak across folder changes.
-   */
-  _resetThumbObserver() {
-    if (this._thumbObserver) {
-      this._thumbObserver.disconnect();
-      this._thumbObserver = null;
-    }
-    if (this._thumbnailer) this._thumbnailer.reset();
-    if (!this._thumbnailer || typeof IntersectionObserver === "undefined") return;
-    this._thumbObserver = new IntersectionObserver((entries, obs) => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        const card = entry.target;
-        obs.unobserve(card);
-        if (card._thumbAsset && card._thumbImg) {
-          this._thumbnailer.request(card._thumbAsset, card._thumbImg);
-        }
-      }
-    }, { root: this._container, rootMargin: "100px" });
-  }
-  /**
-   * Set the selected item, removing previous selection.
-   */
-  _setSelected(element) {
-    if (this._selectedElement) {
-      this._selectedElement.classList.remove("active");
-    }
-    element.classList.add("active");
-    this._selectedElement = element;
-  }
-  /**
-   * Format a file size in bytes to a human-readable string.
-   */
-  _formatSize(bytes) {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  }
-  /** Return the last path component (supports / and \\). */
-  _basename(p) {
-    if (!p) return "";
-    return String(p).split(/[/\\\\]/).pop() || "";
-  }
-  /**
-   * Show a context menu with file operations.
-   * @param {MouseEvent} event
-   * @param {string} filePath - Absolute path to the file/folder
-   * @param {string} [fileName] - Display name (for rename prompt)
-   */
-  _showContextMenu(event, filePath, fileName, context = null) {
-    event.preventDefault();
-    event.stopPropagation();
-    this._dismissContextMenu();
-    const menu = document.createElement("div");
-    menu.className = "context-menu";
-    const ctx = context || {};
-    const asset = ctx && ctx.asset ? ctx.asset : null;
-    if (asset && asset.is_in_archive) {
-      const archName = this._basename(asset.archive_path || "");
-      const header = document.createElement("div");
-      header.className = "context-menu-header";
-      header.innerHTML = `<span class="ctx-archive-icon">\u{1F4E6}</span><span class="ctx-archive-name">${this._escapeHtml(archName || "Archive")}</span>`;
-      menu.appendChild(header);
-    }
-    let x = event.clientX;
-    let y = event.clientY;
-    menu.style.left = `${x}px`;
-    menu.style.top = `${y}px`;
-    if (asset && typeof this._onExportRequest === "function") {
-      this._addContextMenuItem(menu, "Export\u2026", () => {
-        this._onExportRequest(asset);
-      });
-    }
-    this._addContextMenuItem(menu, "Show in file manager", async () => {
-      try {
-        await fetch("/api/reveal", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: filePath })
-        });
-      } catch (err2) {
-        console.error("Reveal failed:", err2);
-      }
-    });
-    this._addContextMenuItem(menu, "Copy file path", () => {
-      navigator.clipboard.writeText(filePath).then(() => {
-        this._onStatusUpdate("Path copied to clipboard");
-      }).catch(() => {
-        const textarea = document.createElement("textarea");
-        textarea.value = filePath;
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textarea);
-        this._onStatusUpdate("Path copied to clipboard");
-      });
-    });
-    const displayName = fileName || filePath.split("/").pop();
-    this._addContextMenuItem(menu, "Rename", () => {
-      this._startInlineRename(event.target.closest(".file-item, .asset-card"), filePath, displayName);
-    });
-    this._addContextMenuItem(menu, "Duplicate", async () => {
-      try {
-        const resp = await fetch("/api/duplicate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: filePath })
-        });
-        if (!resp.ok) {
-          const err2 = await resp.json();
-          this._onStatusUpdate(`Duplicate failed: ${err2.detail}`);
-        } else {
-          const result = await resp.json();
-          this._onStatusUpdate(`Duplicated to ${result.new_path.split("/").pop()}`);
-          this.browse(this._currentPath);
-        }
-      } catch (err2) {
-        this._onStatusUpdate(`Duplicate failed: ${err2.message}`);
-      }
-    });
-    const sep = document.createElement("div");
-    sep.className = "context-menu-sep";
-    menu.appendChild(sep);
-    this._addContextMenuItem(menu, "Delete", async () => {
-      const ok = confirm(`Delete "${displayName}"?
-
-This cannot be undone.`);
-      if (!ok) return;
-      try {
-        const resp = await fetch("/api/delete", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: filePath })
-        });
-        if (!resp.ok) {
-          const err2 = await resp.json();
-          alert(`Delete failed: ${err2.detail}`);
-        } else {
-          this.browse(this._currentPath);
-        }
-      } catch (err2) {
-        alert(`Delete failed: ${err2.message}`);
-      }
-    }, true);
-    document.body.appendChild(menu);
-    this._activeContextMenu = menu;
-    const rect = menu.getBoundingClientRect();
-    if (rect.right > window.innerWidth) menu.style.left = `${window.innerWidth - rect.width - 8}px`;
-    if (rect.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - rect.height - 8}px`;
-    const dismiss = (e) => {
-      if (!menu.contains(e.target)) {
-        this._dismissContextMenu();
-        document.removeEventListener("click", dismiss, true);
-        document.removeEventListener("contextmenu", dismiss, true);
-      }
-    };
-    setTimeout(() => {
-      document.addEventListener("click", dismiss, true);
-      document.addEventListener("contextmenu", dismiss, true);
-    }, 0);
-  }
-  /** Add a single item to a context menu. */
-  _addContextMenuItem(menu, label, action, danger = false) {
-    const item = document.createElement("div");
-    item.className = `context-menu-item${danger ? " danger" : ""}`;
-    item.textContent = label;
-    item.addEventListener("click", () => {
-      this._dismissContextMenu();
-      action();
-    });
-    menu.appendChild(item);
-  }
-  /**
-   * Start inline rename: replace the name text in the file item with
-   * an editable input field. Enter confirms, Escape cancels.
-   */
-  _startInlineRename(itemElement, filePath, currentName) {
-    if (!itemElement) return;
-    const nameEl = itemElement.querySelector(".file-item-name, .asset-card-name");
-    if (!nameEl) return;
-    const originalText = nameEl.textContent;
-    const input = document.createElement("input");
-    input.type = "text";
-    input.value = currentName;
-    input.className = "inline-rename-input";
-    nameEl.textContent = "";
-    nameEl.appendChild(input);
-    let committed = false;
-    setTimeout(() => {
-      input.focus();
-      const dotIdx = currentName.lastIndexOf(".");
-      input.setSelectionRange(0, dotIdx > 0 ? dotIdx : currentName.length);
-    }, 50);
-    const restore = () => {
-      if (!committed && input.parentElement) {
-        nameEl.textContent = originalText;
-      }
-    };
-    const commit = async () => {
-      if (committed) return;
-      committed = true;
-      const newName = input.value.trim();
-      if (!newName || newName === currentName) {
-        nameEl.textContent = originalText;
-        return;
-      }
-      nameEl.textContent = newName;
-      try {
-        const resp = await fetch("/api/rename", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: filePath, new_name: newName })
-        });
-        if (!resp.ok) {
-          const err2 = await resp.json();
-          nameEl.textContent = originalText;
-          this._onStatusUpdate(`Rename failed: ${err2.detail}`);
-        } else {
-          this.browse(this._currentPath);
-        }
-      } catch (err2) {
-        nameEl.textContent = originalText;
-        this._onStatusUpdate(`Rename failed: ${err2.message}`);
-      }
-    };
-    input.addEventListener("keydown", (e) => {
-      e.stopPropagation();
-      if (e.key === "Enter") {
-        e.preventDefault();
-        commit();
-      } else if (e.key === "Escape") {
-        restore();
-      }
-    });
-    input.addEventListener("blur", () => {
-      setTimeout(() => restore(), 100);
-    });
-    input.addEventListener("click", (e) => e.stopPropagation());
-    input.addEventListener("dblclick", (e) => e.stopPropagation());
-  }
-  /** Remove the active context menu if any. */
-  _dismissContextMenu() {
-    if (this._activeContextMenu) {
-      this._activeContextMenu.remove();
-      this._activeContextMenu = null;
-    }
-  }
-  // ==========================================================
-  // Hover tooltip (archive context)
-  // ==========================================================
-  _ensureArchiveTooltip() {
-    if (this._archiveTooltipEl) return;
-    const el = document.createElement("div");
-    el.className = "hover-tooltip";
-    el.style.display = "none";
-    document.body.appendChild(el);
-    this._archiveTooltipEl = el;
-  }
-  _attachArchiveTooltip(anchorEl, asset) {
-    const archName = this._basename(asset.archive_path || "");
-    if (!archName) return;
-    anchorEl.addEventListener("mouseenter", () => {
-      this._hideArchiveTooltip();
-      this._archiveTooltipAnchor = anchorEl;
-      clearTimeout(this._archiveTooltipTimer);
-      this._archiveTooltipTimer = setTimeout(() => {
-        if (!anchorEl.matches(":hover")) return;
-        this._showArchiveTooltip(anchorEl, archName);
-      }, 1e3);
-    });
-    anchorEl.addEventListener("mouseleave", () => {
-      if (this._archiveTooltipAnchor === anchorEl) {
-        clearTimeout(this._archiveTooltipTimer);
-        this._archiveTooltipTimer = null;
-        this._hideArchiveTooltip();
-      }
-    });
-    anchorEl.addEventListener("mousedown", () => this._hideArchiveTooltip());
-  }
-  _showArchiveTooltip(anchorEl, archName) {
-    this._ensureArchiveTooltip();
-    const el = this._archiveTooltipEl;
-    el.textContent = `\u{1F4E6} ${archName}`;
-    el.style.display = "block";
-    const r = anchorEl.getBoundingClientRect();
-    const pad = 10;
-    const desiredLeft = Math.round(r.left + pad);
-    const desiredTop = Math.round(r.top - 10);
-    const tr = el.getBoundingClientRect();
-    let left = desiredLeft;
-    let top = desiredTop - tr.height;
-    if (top < 8) top = Math.round(r.bottom + 8);
-    if (left + tr.width > window.innerWidth - 8) left = Math.max(8, window.innerWidth - tr.width - 8);
-    if (top + tr.height > window.innerHeight - 8) top = Math.max(8, window.innerHeight - tr.height - 8);
-    el.style.left = `${left}px`;
-    el.style.top = `${top}px`;
-  }
-  _hideArchiveTooltip() {
-    clearTimeout(this._archiveTooltipTimer);
-    this._archiveTooltipTimer = null;
-    this._archiveTooltipAnchor = null;
-    if (this._archiveTooltipEl) {
-      this._archiveTooltipEl.style.display = "none";
-    }
-  }
-  /**
-   * Escape HTML special characters.
-   */
-  _escapeHtml(text) {
-    const div = document.createElement("div");
-    div.textContent = text;
-    return div.innerHTML;
-  }
-};
-
 // node_modules/three/build/three.module.js
 var REVISION = "170";
 var MOUSE = { LEFT: 0, MIDDLE: 1, RIGHT: 2, ROTATE: 0, DOLLY: 1, PAN: 2 };
@@ -43730,1604 +42999,635 @@ var Viewer3D = class {
   }
 };
 
-// frontend/js/export_panel.js
-var ExportPanel = class {
+// frontend/js/viewer/control_api.js
+var ViewerControlAPI = class {
   /**
-   * @param {object} elements - DOM elements
-   * @param {HTMLElement} elements.controls - The controls container
-   * @param {HTMLInputElement} elements.nameInput - Asset name input
-   * @param {HTMLInputElement} elements.pathInput - Export path input
-   * @param {HTMLButtonElement} elements.exportBtn - Export button
-   * @param {Function} showToast - Function to show toast messages
-   * @param {Function} getModifiedOBJ - Returns OBJ string if model is modified, null otherwise
+   * @param {import("../viewer_3d.js").Viewer3D} viewer
+   * @param {object} [opts]
+   * @param {(event:string, data:any)=>void} [opts.onEvent] - optional global event sink
    */
-  constructor(elements, showToast, getModifiedOBJ, onExportSuccess) {
-    this._controls = elements.controls;
-    this._nameInput = elements.nameInput;
-    this._pathInput = elements.pathInput;
-    this._exportBtn = elements.exportBtn;
-    this._showToast = showToast;
-    this._getModifiedOBJ = getModifiedOBJ || (() => null);
-    this._onExportSuccess = onExportSuccess || (() => {
-    });
-    this._currentAsset = null;
+  constructor(viewer, opts = {}) {
+    this._viewer = viewer;
+    this._listeners = /* @__PURE__ */ new Map();
+    if (opts.onEvent) this.on("*", opts.onEvent);
+    this._containerListeners = [];
+    const el = viewer._container;
+    if (el && el.addEventListener) {
+      const bind = (type) => {
+        const handler = (e) => this._emit(type, e.detail);
+        el.addEventListener(type, handler);
+        this._containerListeners.push({ type, handler });
+      };
+      bind("animations");
+      bind("measurement");
+      bind("navmodechange");
+    }
+    this._commands = this._buildRegistry();
+  }
+  // ---- public surface -----------------------------------------------------
+  /** Enumerate every command with its parameter schema (for agent discovery). */
+  listCommands() {
+    return Object.entries(this._commands).map(([action, def]) => ({
+      action,
+      description: def.description,
+      params: def.params || {}
+    }));
+  }
+  /** JSON snapshot of the viewer (model, camera, display, animation). */
+  getState() {
+    return this._viewer.getState();
+  }
+  /** Per-mesh + per-material breakdown of the loaded model. */
+  getSceneInfo() {
+    return this._viewer.getSceneInfo();
   }
   /**
-   * Set the current asset for the export panel.
-   * Shows the controls and populates the name field.
+   * Execute one command. Always resolves to a structured result; never throws.
+   * @param {{action:string, params?:object}} command
+   * @returns {Promise<{ok:boolean, result?:any, error?:string}>}
    */
-  setAsset(asset, currentBrowsePath) {
-    this._currentAsset = asset;
-    this._controls.style.display = "flex";
-    this._nameInput.value = asset.name;
-    this._pathInput.value = currentBrowsePath || "";
-  }
-  /** Hide the export controls */
-  hide() {
-    this._controls.style.display = "none";
-    this._currentAsset = null;
-  }
-  /**
-   * Handle export button click.
-   *
-   * If the model has been modified (recentered, oriented, scaled),
-   * exports the modified OBJ from the viewer instead of the source file.
-   */
-  async _onExport() {
-    if (!this._currentAsset) {
-      this._showToast("No asset selected", "error");
-      return;
+  async execute(command) {
+    if (!command || typeof command.action !== "string") {
+      return { ok: false, error: "command.action (string) is required" };
     }
-    const newName = this._nameInput.value.trim();
-    if (!newName) {
-      this._showToast("Please enter a name for the asset", "error");
-      this._nameInput.focus();
-      return;
+    const def = this._commands[command.action];
+    if (!def) {
+      return {
+        ok: false,
+        error: `Unknown action '${command.action}'. Use listCommands() to discover valid actions.`
+      };
     }
-    const targetDir = this._pathInput.value.trim();
-    if (!targetDir) {
-      this._showToast("Please enter an export directory", "error");
-      this._pathInput.focus();
-      return;
+    if (def.requiresModel && !this._viewer.getState().model.loaded) {
+      return { ok: false, error: `'${command.action}' requires a loaded model. Call 'load' first.` };
     }
-    this._exportBtn.disabled = true;
+    const params = command.params || {};
+    const validation = this._validate(def.params || {}, params);
+    if (validation.error) return { ok: false, error: validation.error };
     try {
-      const modifiedOBJ = this._getModifiedOBJ();
-      let response;
-      if (modifiedOBJ) {
-        response = await fetch("/api/export_modified", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            target_dir: targetDir,
-            new_name: newName,
-            obj_content: modifiedOBJ
-          })
-        });
-      } else {
-        const asset = this._currentAsset;
-        response = await fetch("/api/export", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            source_path: asset.path,
-            target_dir: targetDir,
-            new_name: newName,
-            is_in_archive: asset.is_in_archive || false,
-            archive_path: asset.archive_path || null,
-            inner_path: asset.inner_path || null,
-            related_files: asset.related_files || []
-          })
-        });
-      }
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || "Export failed");
-      }
-      const result = await response.json();
-      const suffix = modifiedOBJ ? " (modified)" : "";
-      this._showToast(
-        `Exported${suffix} ${result.files_exported.length} file(s) to ${result.output_path}`,
-        "success"
-      );
-      this._onExportSuccess();
+      const result = await def.handler(validation.values);
+      this._emit("executed", { action: command.action, params });
+      return { ok: true, result: result === void 0 ? null : result };
     } catch (err2) {
-      console.error("Export error:", err2);
-      this._showToast(`Export failed: ${err2.message}`, "error");
-    } finally {
-      this._exportBtn.disabled = false;
+      const message = String(err2 && err2.message ? err2.message : err2);
+      this._emit("error", { action: command.action, error: message });
+      return { ok: false, error: message };
     }
   }
-};
-
-// frontend/js/thumbnailer.js
-var THUMB_SIZE = 256;
-var DB_NAME = "meshvault-thumbnails";
-var STORE = "thumbs";
-function openDb() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => {
-      req.result.createObjectStore(STORE);
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-async function idbGet(key) {
-  try {
-    const db = await openDb();
-    return await new Promise((resolve) => {
-      const tx = db.transaction(STORE, "readonly");
-      const r = tx.objectStore(STORE).get(key);
-      r.onsuccess = () => resolve(r.result || null);
-      r.onerror = () => resolve(null);
-    });
-  } catch {
-    return null;
+  /** Detach all listeners this API put on the container (call from the host destroy). */
+  destroy() {
+    for (const { type, handler } of this._containerListeners || []) {
+      this._viewer._container.removeEventListener(type, handler);
+    }
+    this._containerListeners = [];
+    this._listeners.clear();
   }
-}
-async function idbPut(key, dataUrl) {
-  try {
-    const db = await openDb();
-    await new Promise((resolve) => {
-      const tx = db.transaction(STORE, "readwrite");
-      tx.objectStore(STORE).put(dataUrl, key);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
-    });
-  } catch {
+  /** Subscribe to an event ('loaded','error','animations','measurement','executed','*'). */
+  on(event, cb) {
+    if (!this._listeners.has(event)) this._listeners.set(event, /* @__PURE__ */ new Set());
+    this._listeners.get(event).add(cb);
+    return () => this._listeners.get(event)?.delete(cb);
   }
-}
-var Thumbnailer = class _Thumbnailer {
-  constructor() {
-    this._queue = [];
-    this._busy = false;
-    this._renderer = null;
-    this._scene = null;
-    this._camera = null;
-    this._requested = /* @__PURE__ */ new Set();
+  _emit(event, data) {
+    for (const cb of this._listeners.get(event) || []) {
+      try {
+        cb(data, event);
+      } catch {
+      }
+    }
+    for (const cb of this._listeners.get("*") || []) {
+      try {
+        cb(data, event);
+      } catch {
+      }
+    }
   }
-  /** Stable identity key for an asset (dedupe within a render pass). */
-  static keyForAsset(asset) {
-    return asset.is_in_archive ? `${asset.archive_path}!${asset.inner_path}` : asset.path;
-  }
-  /** Cache key with invalidation: identity + size + mtime. */
-  static cacheKey(asset) {
-    return `${_Thumbnailer.keyForAsset(asset)}|${asset.size ?? 0}|${asset.mtime ?? 0}`;
-  }
+  // ---- input validation ---------------------------------------------------
   /**
-   * Request a thumbnail for an asset into the given <img> element.
-   * Tries the server cache first; only renders on a cache miss.
+   * Validate + coerce params against a schema. Schema entry:
+   *   { type: 'number'|'string'|'boolean'|'array', required?, default?, enum?, min?, max? }
    */
-  request(asset, imgEl) {
-    const key = _Thumbnailer.keyForAsset(asset);
-    if (this._requested.has(key)) return;
-    this._requested.add(key);
-    this._queue.push({ asset, imgEl, key });
-    this._pump();
-  }
-  /** Drop pending work (e.g. when the folder changes). */
-  reset() {
-    this._queue = [];
-    this._requested.clear();
-  }
-  async _pump() {
-    if (this._busy) return;
-    this._busy = true;
-    try {
-      while (this._queue.length > 0) {
-        const job = this._queue.shift();
-        if (!job.imgEl.isConnected) continue;
-        try {
-          await this._process(job);
-        } catch (err2) {
-          console.debug("Thumbnail failed:", job.key, err2);
+  _validate(schema, params) {
+    const values = {};
+    for (const key of Object.keys(params)) {
+      if (!(key in schema)) {
+        const valid = Object.keys(schema);
+        return { error: `Unknown param '${key}'. Valid params: ${valid.length ? valid.join(", ") : "(none)"}` };
+      }
+    }
+    for (const [key, spec] of Object.entries(schema)) {
+      let v = params[key];
+      if (v === void 0 || v === null) {
+        if (spec.required) return { error: `Missing required param '${key}'` };
+        if (spec.default !== void 0) v = spec.default;
+        else {
+          values[key] = void 0;
+          continue;
         }
-        await new Promise((r) => setTimeout(r, 15));
       }
-    } finally {
-      this._busy = false;
-    }
-  }
-  async _process(job) {
-    const { asset, imgEl } = job;
-    const cacheKey = _Thumbnailer.cacheKey(asset);
-    const cached = await idbGet(cacheKey);
-    if (cached) {
-      imgEl.src = cached;
-      imgEl.classList.add("loaded");
-      return;
-    }
-    const resolved = await this._resolveAsset(asset);
-    if (!resolved) return;
-    const { url, ext } = resolved;
-    const object = await this._load(url, ext);
-    if (!object) return;
-    const dataUrl = this._render(object);
-    this._disposeObject(object);
-    if (!dataUrl) return;
-    imgEl.src = dataUrl;
-    imgEl.classList.add("loaded");
-    idbPut(cacheKey, dataUrl);
-  }
-  async _resolveAsset(asset) {
-    const ext = (asset.extension || "").toLowerCase();
-    if (asset.is_in_archive) {
-      const prep = await fetch(
-        `/api/asset/prepare_archive?archive_path=${encodeURIComponent(asset.archive_path)}&inner_path=${encodeURIComponent(asset.inner_path)}`
-      );
-      if (!prep.ok) return null;
-      const data = await prep.json();
-      return { url: data.file_url, ext: data.actual_extension || ext };
-    }
-    return { url: `/api/asset/file?path=${encodeURIComponent(asset.path)}`, ext };
-  }
-  async _load(url, ext) {
-    switch (ext) {
-      case ".glb":
-      case ".gltf": {
-        const gltf = await new GLTFLoader().loadAsync(url);
-        return gltf.scene;
+      if (spec.type === "number") {
+        const n = Number(v);
+        if (Number.isNaN(n)) return { error: `Param '${key}' must be a number` };
+        if (spec.min !== void 0 && n < spec.min) return { error: `Param '${key}' must be >= ${spec.min}` };
+        if (spec.max !== void 0 && n > spec.max) return { error: `Param '${key}' must be <= ${spec.max}` };
+        v = n;
+      } else if (spec.type === "boolean") {
+        v = v === true || v === "true" || v === 1 || v === "1";
+      } else if (spec.type === "array") {
+        if (!Array.isArray(v)) return { error: `Param '${key}' must be an array` };
+      } else if (spec.type === "string") {
+        v = String(v);
       }
-      case ".obj":
-        return await new OBJLoader().loadAsync(url);
-      case ".stl": {
-        const geo = await new STLLoader().loadAsync(url);
-        geo.computeVertexNormals();
-        return this._wrapGeometry(geo);
+      if (spec.enum && !spec.enum.includes(v)) {
+        return { error: `Param '${key}' must be one of: ${spec.enum.join(", ")}` };
       }
-      case ".ply": {
-        const geo = await new PLYLoader().loadAsync(url);
-        if (!geo.hasAttribute("normal")) geo.computeVertexNormals();
-        return this._wrapGeometry(geo, geo.hasAttribute("color"));
-      }
-      case ".fbx":
-        return await new FBXLoader().loadAsync(url);
-      default:
-        return null;
+      values[key] = v;
     }
+    return { values };
   }
-  _wrapGeometry(geo, vertexColors = false) {
-    const mat = new MeshStandardMaterial({
-      color: vertexColors ? 16777215 : 10133670,
-      vertexColors,
-      roughness: 0.65,
-      metalness: 0.1,
-      side: DoubleSide
-    });
-    const group = new Group();
-    group.add(new Mesh(geo, mat));
-    return group;
-  }
-  _ensureRenderer() {
-    if (this._renderer) return;
-    this._renderer = new WebGLRenderer({
-      antialias: true,
-      alpha: true,
-      preserveDrawingBuffer: true
-    });
-    this._renderer.setSize(THUMB_SIZE, THUMB_SIZE);
-    this._renderer.setClearColor(0, 0);
-    this._scene = new Scene();
-    const hemi = new HemisphereLight(16777215, 4473941, 1.1);
-    this._scene.add(hemi);
-    const key = new DirectionalLight(16777215, 1.4);
-    key.position.set(2, 3, 2);
-    this._scene.add(key);
-    const fill = new DirectionalLight(16777215, 0.5);
-    fill.position.set(-2, 1, -1);
-    this._scene.add(fill);
-    this._camera = new PerspectiveCamera(40, 1, 0.01, 1e4);
-  }
-  _render(object) {
-    this._ensureRenderer();
-    const scene = this._scene;
-    scene.add(object);
-    const box = new Box3().setFromObject(object);
-    if (box.isEmpty()) {
-      scene.remove(object);
-      return null;
-    }
-    const sphere = box.getBoundingSphere(new Sphere());
-    const r = sphere.radius || 1;
-    const dist = r / Math.sin(this._camera.fov * Math.PI / 180 / 2) * 1.15;
-    const dir = new Vector3(1, 0.7, 1).normalize();
-    this._camera.position.copy(sphere.center).addScaledVector(dir, dist);
-    this._camera.lookAt(sphere.center);
-    this._camera.near = Math.max(1e-3, dist - r * 2);
-    this._camera.far = dist + r * 2;
-    this._camera.updateProjectionMatrix();
-    this._renderer.render(scene, this._camera);
-    const dataUrl = this._renderer.domElement.toDataURL("image/png");
-    scene.remove(object);
-    return dataUrl;
-  }
-  _disposeObject(object) {
-    object.traverse((child) => {
-      if (child.isMesh) {
-        child.geometry?.dispose();
-        const mats = Array.isArray(child.material) ? child.material : [child.material];
-        for (const m of mats) {
-          if (!m) continue;
-          for (const k of Object.keys(m)) {
-            if (m[k] && m[k].isTexture) m[k].dispose();
+  // ---- command registry ---------------------------------------------------
+  _buildRegistry() {
+    const v = this._viewer;
+    return {
+      // --- observation ---
+      get_state: {
+        description: "Return a JSON snapshot of the viewer (model, camera, display, animation).",
+        handler: () => v.getState()
+      },
+      get_scene_info: {
+        description: "Return per-mesh and per-material details of the loaded model.",
+        handler: () => v.getSceneInfo()
+      },
+      get_bounds: {
+        description: "Return the model's world-space bounding box {min,max,center,size} or null.",
+        handler: () => v.getBounds()
+      },
+      score_views: {
+        description: "Score candidate camera angles by how much visible surface DETAIL each shows (edge energy), and return them ranked. Use this to find a model's semantic 'front' when it is not axis-aligned (e.g. a face): the most detailed side ranks first. Returns [{azimuth, elevation, score, coverage}]. NOTE: presets front/back/left/right are WORLD-AXIS conventions, not the model's real front \u2014 this command discovers the real one.",
+        params: {
+          azimuths: { type: "array" },
+          elevations: { type: "array" },
+          size: { type: "number", min: 32, max: 512 },
+          fill: { type: "number", min: 0.1, max: 1 }
+        },
+        requiresModel: true,
+        handler: (p) => v.scoreViews({ azimuths: p.azimuths, elevations: p.elevations, size: p.size, fill: p.fill })
+      },
+      find_best_view: {
+        description: "Find the best 'hero'/front angle (highest visible geometric detail, lighting-independent) and move the camera there. Auto-uprights by default (corrects camera roll so a lying-down/mis-oriented model appears the right way up); pass upright:false to skip, apply:false to only compute. Returns {azimuth, elevation, score, coverage, ranked}.",
+        params: {
+          apply: { type: "boolean", default: true },
+          upright: { type: "boolean", default: true },
+          fill: { type: "number", min: 0.1, max: 1 },
+          size: { type: "number", min: 32, max: 512 }
+        },
+        requiresModel: true,
+        handler: (p) => v.findBestView({ apply: p.apply, upright: p.upright, fill: p.fill, size: p.size })
+      },
+      auto_upright: {
+        description: "Correct the camera roll for the CURRENT view so a mis-oriented (e.g. lying-down) subject appears upright, without modifying the model. Uses left-right symmetry of the framed subject.",
+        requiresModel: true,
+        handler: () => v.autoUpright()
+      },
+      list_commands: {
+        description: "List all available commands and their parameters.",
+        handler: () => this.listCommands()
+      },
+      screenshot: {
+        description: "Render the current view and return a PNG data URL. Options: width/height (explicit output resolution; one may be omitted and is derived from aspect), transparent (alpha background, for cutouts), fog (default false \u2014 scene fog is suppressed for cleaner hero shots), hideGround (hide the ground/shadow plane), ssao (default true \u2014 render through the SSAO/tone-mapping composer for hero quality).",
+        params: {
+          width: { type: "number", min: 16, max: 8192 },
+          height: { type: "number", min: 16, max: 8192 },
+          transparent: { type: "boolean", default: false },
+          fog: { type: "boolean", default: false },
+          hideGround: { type: "boolean", default: false },
+          ssao: { type: "boolean", default: true }
+        },
+        handler: (p) => v.captureImage({
+          width: p.width,
+          height: p.height,
+          transparent: p.transparent,
+          fog: p.fog,
+          hideGround: p.hideGround,
+          ssao: p.ssao
+        })
+      },
+      capture_views: {
+        description: "Capture several views in one call (e.g. hero shots). `views` is a list of presets (front/back/left/right/top/bottom/iso) and/or {azimuth,elevation} objects. Returns { <label>: <PNG data URL> }. Hides grid/axes and suppresses fog for a clean shot, restoring them after.",
+        params: {
+          views: { type: "array", default: ["front", "left", "right", "back"] },
+          width: { type: "number", default: 1024, min: 16, max: 8192 },
+          height: { type: "number", default: 1024, min: 16, max: 8192 },
+          transparent: { type: "boolean", default: false },
+          fill: { type: "number", min: 0.1, max: 1 },
+          hideGround: { type: "boolean", default: false }
+        },
+        requiresModel: true,
+        handler: (p) => {
+          const presets = ["front", "back", "left", "right", "top", "bottom", "iso"];
+          for (const view of p.views) {
+            const ok = typeof view === "string" && presets.includes(view) || view && typeof view === "object" && typeof view.azimuth === "number";
+            if (!ok) throw new Error(`Invalid view '${JSON.stringify(view)}' (preset name or {azimuth,elevation})`);
           }
-          m.dispose();
-        }
-      }
-    });
-  }
-};
-
-// frontend/js/app.js
-var App = class {
-  constructor() {
-    this._elements = {
-      fileList: document.getElementById("file-list"),
-      currentPath: document.getElementById("current-path"),
-      btnGoUp: document.getElementById("btn-go-up"),
-      btnGoHome: document.getElementById("btn-go-home"),
-      viewerContainer: document.getElementById("viewer-3d"),
-      viewerPlaceholder: document.getElementById("viewer-placeholder"),
-      loadingOverlay: document.getElementById("loading-overlay"),
-      viewerInfo: document.getElementById("viewer-info"),
-      infoVertices: document.getElementById("info-vertices"),
-      infoFaces: document.getElementById("info-faces"),
-      infoSize: document.getElementById("info-size"),
-      assetControls: document.getElementById("asset-controls"),
-      assetNameInput: document.getElementById("asset-name-input"),
-      exportPathInput: document.getElementById("export-path-input"),
-      exportBtn: document.getElementById("export-btn"),
-      statusText: document.getElementById("status-text"),
-      toastContainer: document.getElementById("toast-container"),
-      sidebarResize: document.getElementById("sidebar-resize"),
-      sidebar: document.getElementById("sidebar")
-    };
-    this._thumbnailer = new Thumbnailer();
-    this._fileBrowser = new FileBrowser(
-      this._elements.fileList,
-      this._elements.currentPath,
-      (asset) => this._onAssetSelected(asset),
-      (text) => this._updateStatus(text),
-      (asset) => this._onExportRequested(asset),
-      this._thumbnailer
-    );
-    this._viewer = new Viewer3D(
-      this._elements.viewerContainer,
-      (stats) => this._updateViewerInfo(stats),
-      {
-        // The full app resolves a model's resource references (textures, MTL)
-        // through the backend, which confines and serves them. This is the same
-        // behavior as before — now injected explicitly so the viewer core stays
-        // backend-agnostic (the standalone bundle injects a client-only resolver).
-        resolveResource: (ref) => `/api/asset/related?path=${encodeURIComponent(ref)}`
-      }
-    );
-    this._exportPanel = new ExportPanel(
-      {
-        controls: this._elements.assetControls,
-        nameInput: this._elements.assetNameInput,
-        pathInput: this._elements.exportPathInput,
-        exportBtn: this._elements.exportBtn
-      },
-      (msg, type) => this._showToast(msg, type),
-      // Modified OBJ getter
-      () => {
-        if (this._viewer.isModelModified) {
-          return this._viewer.exportAsOBJ();
-        }
-        return null;
-      },
-      // Refresh file browser after successful export
-      () => this._fileBrowser.browse(this._fileBrowser.currentPath)
-    );
-    document.getElementById("btn-reload").addEventListener("click", () => {
-      if (this._lastLoadedAsset) {
-        this._onAssetSelected(this._lastLoadedAsset);
-      }
-    });
-    document.getElementById("btn-reset-view").addEventListener("click", () => {
-      this._viewer.resetModel();
-      this._resetScaleControl();
-      this._showToast("Model transforms reset", "info");
-    });
-    document.getElementById("btn-recenter").addEventListener("click", () => {
-      this._viewer.recenterModel();
-      this._showToast("Model centered at (0, 0, 0)", "info");
-    });
-    document.getElementById("btn-ground").addEventListener("click", () => {
-      this._viewer.groundModel();
-      this._showToast("Model grounded at Y=0", "info");
-    });
-    document.getElementById("btn-auto-orient").addEventListener("click", () => {
-      this._viewer.autoOrientModel();
-      this._showToast("Model oriented (Y = up)", "info");
-    });
-    document.querySelectorAll(".rot-btn").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const axis = btn.dataset.axis;
-        const angle = parseInt(btn.dataset.angle, 10);
-        this._viewer.rotateModel(axis, angle);
-        const sign2 = angle > 0 ? "+" : "";
-        this._showToast(`Rotated ${sign2}${angle}\xB0 around ${axis.toUpperCase()}`, "info");
-      });
-    });
-    this._initSimplifyControl();
-    document.getElementById("btn-recompute-normals").addEventListener("click", () => {
-      const hide = this._showProcessing("Recomputing normals\u2026");
-      setTimeout(() => {
-        this._viewer.recomputeNormals();
-        hide();
-        this._showToast("Normals recomputed", "info");
-      }, 50);
-    });
-    this._initSaveAsModal();
-    this._elements.btnGoUp.addEventListener("click", () => {
-      this._fileBrowser.goUp();
-    });
-    this._elements.btnGoHome.addEventListener("click", () => {
-      this._fileBrowser.goHome();
-    });
-    this._initSidebarResize();
-    this._initSearchFilter();
-    this._initSortSelect();
-    this._initViewModeToggle();
-    document.getElementById("screenshot-btn").addEventListener("click", () => {
-      this._viewer.screenshot();
-    });
-    this._initNavModeToggle();
-    this._initGridToggle();
-    this._initAxisToggle();
-    this._initWireframeToggle();
-    this._initNormalsToggle();
-    this._initTextureFolderPicker();
-    this._initMaterialsPanel();
-    this._initLightControls();
-    this._initBackgroundSwatches();
-    this._initScaleControl();
-    this._initAnimationControls();
-    this._initMeasurement();
-    this._initDragAndDrop();
-    this._initRecentFiles();
-    this._fileBrowser.goLastOrHome();
-  }
-  /**
-   * Export requested from the file browser context menu.
-   *
-   * Goal: same entry point as the top Export button (Save As modal),
-   * but anchored to the asset the user right-clicked.
-   */
-  async _onExportRequested(asset) {
-    if (!asset) {
-      this._showToast("No asset selected", "error");
-      return;
-    }
-    const sameAsset = this._lastLoadedAsset && this._lastLoadedAsset.path === asset.path && this._lastLoadedAsset.inner_path === asset.inner_path && this._lastLoadedAsset.archive_path === asset.archive_path;
-    if (!sameAsset) {
-      await this._onAssetSelected(asset);
-    }
-    const exportBtn = document.getElementById("export-btn");
-    if (exportBtn) exportBtn.click();
-  }
-  /**
-   * Called when a 3D asset is selected in the file browser.
-   * Loads the asset in the 3D viewer and shows the export controls.
-   */
-  async _onAssetSelected(asset) {
-    this._lastLoadedAsset = asset;
-    this._elements.loadingOverlay.style.display = "flex";
-    this._elements.viewerPlaceholder.style.display = "none";
-    try {
-      let url;
-      let relatedFiles = asset.related_files || [];
-      let sourcePath = asset.path;
-      let loadExtension = asset.extension;
-      if (asset.is_in_archive) {
-        const prepareUrl = `/api/asset/prepare_archive?archive_path=${encodeURIComponent(asset.archive_path)}&inner_path=${encodeURIComponent(asset.inner_path)}`;
-        const prepResp = await fetch(prepareUrl);
-        if (!prepResp.ok) {
-          const err2 = await prepResp.json();
-          throw new Error(err2.detail || "Failed to extract from archive");
-        }
-        const prepared = await prepResp.json();
-        url = prepared.file_url;
-        relatedFiles = prepared.related_files || [];
-        sourcePath = prepared.file_path || asset.path;
-        if (prepared.actual_extension) {
-          loadExtension = prepared.actual_extension;
-        }
-      } else {
-        url = `/api/asset/file?path=${encodeURIComponent(asset.path)}`;
-        if (asset.extension.toLowerCase() === ".fbx") {
+          const grid = v.getGridVisible();
+          const axes = v.getAxisVisible();
+          v.setGridVisible(false);
+          v.setAxisVisible(false);
+          const out = {};
           try {
-            const headResp = await fetch(url, { method: "HEAD" });
-            const ct = headResp.headers.get("content-type") || "";
-            if (ct.includes("obj")) {
-              loadExtension = ".obj";
+            p.views.forEach((view, i) => {
+              let label;
+              if (typeof view === "string") {
+                v.setCameraView(view, { fill: p.fill });
+                label = view;
+              } else {
+                v.orbitTo(view.azimuth, view.elevation ?? 15, { fill: p.fill });
+                label = `az${view.azimuth}_el${view.elevation ?? 15}`;
+              }
+              out[label] = v.captureImage({
+                width: p.width,
+                height: p.height,
+                transparent: p.transparent,
+                hideGround: p.hideGround
+              });
+            });
+          } finally {
+            v.setGridVisible(grid);
+            v.setAxisVisible(axes);
+          }
+          return out;
+        }
+      },
+      turntable: {
+        description: "Capture N views evenly spaced around the model (turntable). Returns { <label>: <PNG data URL> }.",
+        params: {
+          frames: { type: "number", default: 8, min: 1, max: 64 },
+          elevation: { type: "number", default: 15 },
+          width: { type: "number", default: 512, min: 16, max: 8192 },
+          height: { type: "number", default: 512, min: 16, max: 8192 },
+          fill: { type: "number", min: 0.1, max: 1 },
+          transparent: { type: "boolean", default: false },
+          hideGround: { type: "boolean", default: false }
+        },
+        requiresModel: true,
+        handler: (p) => {
+          const grid = v.getGridVisible();
+          const axes = v.getAxisVisible();
+          v.setGridVisible(false);
+          v.setAxisVisible(false);
+          const out = {};
+          try {
+            for (let i = 0; i < p.frames; i++) {
+              const az = Math.round(360 / p.frames * i);
+              v.orbitTo(az, p.elevation, { fill: p.fill });
+              out[`az${az}`] = v.captureImage({
+                width: p.width,
+                height: p.height,
+                transparent: p.transparent,
+                hideGround: p.hideGround
+              });
             }
-          } catch {
+          } finally {
+            v.setGridVisible(grid);
+            v.setAxisVisible(axes);
           }
+          return out;
+        }
+      },
+      // --- loading ---
+      load: {
+        description: "Load a 3D model from a URL. Extension is inferred if omitted.",
+        params: {
+          url: { type: "string", required: true },
+          extension: { type: "string" },
+          name: { type: "string" }
+        },
+        handler: async (p) => {
+          const ext = p.extension || "." + p.url.split(".").pop().split("?")[0].toLowerCase();
+          const stats = await v.loadModel(p.url, ext, { name: p.name });
+          this._emit("loaded", { name: v.getState().model.name, stats });
+          return { stats, state: v.getState() };
+        }
+      },
+      unload: {
+        description: "Remove the current model and reset the viewer to an empty scene.",
+        handler: () => v.unload()
+      },
+      // --- camera ---
+      get_camera: {
+        description: "Return camera position, target, fov, mode, and available presets.",
+        handler: () => v.getState().camera
+      },
+      set_camera: {
+        description: "Set the camera to an explicit position and look-at target (world coords).",
+        params: {
+          position: { type: "array", required: true },
+          target: { type: "array" }
+        },
+        requiresModel: false,
+        handler: (p) => {
+          if (p.position.length !== 3) throw new Error("position must be [x,y,z]");
+          if (p.target && p.target.length !== 3) throw new Error("target must be [x,y,z]");
+          return v.setCamera(p.position, p.target);
+        }
+      },
+      set_view: {
+        description: "Point the camera at a preset around the model. `fill` (0-1, higher = tighter framing) controls how much of the frame the model occupies.",
+        params: {
+          preset: { type: "string", required: true, enum: ["front", "back", "left", "right", "top", "bottom", "iso"] },
+          fill: { type: "number", min: 0.1, max: 1 }
+        },
+        requiresModel: true,
+        handler: (p) => v.setCameraView(p.preset, { fill: p.fill })
+      },
+      orbit: {
+        description: "Orbit the camera to spherical angles around the model and frame it. azimuth: degrees around Y (0 = front); elevation: degrees above horizon.",
+        params: {
+          azimuth: { type: "number", required: true },
+          elevation: { type: "number", default: 15 },
+          fill: { type: "number", min: 0.1, max: 1 }
+        },
+        requiresModel: true,
+        handler: (p) => v.orbitTo(p.azimuth, p.elevation, { fill: p.fill })
+      },
+      frame: {
+        description: "Frame the model. Keeps the current view direction by default (keep_direction:false for an iso fit). `fill` (0-1) sets tightness.",
+        params: {
+          fill: { type: "number", min: 0.1, max: 1 },
+          keep_direction: { type: "boolean", default: true }
+        },
+        requiresModel: true,
+        handler: (p) => v.frameView({ fill: p.fill, keepDirection: p.keep_direction })
+      },
+      set_lighting: {
+        description: "Adjust the studio lighting for hero shots. All params optional (degrees / multipliers).",
+        params: {
+          azimuth: { type: "number", min: 0, max: 360 },
+          elevation: { type: "number", min: 0, max: 90 },
+          key_intensity: { type: "number", min: 0, max: 10 },
+          fill_intensity: { type: "number", min: 0, max: 10 },
+          ambient: { type: "number", min: 0, max: 10 },
+          exposure: { type: "number", min: 0.1, max: 8 }
+        },
+        handler: (p) => v.setLighting({
+          azimuth: p.azimuth,
+          elevation: p.elevation,
+          key_intensity: p.key_intensity,
+          fill_intensity: p.fill_intensity,
+          ambient: p.ambient,
+          exposure: p.exposure
+        })
+      },
+      reset_camera: {
+        description: "Reset the camera to the initial framed view (orbit mode).",
+        handler: () => {
+          v.resetView();
+          return true;
+        }
+      },
+      set_nav_mode: {
+        description: "Set navigation mode: 'orbit' or 'fpv'.",
+        params: { mode: { type: "string", required: true, enum: ["orbit", "fpv"] } },
+        handler: (p) => {
+          v.setNavMode(p.mode);
+          return true;
+        }
+      },
+      // --- display ---
+      set_wireframe: {
+        description: "Show/hide wireframe overlay.",
+        params: { enabled: { type: "boolean", required: true } },
+        handler: (p) => {
+          v.setWireframe(p.enabled);
+          return true;
+        }
+      },
+      set_grid: {
+        description: "Show/hide the floor grid.",
+        params: { visible: { type: "boolean", required: true } },
+        handler: (p) => {
+          v.setGridVisible(p.visible);
+          return true;
+        }
+      },
+      set_axes: {
+        description: "Show/hide the XYZ axes helper.",
+        params: { visible: { type: "boolean", required: true } },
+        handler: (p) => {
+          v.setAxisVisible(p.visible);
+          return true;
+        }
+      },
+      set_normals: {
+        description: "Show/hide vertex-normals visualization (little lines per vertex).",
+        params: { visible: { type: "boolean", required: true } },
+        handler: (p) => {
+          v.setNormalsVisible(p.visible);
+          return true;
+        }
+      },
+      set_render_mode: {
+        description: "How the model is drawn: 'textured' (mesh + texture, the lit PBR surface \u2014 default), 'solid' (the mesh only, uniform matte, no texture), or 'wireframe' (edges/topology only). Also accepts 'normals' (per-face normal colors) for geometry inspection. Aliases: 'shaded'=textured, 'clay'=solid.",
+        params: { mode: { type: "string", required: true, enum: ["textured", "solid", "wireframe", "normals", "shaded", "clay"] } },
+        requiresModel: true,
+        handler: (p) => v.setRenderMode(p.mode)
+      },
+      set_clip: {
+        description: "Cutting plane \u2014 hide part of the mesh on one side of a plane, e.g. to see only the front geometry and cut away what's behind, or make a cross-section. axis 'camera' cuts relative to the current view (near side kept); 'x'/'y'/'z' cut along model axes. position 0..1 across the model; flip keeps the other side. Set enabled:false to clear.",
+        params: {
+          enabled: { type: "boolean", required: true },
+          axis: { type: "string", enum: ["x", "y", "z", "camera"], default: "camera" },
+          position: { type: "number", min: 0, max: 1, default: 0.5 },
+          flip: { type: "boolean", default: false }
+        },
+        requiresModel: true,
+        handler: (p) => v.setClip({ enabled: p.enabled, axis: p.axis, position: p.position, flip: p.flip })
+      },
+      set_fog: {
+        description: "Enable/disable exponential scene fog and set its density (fog is off in hero captures by default).",
+        params: {
+          enabled: { type: "boolean", required: true },
+          density: { type: "number", min: 0, max: 1 }
+        },
+        handler: (p) => v.setFog({ enabled: p.enabled, density: p.density })
+      },
+      set_background: {
+        description: "Set the background color (CSS hex, e.g. #202030).",
+        params: { color: { type: "string", required: true } },
+        handler: (p) => {
+          v.setBackground(p.color);
+          return true;
+        }
+      },
+      set_scale: {
+        description: "Set the uniform model scale.",
+        params: { scale: { type: "number", required: true, min: 1e-3, max: 1e3 } },
+        requiresModel: true,
+        handler: (p) => {
+          v.setModelScale(p.scale);
+          return true;
+        }
+      },
+      // --- transforms ---
+      center: { description: "Center the model's centroid at the origin.", requiresModel: true, handler: () => {
+        v.recenterModel();
+        return true;
+      } },
+      ground: { description: "Drop the model so its lowest point sits on Y=0.", requiresModel: true, handler: () => {
+        v.groundModel();
+        return true;
+      } },
+      auto_orient: { description: "Auto-orient the model via PCA (smallest axis \u2192 up).", requiresModel: true, handler: () => {
+        v.autoOrientModel();
+        return true;
+      } },
+      rotate: {
+        description: "Rotate the model by an angle (degrees) around an axis.",
+        params: {
+          axis: { type: "string", required: true, enum: ["x", "y", "z"] },
+          degrees: { type: "number", required: true }
+        },
+        requiresModel: true,
+        handler: (p) => {
+          v.rotateModel(p.axis, p.degrees);
+          return true;
+        }
+      },
+      simplify: {
+        description: "Simplify the mesh to a fraction of its vertices (0-1). Returns {before, after} vertex counts.",
+        params: { ratio: { type: "number", required: true, min: 0.01, max: 1 } },
+        requiresModel: true,
+        handler: async (p) => {
+          const r = await v.simplifyModel(p.ratio);
+          return r;
+        }
+      },
+      recompute_normals: { description: "Merge vertices and recompute smooth normals.", requiresModel: true, handler: () => {
+        v.recomputeNormals();
+        return true;
+      } },
+      reset: { description: "Undo all transforms (restore original geometry).", requiresModel: true, handler: () => {
+        v.resetModel();
+        return true;
+      } },
+      // --- animation ---
+      play_animation: {
+        description: "Play the animation clip at the given index.",
+        params: { index: { type: "number", default: 0, min: 0 } },
+        requiresModel: true,
+        handler: (p) => {
+          if (!v.hasAnimations()) throw new Error("Model has no animation clips");
+          v.playAnimation(p.index);
+          return true;
+        }
+      },
+      pause_animation: { description: "Pause the active animation.", requiresModel: true, handler: () => {
+        v.setAnimationPlaying(false);
+        return true;
+      } },
+      set_animation_time: {
+        description: "Seek the active animation to a time (seconds).",
+        params: { seconds: { type: "number", required: true, min: 0 } },
+        requiresModel: true,
+        handler: (p) => {
+          if (!v.hasAnimations()) throw new Error("Model has no animation clips");
+          v.setAnimationTime(p.seconds);
+          return true;
+        }
+      },
+      set_animation_speed: {
+        description: "Set animation playback speed multiplier.",
+        params: { multiplier: { type: "number", required: true, min: 0 } },
+        requiresModel: true,
+        handler: (p) => {
+          v.setAnimationSpeed(p.multiplier);
+          return true;
+        }
+      },
+      // --- measurement ---
+      measure: {
+        description: "Measure the distance between two world-space points; draws the line.",
+        params: {
+          a: { type: "array", required: true },
+          b: { type: "array", required: true }
+        },
+        requiresModel: true,
+        handler: (p) => {
+          if (p.a.length !== 3 || p.b.length !== 3) throw new Error("a and b must be [x,y,z]");
+          return { distance: v.measureBetween(p.a, p.b) };
+        }
+      },
+      set_measure_mode: {
+        description: "Enable/disable interactive click-to-measure mode.",
+        params: { enabled: { type: "boolean", required: true } },
+        handler: (p) => {
+          const cur = !!v._measureMode;
+          if (cur !== p.enabled) v.toggleMeasureMode();
+          return v._measureMode;
+        }
+      },
+      // --- export ---
+      export_obj: { description: "Export the model as OBJ text.", requiresModel: true, handler: () => v.exportAsOBJ() },
+      export_glb: {
+        description: "Export the model as a GLB (binary glTF); returns a base64 data URL.",
+        requiresModel: true,
+        handler: async () => {
+          const buf = await v.exportAsGLB();
+          if (!buf) return null;
+          const bytes = new Uint8Array(buf);
+          let bin = "";
+          for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+          return "data:model/gltf-binary;base64," + btoa(bin);
         }
       }
-      const options = { relatedFiles, sourcePath };
-      await this._viewer.loadModel(url, loadExtension, options);
-      this._exportPanel.setAsset(
-        asset,
-        this._fileBrowser.currentPath
-      );
-      this._elements.infoSize.textContent = this._formatSize(asset.size);
-      this._elements.viewerInfo.style.display = "flex";
-      this._resetScaleControl();
-      this._pushRecentFile(asset);
-      if (this._resetRenderModeUI) this._resetRenderModeUI();
-      this._updateStatus(`Loaded: ${asset.name}${asset.extension}`);
-    } catch (err2) {
-      console.error("Failed to load asset:", err2);
-      this._showToast(`Failed to load: ${err2.message}`, "error");
-      this._elements.viewerPlaceholder.style.display = "flex";
-      this._updateStatus(`Error loading asset`);
-    } finally {
-      this._elements.loadingOverlay.style.display = "none";
-    }
-  }
-  /**
-   * Update the viewer info bar with model statistics.
-   */
-  _updateViewerInfo(stats) {
-    this._elements.infoVertices.textContent = `${stats.vertices.toLocaleString()} vertices`;
-    this._elements.infoFaces.textContent = `${stats.faces.toLocaleString()} faces`;
-    if (stats.width !== void 0) {
-      const fmt = (v) => v === 0 ? "0" : v < 0.01 ? v.toExponential(1) : v < 10 ? v.toFixed(2) : v < 1e3 ? v.toFixed(1) : v.toFixed(0);
-      document.getElementById("info-dims").textContent = `${fmt(stats.width)} \xD7 ${fmt(stats.height)} \xD7 ${fmt(stats.depth)}`;
-    }
-  }
-  /**
-   * Update the status text in the top bar.
-   */
-  _updateStatus(text) {
-    this._elements.statusText.textContent = text;
-  }
-  /**
-   * Show a toast notification.
-   */
-  _showToast(message, type = "info") {
-    const toast = document.createElement("div");
-    toast.className = `toast ${type}`;
-    toast.textContent = message;
-    this._elements.toastContainer.appendChild(toast);
-    setTimeout(() => {
-      toast.classList.add("fade-out");
-      setTimeout(() => toast.remove(), 300);
-    }, 4e3);
-  }
-  /**
-   * Show the full-screen loading overlay with a custom message.
-   * Returns a function to hide it.
-   */
-  _showProcessing(message) {
-    const overlay = this._elements.loadingOverlay;
-    const msgEl = document.getElementById("loading-message");
-    msgEl.textContent = message;
-    overlay.style.display = "flex";
-    return () => {
-      overlay.style.display = "none";
-      msgEl.textContent = "Loading asset...";
     };
-  }
-  /**
-   * Format file size for display.
-   */
-  _formatSize(bytes) {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  }
-  /** Escape HTML special characters for safe interpolation. */
-  _escapeHtml(text) {
-    const div = document.createElement("div");
-    div.textContent = text == null ? "" : String(text);
-    return div.innerHTML;
-  }
-  /**
-   * Initialize the sidebar search/filter input.
-   */
-  _initSearchFilter() {
-    const input = document.getElementById("search-filter");
-    this._fileBrowser.setFilterInput(input);
-  }
-  /**
-   * Initialize the sort selector.
-   */
-  _initSortSelect() {
-    const select = document.getElementById("sort-select");
-    select.value = this._fileBrowser.getSortMode();
-    select.addEventListener("change", () => {
-      this._fileBrowser.setSortMode(select.value);
-    });
-  }
-  /**
-   * Initialize the list/grid view mode toggle.
-   */
-  _initViewModeToggle() {
-    const btnList = document.getElementById("btn-view-list");
-    const btnGrid = document.getElementById("btn-view-grid");
-    const update = (mode) => {
-      this._fileBrowser.setViewMode(mode);
-      btnList.classList.toggle("active", mode === "list");
-      btnGrid.classList.toggle("active", mode === "grid");
-    };
-    btnList.addEventListener("click", () => update("list"));
-    btnGrid.addEventListener("click", () => update("grid"));
-    const saved = this._fileBrowser.getViewMode();
-    if (saved === "grid") update("grid");
-  }
-  /**
-   * Initialize the Orbit / FPV navigation mode toggle.
-   */
-  _initNavModeToggle() {
-    const btn = document.getElementById("nav-mode-toggle");
-    const iconOrbit = document.getElementById("nav-icon-orbit");
-    const iconFpv = document.getElementById("nav-icon-fpv");
-    const updateIcon = (mode) => {
-      if (mode === "fpv") {
-        iconOrbit.style.display = "none";
-        iconFpv.style.display = "block";
-        btn.classList.add("active");
-        btn.title = "Switch to Orbit mode";
-      } else {
-        iconOrbit.style.display = "block";
-        iconFpv.style.display = "none";
-        btn.classList.remove("active");
-        btn.title = "Switch to FPV mode";
-      }
-    };
-    btn.addEventListener("click", () => {
-      const current = this._viewer.getNavMode();
-      const next = current === "orbit" ? "fpv" : "orbit";
-      this._viewer.setNavMode(next);
-      updateIcon(next);
-      this._showToast(
-        next === "fpv" ? "FPV mode: W/Shift forward, S/Ctrl backward, A/D yaw, E/Q altitude, mouse drag to look" : "Orbit mode: mouse to orbit/zoom/pan",
-        "info"
-      );
-    });
-    this._elements.viewerContainer.addEventListener("navmodechange", (e) => {
-      updateIcon(e.detail.mode);
-    });
-  }
-  /**
-   * Initialize the grid visibility toggle.
-   */
-  _initGridToggle() {
-    const btn = document.getElementById("grid-toggle");
-    btn.addEventListener("click", () => {
-      const current = this._viewer.getGridVisible();
-      this._viewer.setGridVisible(!current);
-      btn.classList.toggle("active", !current);
-    });
-  }
-  /**
-   * Initialize the axis helper toggle.
-   */
-  _initAxisToggle() {
-    const btn = document.getElementById("axis-toggle");
-    btn.addEventListener("click", () => {
-      const current = this._viewer.getAxisVisible();
-      this._viewer.setAxisVisible(!current);
-      btn.classList.toggle("active", !current);
-    });
-  }
-  /**
-   * Initialize the wireframe toggle button.
-   */
-  _initWireframeToggle() {
-    const btn = document.getElementById("rendermode-toggle");
-    if (!btn) return;
-    const badge = document.getElementById("rendermode-badge");
-    const modes = [
-      { mode: "textured", label: "T", title: "Render mode: mesh + texture (click \u2192 mesh)" },
-      { mode: "solid", label: "M", title: "Render mode: mesh only (click \u2192 wireframe)" },
-      { mode: "wireframe", label: "W", title: "Render mode: wireframe (click \u2192 mesh + texture)" }
-    ];
-    let idx = 0;
-    const apply = () => {
-      const m = modes[idx];
-      this._viewer.setRenderMode(m.mode);
-      if (badge) badge.textContent = m.label;
-      btn.title = m.title;
-      btn.classList.toggle("active", m.mode !== "textured");
-    };
-    btn.addEventListener("click", () => {
-      idx = (idx + 1) % modes.length;
-      apply();
-    });
-    this._resetRenderModeUI = () => {
-      idx = 0;
-      if (badge) badge.textContent = modes[0].label;
-      btn.title = modes[0].title;
-      btn.classList.remove("active");
-    };
-  }
-  /**
-   * Initialize the normals visualization toggle.
-   */
-  _initNormalsToggle() {
-    const btn = document.getElementById("normals-toggle");
-    btn.addEventListener("click", () => {
-      const current = this._viewer.getNormalsVisible();
-      this._viewer.setNormalsVisible(!current);
-      btn.classList.toggle("active", !current);
-    });
-  }
-  /**
-   * Initialize the background color swatches.
-   */
-  _initBackgroundSwatches() {
-    const swatches = document.querySelectorAll("#bg-swatches .bg-swatch");
-    swatches.forEach((swatch) => {
-      swatch.addEventListener("click", () => {
-        const color = swatch.dataset.color;
-        this._viewer.setBackground(color);
-        swatches.forEach((s) => s.classList.remove("active"));
-        swatch.classList.add("active");
-      });
-    });
-  }
-  /**
-   * Initialize the model scale slider control.
-   */
-  _initScaleControl() {
-    const slider = document.getElementById("model-scale");
-    const display = document.getElementById("model-scale-val");
-    const container = document.getElementById("scale-control");
-    this._scaleSlider = slider;
-    this._scaleDisplay = display;
-    this._scaleContainer = container;
-    slider.addEventListener("input", (e) => {
-      const val = parseFloat(e.target.value);
-      display.textContent = `${val.toFixed(2)}\xD7`;
-      this._viewer.setModelScale(val);
-      this._updateScaleSliderVisual(val);
-    });
-    this._updateScaleSliderVisual(parseFloat(slider.value));
-  }
-  /**
-   * Reset the scale control to 1.0 and show it.
-   */
-  _resetScaleControl() {
-    this._scaleSlider.value = 1;
-    this._scaleDisplay.textContent = "1.00\xD7";
-    this._scaleContainer.style.display = "flex";
-    this._viewer.setModelScale(1);
-    this._updateScaleSliderVisual(1);
-  }
-  /**
-   * Update scale slider visual fill based on current value.
-   */
-  _updateScaleSliderVisual(value) {
-    if (!this._scaleSlider) return;
-    const min = parseFloat(this._scaleSlider.min || "0");
-    const max2 = parseFloat(this._scaleSlider.max || "1");
-    const v = Math.min(max2, Math.max(min, value));
-    const pct = (v - min) / (max2 - min) * 100;
-    this._scaleSlider.style.setProperty("--scale-pct", `${pct}%`);
-  }
-  /**
-   * Initialize the mesh simplification (LOD) control.
-   */
-  _initSimplifyControl() {
-    const btn = document.getElementById("btn-simplify");
-    const popover = document.getElementById("simplify-popover");
-    const slider = document.getElementById("simplify-ratio");
-    const ratioDisplay = document.getElementById("simplify-ratio-val");
-    const currentDisplay = document.getElementById("simplify-current");
-    const targetDisplay = document.getElementById("simplify-target");
-    const btnApply = document.getElementById("simplify-apply");
-    const btnCancel = document.getElementById("simplify-cancel");
-    let currentVertCount = 0;
-    const openPopover = () => {
-      currentVertCount = this._viewer.getTotalVertexCount();
-      currentDisplay.textContent = currentVertCount.toLocaleString();
-      slider.value = 50;
-      ratioDisplay.textContent = "50%";
-      targetDisplay.textContent = Math.floor(currentVertCount * 0.5).toLocaleString();
-      popover.style.display = "block";
-    };
-    const closePopover = () => {
-      popover.style.display = "none";
-    };
-    btn.addEventListener("click", () => {
-      if (popover.style.display !== "none") {
-        closePopover();
-      } else {
-        openPopover();
-      }
-    });
-    slider.addEventListener("input", () => {
-      const pct = parseInt(slider.value, 10);
-      ratioDisplay.textContent = `${pct}%`;
-      targetDisplay.textContent = Math.floor(currentVertCount * pct / 100).toLocaleString();
-    });
-    btnCancel.addEventListener("click", closePopover);
-    btnApply.addEventListener("click", async () => {
-      const ratio = parseInt(slider.value, 10) / 100;
-      closePopover();
-      const overlay = this._elements.loadingOverlay;
-      const msgEl = document.getElementById("loading-message");
-      const cancelBtn = document.getElementById("loading-cancel-btn");
-      msgEl.textContent = "Simplifying mesh\u2026";
-      overlay.style.display = "flex";
-      const abortController = new AbortController();
-      cancelBtn.style.display = "inline-block";
-      cancelBtn.onclick = () => {
-        abortController.abort();
-        cancelBtn.textContent = "Cancelling\u2026";
-        cancelBtn.disabled = true;
-      };
-      try {
-        const result = await this._viewer.simplifyModel(ratio, abortController.signal);
-        if (result.cancelled) {
-          this._showToast("Simplification cancelled", "info");
-        } else {
-          this._showToast(
-            `Simplified: ${result.before.toLocaleString()} \u2192 ${result.after.toLocaleString()} vertices`,
-            "success"
-          );
-        }
-      } catch (err2) {
-        this._showToast(`Simplification failed: ${err2.message}`, "error");
-      } finally {
-        overlay.style.display = "none";
-        msgEl.textContent = "Loading asset...";
-        cancelBtn.style.display = "none";
-        cancelBtn.textContent = "Cancel";
-        cancelBtn.disabled = false;
-        cancelBtn.onclick = null;
-      }
-    });
-  }
-  /**
-   * Initialize the texture folder picker.
-   * Opens the folder browser modal. When a folder is selected,
-   * scans it for textures and applies them to the current model.
-   */
-  _initTextureFolderPicker() {
-    const btn = document.getElementById("texture-folder-btn");
-    btn.addEventListener("click", () => {
-      const modal = document.getElementById("folder-modal");
-      const pathDisplay = document.getElementById("folder-modal-path");
-      const listContainer = document.getElementById("folder-modal-list");
-      const nameInput = document.getElementById("modal-name-input");
-      const btnSave = document.getElementById("folder-modal-select");
-      const btnCancel = document.getElementById("folder-modal-cancel");
-      const btnClose = document.getElementById("folder-modal-close");
-      const headerEl = modal.querySelector(".modal-header h3");
-      const filenameRow = modal.querySelector(".modal-filename");
-      const origTitle = headerEl.textContent;
-      const origBtnText = btnSave.textContent;
-      headerEl.textContent = "Select texture folder";
-      btnSave.textContent = "Apply textures";
-      filenameRow.style.display = "none";
-      let currentPath = this._fileBrowser.currentPath || "";
-      const loadFolder = async (path) => {
-        try {
-          const url = path ? `/api/browse?path=${encodeURIComponent(path)}` : "/api/browse";
-          const resp = await fetch(url);
-          if (!resp.ok) throw new Error("Failed to browse");
-          const data = await resp.json();
-          currentPath = data.current_path;
-          pathDisplay.textContent = currentPath;
-          listContainer.innerHTML = "";
-          if (data.parent_path) {
-            const upItem = document.createElement("div");
-            upItem.className = "modal-folder-item go-up";
-            upItem.innerHTML = `<span class="folder-icon">\u25C0</span> ..`;
-            upItem.addEventListener("click", () => loadFolder(data.parent_path));
-            listContainer.appendChild(upItem);
-          }
-          for (const folder of data.folders) {
-            const item = document.createElement("div");
-            item.className = "modal-folder-item";
-            item.innerHTML = `<span class="folder-icon">\u{1F4C1}</span> ${folder.name}`;
-            item.addEventListener("click", () => loadFolder(folder.path));
-            listContainer.appendChild(item);
-          }
-        } catch (err2) {
-          listContainer.innerHTML = `<div class="empty-state">Error: ${err2.message}</div>`;
-        }
-      };
-      const closeAndRestore = () => {
-        modal.style.display = "none";
-        headerEl.textContent = origTitle;
-        btnSave.textContent = origBtnText;
-        filenameRow.style.display = "";
-        btnSave.removeEventListener("click", onApply);
-        btnCancel.removeEventListener("click", closeAndRestore);
-        btnClose.removeEventListener("click", closeAndRestore);
-      };
-      const onApply = async () => {
-        closeAndRestore();
-        const hide = this._showProcessing("Scanning & applying textures\u2026");
-        try {
-          const scanResp = await fetch("/api/scan_textures", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ path: currentPath })
-          });
-          if (!scanResp.ok) {
-            hide();
-            this._showToast("Failed to scan folder", "error");
-            return;
-          }
-          const scanData = await scanResp.json();
-          if (scanData.count === 0) {
-            hide();
-            this._showToast("No textures found in selected folder", "error");
-            return;
-          }
-          const applied = await this._viewer.applyTextureFolder(scanData.textures);
-          hide();
-          if (applied > 0) {
-            this._showToast(
-              `Applied ${applied} texture(s) from ${scanData.count} found`,
-              "success"
-            );
-          } else {
-            this._showToast(
-              `${scanData.count} textures found but none matched model materials`,
-              "info"
-            );
-          }
-        } catch (err2) {
-          hide();
-          this._showToast(`Texture loading failed: ${err2.message}`, "error");
-        }
-      };
-      btnSave.addEventListener("click", onApply);
-      btnCancel.addEventListener("click", closeAndRestore);
-      btnClose.addEventListener("click", closeAndRestore);
-      modal.style.display = "flex";
-      loadFolder(currentPath);
-    });
-  }
-  /**
-   * Initialize the material inspector panel.
-   *
-   * Architecture note: each material card stores a live reference to the
-   * THREE.Material object. The property rows use data-attributes that map
-   * directly to material properties. This means a future editor only needs
-   * to swap the value <span> with a <input>/<slider> and call
-   * material[prop] = newValue — no data model changes needed.
-   */
-  _initMaterialsPanel() {
-    const toggleBtn = document.getElementById("materials-toggle");
-    const panel = document.getElementById("materials-panel");
-    const listContainer = document.getElementById("materials-list");
-    const countDisplay = document.getElementById("materials-count");
-    const header = panel.querySelector(".light-panel-header");
-    let outsideListener = null;
-    const closePanel = () => {
-      panel.style.display = "none";
-      toggleBtn.classList.remove("active");
-      if (outsideListener) {
-        document.removeEventListener("mousedown", outsideListener, true);
-        outsideListener = null;
-      }
-    };
-    toggleBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const visible = panel.style.display !== "none";
-      if (visible) {
-        closePanel();
-      } else {
-        this._renderMaterialsList(listContainer, countDisplay);
-        panel.style.display = "flex";
-        toggleBtn.classList.add("active");
-        setTimeout(() => {
-          outsideListener = (ev) => {
-            if (!panel.contains(ev.target) && !toggleBtn.contains(ev.target)) {
-              closePanel();
-            }
-          };
-          document.addEventListener("mousedown", outsideListener, true);
-        }, 0);
-      }
-    });
-    let isDragging = false;
-    let dragOffsetX = 0;
-    let dragOffsetY = 0;
-    header.addEventListener("mousedown", (e) => {
-      isDragging = true;
-      dragOffsetX = e.clientX - panel.offsetLeft;
-      dragOffsetY = e.clientY - panel.offsetTop;
-      document.body.style.userSelect = "none";
-      e.preventDefault();
-    });
-    document.addEventListener("mousemove", (e) => {
-      if (!isDragging) return;
-      panel.style.left = `${e.clientX - dragOffsetX}px`;
-      panel.style.top = `${e.clientY - dragOffsetY}px`;
-    });
-    document.addEventListener("mouseup", () => {
-      if (isDragging) {
-        isDragging = false;
-        document.body.style.userSelect = "";
-      }
-    });
-  }
-  /**
-   * Render the materials list into the panel.
-   * Each card shows material properties and the meshes using it.
-   * Data-attributes on property rows enable future editing.
-   */
-  _renderMaterialsList(container, countDisplay) {
-    const materials = this._viewer.getMaterialsInfo();
-    container.innerHTML = "";
-    countDisplay.textContent = `(${materials.length})`;
-    if (materials.length === 0) {
-      container.innerHTML = '<div class="empty-state">No materials found</div>';
-      return;
-    }
-    for (const mat of materials) {
-      const card = document.createElement("div");
-      card.className = "mat-card";
-      card._materialRef = mat.material;
-      card._meshRefs = mat.meshes;
-      const meshNames = mat.meshes.map((m) => m.name || "unnamed").slice(0, 3).join(", ");
-      const meshExtra = mat.meshes.length > 3 ? ` +${mat.meshes.length - 3} more` : "";
-      card.innerHTML = `
-                <div class="mat-card-header">
-                    <div class="mat-color-swatch" style="background:${mat.color};"></div>
-                    <div class="mat-card-name" title="${mat.name}">${mat.name}</div>
-                    <div class="mat-card-type">${mat.type.replace("Mesh", "").replace("Material", "")}</div>
-                </div>
-                <div class="mat-props">
-                    <div class="mat-prop" data-prop="color">
-                        <span class="mat-prop-label">Color</span>
-                        <span class="mat-prop-value">${mat.color}</span>
-                    </div>
-                    <div class="mat-prop" data-prop="roughness">
-                        <span class="mat-prop-label">Rough</span>
-                        <span class="mat-prop-value">${mat.roughness.toFixed(2)}</span>
-                    </div>
-                    <div class="mat-prop" data-prop="metalness">
-                        <span class="mat-prop-label">Metal</span>
-                        <span class="mat-prop-value">${mat.metalness.toFixed(2)}</span>
-                    </div>
-                    <div class="mat-prop" data-prop="opacity">
-                        <span class="mat-prop-label">Alpha</span>
-                        <span class="mat-prop-value">${mat.opacity.toFixed(2)}</span>
-                    </div>
-                    <div class="mat-prop">
-                        <span class="mat-prop-label">Texture</span>
-                        <span class="mat-prop-value ${mat.hasMap ? "has-texture" : ""}">${mat.hasMap ? "Yes" : "No"}</span>
-                    </div>
-                    <div class="mat-prop">
-                        <span class="mat-prop-label">Normal</span>
-                        <span class="mat-prop-value ${mat.hasNormalMap ? "has-texture" : ""}">${mat.hasNormalMap ? "Yes" : "No"}</span>
-                    </div>
-                </div>
-                <div class="mat-meshes">${mat.meshes.length} mesh${mat.meshes.length !== 1 ? "es" : ""}: ${meshNames}${meshExtra}</div>
-            `;
-      container.appendChild(card);
-    }
-  }
-  /**
-   * Initialize the light control panel: toggle, sliders, reset.
-   */
-  _initLightControls() {
-    const toggleBtn = document.getElementById("light-toggle");
-    const panel = document.getElementById("light-panel");
-    const sliders = {
-      azimuth: document.getElementById("light-azimuth"),
-      elevation: document.getElementById("light-elevation"),
-      keyIntensity: document.getElementById("light-key-intensity"),
-      fillIntensity: document.getElementById("light-fill-intensity"),
-      ambientIntensity: document.getElementById("light-ambient-intensity"),
-      exposure: document.getElementById("light-exposure")
-    };
-    const displays = {
-      azimuth: document.getElementById("light-azimuth-val"),
-      elevation: document.getElementById("light-elevation-val"),
-      keyIntensity: document.getElementById("light-key-val"),
-      fillIntensity: document.getElementById("light-fill-val"),
-      ambientIntensity: document.getElementById("light-ambient-val"),
-      exposure: document.getElementById("light-exposure-val")
-    };
-    const defaults = {
-      azimuth: 45,
-      elevation: 60,
-      keyIntensity: 1.2,
-      fillIntensity: 0.5,
-      ambientIntensity: 0.3,
-      exposure: 1.2
-    };
-    let outsideListener = null;
-    const closePanel = () => {
-      panel.style.display = "none";
-      toggleBtn.classList.remove("active");
-      if (outsideListener) {
-        document.removeEventListener("mousedown", outsideListener, true);
-        outsideListener = null;
-      }
-    };
-    toggleBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const visible = panel.style.display !== "none";
-      if (visible) {
-        closePanel();
-      } else {
-        panel.style.display = "block";
-        toggleBtn.classList.add("active");
-        setTimeout(() => {
-          outsideListener = (ev) => {
-            if (!panel.contains(ev.target) && ev.target !== toggleBtn) {
-              closePanel();
-            }
-          };
-          document.addEventListener("mousedown", outsideListener, true);
-        }, 0);
-      }
-    });
-    sliders.azimuth.addEventListener("input", (e) => {
-      const val = parseFloat(e.target.value);
-      displays.azimuth.textContent = `${val}\xB0`;
-      this._viewer.setKeyLightAzimuth(val);
-    });
-    sliders.elevation.addEventListener("input", (e) => {
-      const val = parseFloat(e.target.value);
-      displays.elevation.textContent = `${val}\xB0`;
-      this._viewer.setKeyLightElevation(val);
-    });
-    sliders.keyIntensity.addEventListener("input", (e) => {
-      const val = parseFloat(e.target.value);
-      displays.keyIntensity.textContent = val.toFixed(2);
-      this._viewer.setKeyLightIntensity(val);
-    });
-    sliders.fillIntensity.addEventListener("input", (e) => {
-      const val = parseFloat(e.target.value);
-      displays.fillIntensity.textContent = val.toFixed(2);
-      this._viewer.setFillLightIntensity(val);
-    });
-    sliders.ambientIntensity.addEventListener("input", (e) => {
-      const val = parseFloat(e.target.value);
-      displays.ambientIntensity.textContent = val.toFixed(2);
-      this._viewer.setAmbientIntensity(val);
-    });
-    sliders.exposure.addEventListener("input", (e) => {
-      const val = parseFloat(e.target.value);
-      displays.exposure.textContent = val.toFixed(2);
-      this._viewer.setExposure(val);
-    });
-    document.getElementById("light-reset").addEventListener("click", () => {
-      for (const [key, defaultVal] of Object.entries(defaults)) {
-        sliders[key].value = defaultVal;
-        sliders[key].dispatchEvent(new Event("input"));
-      }
-    });
-  }
-  /**
-   * Initialize sidebar resize drag behavior.
-   */
-  /**
-   * Initialize the Save As modal — opened by the Export button.
-   * Lets user browse for a folder and set a filename, then saves.
-   */
-  _initSaveAsModal() {
-    const modal = document.getElementById("folder-modal");
-    const pathDisplay = document.getElementById("folder-modal-path");
-    const listContainer = document.getElementById("folder-modal-list");
-    const nameInput = document.getElementById("modal-name-input");
-    const btnSave = document.getElementById("folder-modal-select");
-    const btnCancel = document.getElementById("folder-modal-cancel");
-    const btnClose = document.getElementById("folder-modal-close");
-    const exportBtn = document.getElementById("export-btn");
-    let currentModalPath = "";
-    const extLabel = document.querySelector(".modal-ext");
-    const formatHint = document.getElementById("format-hint");
-    const formatBtns = document.querySelectorAll("#export-format-toggle .format-btn");
-    let selectedFormat = "glb";
-    const FORMAT_HINTS = {
-      original: "Copy source file(s) as-is",
-      obj: "Geometry only \u2014 no materials or textures",
-      glb: "Single file \xB7 geometry + materials + textures"
-    };
-    formatBtns.forEach((btn) => {
-      btn.addEventListener("click", () => {
-        formatBtns.forEach((b) => b.classList.remove("active"));
-        btn.classList.add("active");
-        selectedFormat = btn.dataset.format;
-        formatHint.textContent = FORMAT_HINTS[selectedFormat] || "";
-        updateFilenameForFormat();
-      });
-    });
-    const updateFilenameForFormat = () => {
-      const asset = this._exportPanel._currentAsset;
-      const baseName = asset ? asset.name : "model";
-      if (selectedFormat === "glb") {
-        nameInput.value = baseName + ".glb";
-        extLabel.textContent = "";
-      } else if (selectedFormat === "obj") {
-        nameInput.value = baseName + ".obj";
-        extLabel.textContent = "";
-      } else {
-        const ext = asset ? asset.extension : ".obj";
-        nameInput.value = baseName + ext;
-        extLabel.textContent = "";
-      }
-    };
-    const openModal = () => {
-      const asset = this._exportPanel._currentAsset;
-      currentModalPath = this._fileBrowser.currentPath || "";
-      const isModified = this._viewer.isModelModified;
-      if (isModified && selectedFormat === "original") {
-        selectedFormat = "glb";
-        formatBtns.forEach((b) => {
-          b.classList.toggle("active", b.dataset.format === "glb");
-        });
-      }
-      formatBtns.forEach((b) => {
-        if (b.dataset.format === "original") {
-          b.disabled = isModified;
-          b.title = isModified ? "Not available \u2014 model has been modified" : "Keep original format (copy source file)";
-          if (isModified) b.style.opacity = "0.4";
-          else b.style.opacity = "";
-        }
-      });
-      formatHint.textContent = FORMAT_HINTS[selectedFormat] || "";
-      updateFilenameForFormat();
-      modal.style.display = "flex";
-      loadFolder(currentModalPath);
-    };
-    const closeModal = () => {
-      modal.style.display = "none";
-    };
-    const loadFolder = async (path) => {
-      try {
-        const url = path ? `/api/browse?path=${encodeURIComponent(path)}` : "/api/browse";
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error("Failed to browse");
-        const data = await resp.json();
-        currentModalPath = data.current_path;
-        pathDisplay.textContent = currentModalPath;
-        listContainer.innerHTML = "";
-        if (data.parent_path) {
-          const upItem = document.createElement("div");
-          upItem.className = "modal-folder-item go-up";
-          upItem.innerHTML = `<span class="folder-icon">\u25C0</span> ..`;
-          upItem.addEventListener("click", () => loadFolder(data.parent_path));
-          listContainer.appendChild(upItem);
-        }
-        for (const folder of data.folders) {
-          const item = document.createElement("div");
-          item.className = "modal-folder-item";
-          item.innerHTML = `<span class="folder-icon">\u{1F4C1}</span> ${folder.name}`;
-          item.addEventListener("click", () => loadFolder(folder.path));
-          listContainer.appendChild(item);
-        }
-        if (!data.parent_path && data.folders.length === 0) {
-          listContainer.innerHTML = '<div class="empty-state">No accessible folders</div>';
-        }
-      } catch (err2) {
-        listContainer.innerHTML = `<div class="empty-state">Error: ${err2.message}</div>`;
-      }
-    };
-    exportBtn.addEventListener("click", openModal);
-    btnCancel.addEventListener("click", closeModal);
-    btnClose.addEventListener("click", closeModal);
-    modal.addEventListener("click", (e) => {
-      if (e.target === modal) closeModal();
-    });
-    btnSave.addEventListener("click", async () => {
-      const fullName = nameInput.value.trim();
-      if (!fullName) {
-        this._showToast("Please enter a file name", "error");
-        nameInput.focus();
-        return;
-      }
-      const dotIdx = fullName.lastIndexOf(".");
-      const newName = dotIdx > 0 ? fullName.substring(0, dotIdx) : fullName;
-      closeModal();
-      if (selectedFormat === "glb") {
-        await this._exportGLB(currentModalPath, newName);
-      } else if (selectedFormat === "obj") {
-        document.getElementById("asset-name-input").value = newName;
-        document.getElementById("export-path-input").value = currentModalPath;
-        await this._exportPanel._onExport();
-      } else {
-        document.getElementById("asset-name-input").value = newName;
-        document.getElementById("export-path-input").value = currentModalPath;
-        await this._exportPanel._onExport();
-      }
-    });
-    nameInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") btnSave.click();
-    });
-    document.addEventListener("keydown", (e) => {
-      const isSaveKey = e.key === "s" || e.key === "S";
-      if (!isSaveKey || !e.ctrlKey && !e.metaKey || e.altKey) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (!this._exportPanel._currentAsset) {
-        this._showToast("No asset selected", "error");
-        return;
-      }
-      const modalOpen = modal.style.display !== "none";
-      if (modalOpen) {
-        btnSave.click();
-      } else {
-        openModal();
-      }
-    });
-  }
-  /**
-   * Export current model as GLB (binary glTF) with embedded materials & textures.
-   * The GLB is generated client-side by Three.js GLTFExporter, then sent
-   * to the backend as binary to write to the chosen directory.
-   */
-  async _exportGLB(targetDir, baseName) {
-    const hide = this._showProcessing("Exporting GLB\u2026");
-    try {
-      const glbData = await this._viewer.exportAsGLB();
-      if (!glbData) {
-        hide();
-        this._showToast("No model to export", "error");
-        return;
-      }
-      const blob = new Blob([glbData], { type: "model/gltf-binary" });
-      const formData = new FormData();
-      formData.append("file", blob, `${baseName}.glb`);
-      formData.append("target_dir", targetDir);
-      formData.append("file_name", `${baseName}.glb`);
-      const response = await fetch("/api/export_glb", {
-        method: "POST",
-        body: formData
-      });
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || "GLB export failed");
-      }
-      const result = await response.json();
-      hide();
-      this._showToast(
-        `Exported ${baseName}.glb (${this._formatSize(result.file_size)}) to ${result.output_path}`,
-        "success"
-      );
-      this._fileBrowser.browse(this._fileBrowser.currentPath);
-    } catch (err2) {
-      hide();
-      console.error("GLB export error:", err2);
-      this._showToast(`Export failed: ${err2.message}`, "error");
-    }
-  }
-  _initSidebarResize() {
-    const handle = this._elements.sidebarResize;
-    const sidebar = this._elements.sidebar;
-    let isResizing = false;
-    handle.addEventListener("mousedown", (e) => {
-      isResizing = true;
-      handle.classList.add("active");
-      document.body.style.cursor = "col-resize";
-      document.body.style.userSelect = "none";
-      e.preventDefault();
-    });
-    document.addEventListener("mousemove", (e) => {
-      if (!isResizing) return;
-      const newWidth = Math.max(220, Math.min(600, e.clientX));
-      sidebar.style.width = `${newWidth}px`;
-    });
-    document.addEventListener("mouseup", () => {
-      if (isResizing) {
-        isResizing = false;
-        handle.classList.remove("active");
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-      }
-    });
-  }
-  // ==========================================================
-  // Animation controls (017)
-  // ==========================================================
-  _initAnimationControls() {
-    const bar = document.getElementById("animation-bar");
-    const select = document.getElementById("anim-clip-select");
-    const playBtn = document.getElementById("anim-play-btn");
-    const scrub = document.getElementById("anim-scrub");
-    const speed = document.getElementById("anim-speed");
-    const timeLabel = document.getElementById("anim-time");
-    if (!bar) return;
-    this._elements.viewerContainer.addEventListener("animations", (e) => {
-      const clips = e.detail.clips || [];
-      if (clips.length === 0) {
-        bar.style.display = "none";
-        return;
-      }
-      bar.style.display = "flex";
-      select.innerHTML = clips.map((c) => `<option value="${c.index}">${this._escapeHtml(c.name)}</option>`).join("");
-      select.style.display = clips.length > 1 ? "" : "none";
-      scrub.value = 0;
-      speed.value = "1";
-      this._setAnimPlayIcon(true);
-    });
-    select.addEventListener("change", () => {
-      this._viewer.playAnimation(parseInt(select.value, 10));
-      this._setAnimPlayIcon(true);
-    });
-    playBtn.addEventListener("click", () => {
-      const playing = this._viewer.toggleAnimationPlay();
-      this._setAnimPlayIcon(playing);
-    });
-    scrub.addEventListener("input", () => {
-      const dur = this._viewer.getAnimationDuration();
-      this._viewer.setAnimationTime(parseFloat(scrub.value) / 100 * dur);
-      this._setAnimPlayIcon(false);
-    });
-    speed.addEventListener("change", () => {
-      this._viewer.setAnimationSpeed(parseFloat(speed.value));
-    });
-    setInterval(() => {
-      if (bar.style.display === "none" || !this._viewer.hasAnimations()) return;
-      const dur = this._viewer.getAnimationDuration();
-      const t = this._viewer.getAnimationTime();
-      if (dur > 0 && document.activeElement !== scrub) {
-        scrub.value = Math.min(100, t / dur * 100);
-      }
-      timeLabel.textContent = `${t.toFixed(1)}s / ${dur.toFixed(1)}s`;
-    }, 100);
-  }
-  _setAnimPlayIcon(playing) {
-    const playBtn = document.getElementById("anim-play-btn");
-    if (!playBtn) return;
-    playBtn.textContent = playing ? "\u23F8" : "\u25B6";
-    playBtn.title = playing ? "Pause" : "Play";
-  }
-  // ==========================================================
-  // Measurement (020)
-  // ==========================================================
-  _initMeasurement() {
-    const btn = document.getElementById("measure-toggle");
-    if (!btn) return;
-    btn.addEventListener("click", () => {
-      const active = this._viewer.toggleMeasureMode();
-      btn.classList.toggle("active", active);
-      this._showToast(
-        active ? "Measure: click two points on the model to measure distance" : "Measure mode off",
-        "info"
-      );
-    });
-  }
-  // ==========================================================
-  // Drag-and-drop load (019)
-  // ==========================================================
-  _initDragAndDrop() {
-    const zone = document.getElementById("viewer-container");
-    if (!zone) return;
-    const supported = [".obj", ".fbx", ".gltf", ".glb", ".stl", ".ply", ".dae", ".3mf", ".usdz"];
-    let clearTimer = null;
-    const setDrag = () => {
-      zone.classList.add("drag-over");
-      if (clearTimer) clearTimeout(clearTimer);
-      clearTimer = setTimeout(() => zone.classList.remove("drag-over"), 120);
-    };
-    const clearDrag = () => {
-      if (clearTimer) {
-        clearTimeout(clearTimer);
-        clearTimer = null;
-      }
-      zone.classList.remove("drag-over");
-    };
-    const onDragOver = (e) => {
-      if (e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files")) {
-        e.preventDefault();
-        setDrag();
-      }
-    };
-    const onDrop = async (e) => {
-      e.preventDefault();
-      clearDrag();
-      const files = Array.from(e.dataTransfer.files || []);
-      if (files.length === 0) return;
-      const file = files[0];
-      const ext = "." + file.name.split(".").pop().toLowerCase();
-      if (!supported.includes(ext)) {
-        this._showToast(`Unsupported format for drag-drop: ${ext}`, "error");
-        return;
-      }
-      await this._loadDroppedFile(file, ext);
-    };
-    zone.addEventListener("dragover", onDragOver);
-    zone.addEventListener("drop", onDrop);
-    zone.addEventListener("dragleave", (e) => {
-      if (!e.relatedTarget) clearDrag();
-    });
-    window.addEventListener("dragend", clearDrag);
-    window.addEventListener("drop", clearDrag);
-    document.addEventListener("mouseleave", clearDrag);
-  }
-  /**
-   * Load a dropped File directly from an in-memory object URL. This bypasses the
-   * filesystem API (the file may live outside the allowed root), so it is a
-   * genuine local-preview path that respects the sandbox: nothing is written.
-   */
-  async _loadDroppedFile(file, ext) {
-    this._elements.loadingOverlay.style.display = "flex";
-    this._elements.viewerPlaceholder.style.display = "none";
-    let objectUrl = null;
-    try {
-      objectUrl = URL.createObjectURL(file);
-      await this._viewer.loadModel(objectUrl, ext, { relatedFiles: [], sourcePath: file.name });
-      this._elements.infoSize.textContent = this._formatSize(file.size);
-      this._elements.viewerInfo.style.display = "flex";
-      this._resetScaleControl();
-      if (this._resetRenderModeUI) this._resetRenderModeUI();
-      this._updateStatus(`Loaded (dropped): ${file.name}`);
-    } catch (err2) {
-      console.error("Drop load failed:", err2);
-      this._showToast(`Failed to load dropped file: ${err2.message}`, "error");
-      this._elements.viewerPlaceholder.style.display = "flex";
-    } finally {
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-      this._elements.loadingOverlay.style.display = "none";
-    }
-  }
-  // ==========================================================
-  // Recent files (019)
-  // ==========================================================
-  _initRecentFiles() {
-    this._recentKey = "meshvault_recentFiles";
-    this._renderRecentFiles();
-  }
-  _pushRecentFile(asset) {
-    try {
-      const key = asset.is_in_archive ? `${asset.archive_path}!${asset.inner_path}` : asset.path;
-      let recent = JSON.parse(localStorage.getItem(this._recentKey) || "[]");
-      recent = recent.filter((r) => r._key !== key);
-      recent.unshift({
-        _key: key,
-        name: asset.name,
-        extension: asset.extension,
-        path: asset.path,
-        size: asset.size ?? 0,
-        is_in_archive: !!asset.is_in_archive,
-        archive_path: asset.archive_path || null,
-        inner_path: asset.inner_path || null,
-        related_files: asset.related_files || []
-      });
-      recent = recent.slice(0, 12);
-      localStorage.setItem(this._recentKey, JSON.stringify(recent));
-      this._renderRecentFiles();
-    } catch {
-    }
-  }
-  _renderRecentFiles() {
-    const container = document.getElementById("recent-files");
-    if (!container) return;
-    let recent = [];
-    try {
-      recent = JSON.parse(localStorage.getItem(this._recentKey) || "[]");
-    } catch {
-      recent = [];
-    }
-    if (recent.length === 0) {
-      container.style.display = "none";
-      return;
-    }
-    container.style.display = "block";
-    container.innerHTML = `<div class="recent-title">Recent</div>` + recent.map(
-      (r, i) => `<button class="recent-item" data-idx="${i}" title="${this._escapeHtml(r.path)}"><span class="recent-name">${this._escapeHtml(r.name)}</span><span class="recent-ext">${this._escapeHtml(r.extension)}</span></button>`
-    ).join("");
-    container.querySelectorAll(".recent-item").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const idx = parseInt(btn.dataset.idx, 10);
-        this._onAssetSelected(recent[idx]);
-      });
-    });
   }
 };
-document.addEventListener("DOMContentLoaded", () => {
-  window.app = new App();
-});
+
+// frontend/js/viewer/standalone.js
+function createViewer(container, options = {}) {
+  if (!container) throw new Error("createViewer requires a container element");
+  const resolveResource = options.resolveResource || ((ref) => ref);
+  const viewer = new Viewer3D(container, options.onInfoUpdate || (() => {
+  }), {
+    resolveResource
+  });
+  const api = new ViewerControlAPI(viewer, { onEvent: options.onEvent });
+  return {
+    viewer,
+    api,
+    execute: (cmd) => api.execute(cmd),
+    getState: () => api.getState(),
+    getSceneInfo: () => api.getSceneInfo(),
+    listCommands: () => api.listCommands(),
+    on: (event, cb) => api.on(event, cb),
+    /**
+     * Convenience for local file input / drag-drop: load a File without a server.
+     * Creates a temporary object URL, loads, and revokes it after.
+     */
+    loadFile: async (file) => {
+      const ext = "." + file.name.split(".").pop().toLowerCase();
+      const url = URL.createObjectURL(file);
+      try {
+        return await api.execute({
+          action: "load",
+          params: { url, extension: ext, name: file.name }
+        });
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    },
+    destroy: () => {
+      if (typeof api.destroy === "function") api.destroy();
+      if (typeof viewer.destroy === "function") viewer.destroy();
+    }
+  };
+}
+if (typeof window !== "undefined") {
+  window.MeshVaultViewer = { createViewer };
+}
+export {
+  createViewer
+};
 /*! Bundled license information:
 
 three/build/three.module.js:
@@ -45345,4 +43645,4 @@ three/examples/jsm/libs/fflate.module.js:
   version 0.8.2
   *)
 */
-//# sourceMappingURL=app.bundle.js.map
+//# sourceMappingURL=meshvault-viewer.js.map

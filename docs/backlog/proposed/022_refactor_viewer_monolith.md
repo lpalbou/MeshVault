@@ -3,8 +3,15 @@
 **Priority**: Medium
 **Effort**: Large
 **Category**: Architecture / Maintainability
-**Status**: Proposed
+**Status**: Proposed (partially addressed by 025)
 **Created**: 2026-07-05
+
+> Update 2026-07-05: `025` extracted the engine into a decoupled, embeddable core with a
+> control API + standalone bundle (backend coupling removed via an injected resolver), and
+> added a headless harness (`viewer.html`) that guards behavior. What REMAINS for `022` is
+> the physical split of the still-large `viewer_3d.js` (~3.6k lines) into cohesive modules
+> (scene / loaders / texture-matching / transforms / measure / animation / export). The
+> decoupling + harness now make that split much lower-risk.
 
 ## Summary
 

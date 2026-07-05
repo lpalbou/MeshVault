@@ -15,6 +15,10 @@ build/
 !frontend/dist/
 frontend/dist/*.map
 
+# The web/ Pages site: index.html is tracked; the bundle is a build artifact (CI rebuilds it).
+web/meshvault-viewer.js
+web/meshvault-viewer.js.map
+
 # ===========================
 # Virtual environments
 # ===========================

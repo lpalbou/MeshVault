@@ -1,0 +1,32 @@
+# MeshVault
+
+> MeshVault is a local-first 3D asset browser and viewer with an embeddable, server-less
+> viewer core that exposes a self-describing control API designed to be driven by AI
+> agents. An agent can load a model, find and frame its semantic "front", inspect the mesh,
+> take cross-sections, and capture hero shots — all through one JSON command interface.
+
+Key facts for agents:
+- The standalone viewer runs with no backend. Load it as an ES module
+  (`import { createViewer } from ".../meshvault-viewer.js"`) or via the global
+  `window.MeshVaultViewer.createViewer(container)`. A live demo/harness is at `/static/viewer.html`
+  where `window.mv` is the API instance.
+- Everything is driven through ONE entry point: `api.execute({ action, params }) → { ok, result | error }`.
+  It never throws; errors are structured strings. Discover all commands and their parameter
+  schemas at runtime with `api.listCommands()`.
+- Observe state (JSON, no vision needed) with `api.getState()`, `api.getSceneInfo()`, and the
+  `get_bounds` command. Capture what the viewer sees with `screenshot` (returns a PNG data URL).
+- "front/back/left/right" presets are WORLD-AXIS conventions and are often wrong for
+  mis-oriented models. To find a model's real front, use `find_best_view` (scores angles by
+  lighting-independent visible detail and auto-uprights the camera).
+
+## Docs
+
+- [Control API reference (full)](/llms-full.txt): Every command, parameters, return shapes, and worked examples for driving the viewer.
+- [Architecture](/static/../docs/architecture.md): System design, the viewer core / control API / standalone bundle, and the backend.
+- [API Reference (backend REST)](/static/../docs/api.md): The local server's HTTP endpoints and security model.
+- [Getting Started](/static/../docs/getting_started.md): Install, run, UI overview.
+
+## Optional
+
+- [FAQ](/static/../docs/faq.md): Formats, troubleshooting, dev/build notes.
+- [Demo harness](/static/viewer.html): Live standalone viewer exposing `window.mv`.

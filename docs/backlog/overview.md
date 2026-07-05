@@ -22,12 +22,32 @@ Next free ID: **0025**.
 
 | State | Count | IDs |
 |-------|------:|-----|
-| completed | 16 | 001–005, 009–014, 017–021 |
-| planned | 3 | 006, 007, 008 |
-| proposed | 5 | 015, 016, 022, 023, 024 |
+| completed | 17 | 001–005, 009–014, 017–021, 025 |
+| planned | 6 | 006, 007, 008, 026, 027, 029 |
+| proposed | 12 | 015, 016, 022, 023, 024, 028, 030, 031, 032, 033, 034, 035 |
+
+Next free ID: **0036**.
 
 Note: `015` (library index/search) and `016` (tags/collections) were **built then parked**
 (speculative; see `parked/` and each item's history). `021` (offline bundle) is **done**.
+`025` extracted the embeddable viewer core + AI-agent control API; `022` (physical module
+split of `viewer_3d.js`) is now lower-risk and still open.
+
+## 2026 feature research (026–035) — from a 3-agent online study
+
+Ranked highest-value additions (market + AI-agent + web-deploy passes):
+- `026` Compressed glTF decoders (Draco/KTX2/Meshopt) — **top pick**: many real GLBs don't
+  open today. planned/High.
+- `027` HDRI/IBL environment lighting — biggest realism win. planned/High.
+- `029` Structured `describe_scene` report — highest leverage for agents. planned/High.
+- `028` PBR-Neutral tone mapping (S), `030` thin MCP adapter, `031` model-QA command,
+  `032` shareable URL state + embed, `033` scene-graph inspector, `034` CORS-aware load UX,
+  `035` secondary bundle (shadow catcher, section caps, video export, A/B compare, splats…).
+
+**Explicitly NOT recommended (do not build):** WebXR/AR + USDZ AR button, cinematic post-FX
+(DoF/bloom), WebGPU migration, hosted-sharing platform, embedded VLMs, undo/history stacks,
+pixel-based interaction, CORS proxy, generative-AI integrations — poor fit for the local,
+embeddable, agent-controllable identity or low value/high cost.
 
 ---
 
