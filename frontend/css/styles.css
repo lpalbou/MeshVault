@@ -1421,7 +1421,9 @@ html, body {
 .light-panel {
     position: absolute;
     top: 168px;
-    right: 12px;
+    /* Sit left of the toolbar column (like the materials panel) so the panel never
+       covers the toolbar buttons — including its own toggle. */
+    right: 60px;
     width: 240px;
     background: rgba(22, 33, 62, 0.92);
     backdrop-filter: blur(12px);
@@ -1611,6 +1613,168 @@ html, body {
     font-size: 13px;
 }
 
+/* --- Grid thumbnails (014) --- */
+.asset-card-icon {
+    position: relative;
+}
+.asset-card-thumb {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    pointer-events: none;
+}
+.asset-card-thumb.loaded {
+    opacity: 1;
+}
+.asset-card-thumb.loaded + svg,
+.asset-card-icon:has(.asset-card-thumb.loaded) > svg {
+    opacity: 0;
+}
+
+/* --- Sidebar search row + global library search (015/016) --- */
+.search-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+.search-row .search-input {
+    flex: 1;
+}
+.library-search-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border, #2a2a3a);
+    background: rgba(255, 255, 255, 0.02);
+}
+.lib-search-controls {
+    display: flex;
+    gap: 6px;
+}
+.lib-search-controls .search-input {
+    flex: 1;
+}
+.lib-search-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-muted, #8a8a9a);
+}
+.lib-search-results {
+    max-height: 280px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.lib-result {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-areas: "name ext" "loc loc" "tags tags";
+    gap: 2px 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+}
+.lib-result:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+.lib-result-name { grid-area: name; font-weight: 600; }
+.lib-result-ext { grid-area: ext; font-size: 10px; opacity: 0.8; }
+.lib-result-loc { grid-area: loc; font-size: 10px; color: var(--text-muted, #8a8a9a); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-result-tags { grid-area: tags; font-size: 10px; color: #6cc; }
+
+/* --- Recent files (019) --- */
+.recent-files {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border, #2a2a3a);
+}
+.recent-title {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted, #8a8a9a);
+    margin-bottom: 4px;
+}
+.recent-item {
+    display: flex;
+    justify-content: space-between;
+    width: 100%;
+    padding: 4px 6px;
+    background: none;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: 12px;
+    text-align: left;
+}
+.recent-item:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+.recent-ext {
+    opacity: 0.6;
+    font-size: 10px;
+}
+
+/* --- Drag-and-drop (019) --- */
+#viewer-container.drag-over::after {
+    content: "Drop to load model";
+    position: absolute;
+    inset: 12px;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 2px dashed var(--accent, #4a9eff);
+    border-radius: 12px;
+    background: rgba(74, 158, 255, 0.08);
+    color: var(--accent, #4a9eff);
+    font-size: 18px;
+    font-weight: 600;
+    pointer-events: none;
+}
+
+/* --- Animation bar (017) --- */
+.animation-bar {
+    position: absolute;
+    bottom: 64px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: rgba(20, 20, 30, 0.85);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border, #2a2a3a);
+    border-radius: 10px;
+    z-index: 20;
+}
+.anim-play {
+    min-width: 34px;
+    font-size: 14px;
+}
+.anim-scrub {
+    width: 220px;
+}
+.anim-time {
+    font-size: 11px;
+    color: var(--text-muted, #8a8a9a);
+    min-width: 90px;
+    text-align: center;
+}
+.anim-clip, .anim-speed {
+    max-width: 120px;
+}
+
 /* --- Responsive adjustments --- */
 @media (max-width: 768px) {
     :root {
@@ -1625,4 +1789,7 @@ html, body {
     #export-path-input {
         width: 140px;
     }
+
+    .anim-scrub { width: 120px; }
+    .animation-bar { flex-wrap: wrap; max-width: 90vw; }
 }

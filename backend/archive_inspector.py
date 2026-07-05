@@ -74,7 +74,10 @@ from dataclasses import dataclass, field
 
 
 # Supported 3D extensions (duplicated here to avoid circular imports)
-SUPPORTED_3D_EXTENSIONS = {".obj", ".fbx", ".gltf", ".glb", ".stl"}
+SUPPORTED_3D_EXTENSIONS = {
+    ".obj", ".fbx", ".gltf", ".glb", ".stl",
+    ".ply", ".dae", ".3mf", ".usdz",
+}
 
 # Texture and related file extensions
 RELATED_EXTENSIONS = {
@@ -97,6 +100,7 @@ class AssetInfo:
     path: str
     extension: str
     size: int
+    mtime: float = 0.0  # Mirrors file_browser.AssetInfo (archive members: 0)
     is_in_archive: bool = False
     archive_path: Optional[str] = None
     inner_path: Optional[str] = None
@@ -109,6 +113,15 @@ class ArchiveInspector:
     def __init__(self):
         # Cache of temporary extraction directories: archive_path -> temp_dir
         self._temp_dirs: dict[str, str] = {}
+        # A single stable base directory for all extractions this process makes.
+        # Exposing one known location lets the security PathGuard allow-list exactly
+        # this server-controlled path (and nothing else under the system temp dir).
+        self._base_dir: str = tempfile.mkdtemp(prefix="meshvault_extract_")
+
+    @property
+    def base_dir(self) -> str:
+        """Stable base directory that contains all per-archive extraction dirs."""
+        return self._base_dir
 
     # Format preference order: higher index = preferred when duplicates exist.
     # When the same model ships as both FBX and OBJ (common in asset packs),
@@ -238,6 +251,11 @@ class ArchiveInspector:
             except Exception:
                 pass
         self._temp_dirs.clear()
+        # Also remove the stable base directory itself.
+        try:
+            shutil.rmtree(self._base_dir, ignore_errors=True)
+        except Exception:
+            pass
 
     # ==========================================================
     # Inspection (list contents without extraction)
@@ -578,7 +596,7 @@ class ArchiveInspector:
         """Get or create a temporary directory for an archive."""
         if archive_path not in self._temp_dirs:
             self._temp_dirs[archive_path] = tempfile.mkdtemp(
-                prefix="3d_browser_"
+                prefix="3d_browser_", dir=self._base_dir
             )
         return self._temp_dirs[archive_path]
 

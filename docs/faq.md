@@ -4,7 +4,7 @@
 
 ## Formats
 
-**Supported 3D**: `.obj`, `.fbx`, `.gltf`/`.glb`, `.stl`, `.blend`* (needs Blender), `.max`** (detection only)
+**Supported 3D**: `.obj`, `.fbx`, `.gltf`/`.glb`, `.stl` (older FBX auto-converted to OBJ)
 
 **Archives**: `.zip`, `.rar` (needs CLI tool), `.unitypackage`
 
@@ -29,8 +29,8 @@ Screenshot · Orbit/FPV · Grid · Axes · Wireframe · Normals · Texture folde
 - **Reload**: Re-fetch from disk · **Reset**: Undo all transforms
 - **Center/Ground/Orient**: Position model at origin, on ground, or auto-orient (PCA)
 - **Rotate ±90°**: Per-axis rotation (X/Y/Z)
-- **Simplify**: Edge collapse LOD (merge vertices first for proper topology)
-- **Normals**: Merge vertices + recompute smooth normals (fixes faceted shading, loses UVs)
+- **Simplify**: Edge collapse LOD (merge vertices first for proper topology; UVs preserved)
+- **Normals**: Merge vertices + recompute smooth normals (fixes faceted shading; UVs preserved, smoothing stops at genuine UV seams)
 
 ---
 
@@ -52,14 +52,6 @@ Click **Export** → Save As dialog with folder browser → filename pre-filled.
 
 ---
 
-## Blend Files
-
-Requires Blender installed and in PATH (or standard macOS/Windows locations). MeshVault auto-converts `.blend` → `.glb` via Blender CLI. Results cached as `.converted.glb`.
-
-## MAX Files
-
-`.max` files are shown in the browser but can't be opened (proprietary format). Convert to FBX/OBJ in 3ds Max.
-
 ## Unity Packages
 
 `.unitypackage` files are parsed natively (gzipped tar with GUID structure). 3D assets inside are listed and can be previewed/exported.
@@ -71,7 +63,7 @@ Requires Blender installed and in PATH (or standard macOS/Windows locations). Me
 - **Port in use**: `PORT=9000 poetry run meshvault`
 - **Blank page**: Use `http`, check F12 console, needs Chrome 89+ / Firefox 108+
 - **RAR not scanned**: Install `bsdtar`/`unrar`/`7z`/`unar`
-- **Blend won't load**: Install Blender, ensure `blender` is in PATH
+- **`401 Unauthorized` / `403` on API**: The app authenticates automatically when opened on the same machine. From another device, append `?token=<TOKEN>` (printed in the launch banner) and set `MESHVAULT_HOST`. `403` means the path is outside the allowed root (`MESHVAULT_ROOT`).
 - **Slow model**: Simplify first, SSAO is heavy on >1M triangles
 
 ---
@@ -83,4 +75,15 @@ poetry run pytest tests/ -v
 # Swagger: http://localhost:8420/docs
 ```
 
-No frontend build step. Edit `frontend/`, refresh browser.
+Frontend build (esbuild): the UI ships as a self-contained offline bundle
+(`frontend/dist/app.bundle.js`, Three.js included — no CDN). Rebuild after editing
+`frontend/js/**`:
+
+```bash
+npm install      # once (installs esbuild + three as devDependencies)
+npm run build    # produce frontend/dist/app.bundle.js
+npm run watch    # rebuild on change during development
+```
+
+The committed bundle is what ships via `pip install` / `npx`, so end users need no
+Node toolchain and the app works fully offline.

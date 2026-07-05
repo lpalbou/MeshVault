@@ -10,6 +10,11 @@ dist/
 build/
 *.whl
 
+# ...but the frontend offline bundle IS committed (ships for pip/npx, works offline).
+# Only the JS bundle is tracked; the sourcemap is regenerated locally by `npm run build`.
+!frontend/dist/
+frontend/dist/*.map
+
 # ===========================
 # Virtual environments
 # ===========================

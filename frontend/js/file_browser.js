@@ -45,6 +45,19 @@ const ICONS = {
         <rect x="3" y="3" width="18" height="18" rx="2"/>
         <path d="M7 8l5 4-5 4"/><line x1="14" y1="16" x2="18" y2="16"/>
     </svg>`,
+    ply: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5"/>
+        <circle cx="12" cy="12" r="2" fill="currentColor"/>
+    </svg>`,
+    dae: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+    </svg>`,
+    "3mf": `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 2L2 7v10l10 5 10-5V7L12 2z"/><path d="M12 12L2 7"/><path d="M12 12l10-5"/><path d="M12 12v10"/>
+    </svg>`,
+    usdz: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="9"/><path d="M8 12a4 4 0 018 0"/><path d="M12 3v3"/>
+    </svg>`,
     unity: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M12 2L2 7v10l10 5 10-5V7L12 2z"/>
         <path d="M12 12L2 7"/><path d="M12 12l10-5"/>
@@ -66,12 +79,15 @@ export class FileBrowser {
      * @param {Function} onStatusUpdate - Callback to update status text
      * @param {Function} [onExportRequest] - Callback when user requests export from context menu
      */
-    constructor(container, pathDisplay, onAssetSelect, onStatusUpdate, onExportRequest = null) {
+    constructor(container, pathDisplay, onAssetSelect, onStatusUpdate, onExportRequest = null, thumbnailer = null) {
         this._container = container;
         this._pathDisplay = pathDisplay;
         this._onAssetSelect = onAssetSelect;
         this._onStatusUpdate = onStatusUpdate;
         this._onExportRequest = onExportRequest;
+        // Optional lazy thumbnail renderer for grid view (backlog 014).
+        this._thumbnailer = thumbnailer;
+        this._thumbObserver = null;
         this._currentPath = null;
         this._parentPath = null;
         this._selectedElement = null;
@@ -300,8 +316,21 @@ export class FileBrowser {
      * Render the file list from folders and assets data.
      */
     _render(folders, assets) {
+        // Revoke any blob URLs held by the cards we are about to discard, so object
+        // URLs don't accumulate as the user navigates between folders.
+        for (const img of this._container.querySelectorAll(".asset-card-thumb")) {
+            if (img._mvObjectUrl) {
+                URL.revokeObjectURL(img._mvObjectUrl);
+                img._mvObjectUrl = null;
+            }
+        }
+
         this._container.innerHTML = "";
         this._selectedElement = null;
+
+        // Reset any pending thumbnail work and rebuild the visibility observer so
+        // only cards scrolled into view trigger a render.
+        this._resetThumbObserver();
 
         const isGrid = this._viewMode === "grid";
         this._container.classList.toggle("grid-view", isGrid);
@@ -461,10 +490,21 @@ export class FileBrowser {
         const badgeText = asset.is_in_archive ? `${ext} 📦` : ext;
 
         card.innerHTML = `
-            <div class="asset-card-icon asset-${ext}">${icon}</div>
+            <div class="asset-card-icon asset-${ext}">
+                ${icon}
+                <img class="asset-card-thumb" alt="" />
+            </div>
             <div class="asset-card-name">${this._escapeHtml(asset.name)}</div>
             <span class="file-item-badge ${badgeClass}">${badgeText}</span>
         `;
+
+        // Lazy thumbnail: observe the card; render only when it enters the viewport.
+        if (this._thumbnailer && this._thumbObserver) {
+            const img = card.querySelector(".asset-card-thumb");
+            card._thumbAsset = asset;
+            card._thumbImg = img;
+            this._thumbObserver.observe(card);
+        }
         if (asset.is_in_archive) {
             const arch = this._basename(asset.archive_path || "");
             const inner = asset.inner_path || "";
@@ -489,6 +529,30 @@ export class FileBrowser {
         });
 
         return card;
+    }
+
+    /**
+     * Rebuild the IntersectionObserver used to lazily render grid thumbnails.
+     * Called on every render so observers never leak across folder changes.
+     */
+    _resetThumbObserver() {
+        if (this._thumbObserver) {
+            this._thumbObserver.disconnect();
+            this._thumbObserver = null;
+        }
+        if (this._thumbnailer) this._thumbnailer.reset();
+        if (!this._thumbnailer || typeof IntersectionObserver === "undefined") return;
+
+        this._thumbObserver = new IntersectionObserver((entries, obs) => {
+            for (const entry of entries) {
+                if (!entry.isIntersecting) continue;
+                const card = entry.target;
+                obs.unobserve(card);
+                if (card._thumbAsset && card._thumbImg) {
+                    this._thumbnailer.request(card._thumbAsset, card._thumbImg);
+                }
+            }
+        }, { root: this._container, rootMargin: "100px" });
     }
 
     /**

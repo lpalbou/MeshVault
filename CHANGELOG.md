@@ -6,7 +6,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · [Semantic Ve
 
 ## [Unreleased]
 
+### Added
+- **Offline, self-contained frontend bundle** — Three.js is now bundled locally via esbuild (`npm run build` → `frontend/dist/app.bundle.js`) instead of loaded from jsdelivr. The app works fully offline, has no CDN/importmap dependency, and needs no Subresource Integrity. Verified: with all non-localhost requests blocked, the app boots and the viewer initializes with zero external requests.
+- **Grid thumbnails** — grid view now renders real previews of each asset (client-side Three.js render), cached in the **browser** (IndexedDB, keyed by path+size+mtime). Lazy: only cards scrolled into view render; second visits load from the browser cache. No server-side state.
+- **Animation playback** — GLB/FBX/Collada animation clips get a transport bar (play/pause, scrub, speed, clip selector); the bar auto-hides for non-animated models.
+- **More formats** — added `.ply`, `.dae` (Collada), `.3mf`, and `.usdz` (read-only) loaders.
+- **Drag-and-drop & recent files** — drop a model onto the viewer to preview it (in-memory, no filesystem write); a Recent list gives one-click reload of the last 12 assets.
+- **Measurement** — point-to-point distance on the model surface (toolbar toggle), plus the existing bounding-box dimensions readout.
+
+### Deferred (built, then parked)
+- **Cross-folder library index / search / tags / collections** were implemented (SQLite) and reviewed, then parked as speculative (no proven large-library need; server-side state conflicts with the light/hybrid direction). Working code preserved under `parked/`; tracked as `docs/backlog/proposed/015`, `016`.
+
+### Security
+- **Trust boundary (`backend/security.py`)**: introduced a single `PathGuard` that confines every filesystem endpoint to an allowed root, closing the previous arbitrary file read/delete/write and path-traversal exposure. Added session-token auth on all `/api/*` routes and a Host allow-list (DNS-rebinding protection).
+- **Loopback by default**: the server now binds `127.0.0.1` instead of `0.0.0.0`. Non-loopback binds are opt-in via `MESHVAULT_HOST` and print a warning. Configurable via `MESHVAULT_ROOT`, `MESHVAULT_HOST`, `MESHVAULT_TOKEN`, `MESHVAULT_ALLOWED_HOSTS`, `MESHVAULT_NO_AUTH`.
+- **File access default preserves the original "browse anywhere" behavior**: the whole filesystem is reachable (browser opens at home); `MESHVAULT_ROOT` now *restricts* access rather than being required. The real privacy guarantee is loopback + token + Host allow-list; path confinement is opt-in hardening.
+
 ### Fixed
+- **`/api/default_path`**: fixed a stacked-decorator bug that made the route return `422`; it now returns the default browse path.
+- **Mesh ops preserve UVs**: "recompute smooth normals" and "simplify" no longer discard texture coordinates. Vertices are merged by position **and** UV, so textured meshes stay textured and smoothing correctly stops at genuine UV seams.
+- **Docs reconciled with code**: removed advertised `.blend`/`.max` support and the non-existent `blend_converter.py` (never implemented). Corrected the endpoint count (15) and documented `/api/export_glb`.
 - **GLB export**: Corrected texture coordinate convention to match glTF spec (upper-left UV origin) by flipping $v \rightarrow 1-v$ for exported UVs and exporting textures with `flipY=false`. This fixes vertically flipped textures and restores texture fidelity on round-trip export (e.g., `Asteroid_1.fbx` from `uploads_files_775776_asteroid_pack_2.zip`).
 - **GLB export**: Fixed AO UV set export (`uv2` / `TEXCOORD_1`) — previously attempted to use a non-standard `uv1` attribute.
 - **Dev**: Repaired the GLB visual regression harness (`test_glb_export.mjs` + `test_compare.py`) and added an optional pytest integration test (skipped by default).
@@ -94,7 +113,7 @@ MeshVault is a local tool for 3D artists and game developers to browse, preview,
 - Direct FBX browse now includes nearby texture candidates (same folder + common texture subfolders) to recover broken absolute texture links via basename matching
 
 ### Developer Experience
-- Zero frontend build step (ES modules, Three.js CDN)
+- Frontend bundled with esbuild into a self-contained offline bundle (Three.js vendored, no CDN)
 - Poetry + PyPI + NPM packaging
 - GitHub Actions CI (Python 3.10–3.13, Ubuntu + macOS)
 - 12 unit tests, full documentation suite, backlog tracking

@@ -16,7 +16,10 @@ from backend.archive_inspector import ArchiveInspector
 
 
 # Supported 3D asset extensions
-SUPPORTED_3D_EXTENSIONS = {".obj", ".fbx", ".gltf", ".glb", ".stl"}
+SUPPORTED_3D_EXTENSIONS = {
+    ".obj", ".fbx", ".gltf", ".glb", ".stl",
+    ".ply", ".dae", ".3mf", ".usdz",
+}
 
 # Supported archive extensions
 SUPPORTED_ARCHIVE_EXTENSIONS = {".zip", ".rar", ".unitypackage"}
@@ -29,6 +32,7 @@ class AssetInfo:
     path: str  # Full path to the file or archive
     extension: str
     size: int  # File size in bytes
+    mtime: float = 0.0  # Modification time (epoch seconds); for client thumbnail keys
     is_in_archive: bool = False
     archive_path: Optional[str] = None  # Path to the archive if asset is inside one
     inner_path: Optional[str] = None  # Path inside the archive
@@ -135,11 +139,13 @@ class FileBrowser:
                     # Direct 3D asset
                     if ext in SUPPORTED_3D_EXTENSIONS:
                         related = self._find_related_files(entry)
+                        st = entry.stat()
                         assets.append(AssetInfo(
                             name=entry.stem,
                             path=str(entry),
                             extension=ext,
-                            size=entry.stat().st_size,
+                            size=st.st_size,
+                            mtime=st.st_mtime,
                             related_files=related,
                         ))
 

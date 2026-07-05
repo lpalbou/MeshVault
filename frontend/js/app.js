@@ -8,6 +8,7 @@
 import { FileBrowser } from "./file_browser.js";
 import { Viewer3D } from "./viewer_3d.js";
 import { ExportPanel } from "./export_panel.js";
+import { Thumbnailer } from "./thumbnailer.js";
 
 
 class App {
@@ -36,12 +37,14 @@ class App {
         };
 
         // --- Initialize Components ---
+        this._thumbnailer = new Thumbnailer();
         this._fileBrowser = new FileBrowser(
             this._elements.fileList,
             this._elements.currentPath,
             (asset) => this._onAssetSelected(asset),
             (text) => this._updateStatus(text),
             (asset) => this._onExportRequested(asset),
+            this._thumbnailer,
         );
 
         this._viewer = new Viewer3D(
@@ -162,6 +165,12 @@ class App {
         // --- Scale Control ---
         this._initScaleControl();
 
+        // --- Phase 1/2 features ---
+        this._initAnimationControls();
+        this._initMeasurement();
+        this._initDragAndDrop();
+        this._initRecentFiles();
+
         // --- Start (resume last directory, or home) ---
         this._fileBrowser.goLastOrHome();
     }
@@ -269,6 +278,9 @@ class App {
             // Show scale control and reset to 1.0
             this._resetScaleControl();
 
+            // Record in recent files (dedup, most-recent-first, capped).
+            this._pushRecentFile(asset);
+
             this._updateStatus(`Loaded: ${asset.name}${asset.extension}`);
         } catch (err) {
             console.error("Failed to load asset:", err);
@@ -288,7 +300,7 @@ class App {
         this._elements.infoFaces.textContent = `${stats.faces.toLocaleString()} faces`;
         // Show bounding box dimensions (W × H × D)
         if (stats.width !== undefined) {
-            const fmt = (v) => v < 0.01 ? v.toExponential(1) : v < 10 ? v.toFixed(2) : v < 1000 ? v.toFixed(1) : v.toFixed(0);
+            const fmt = (v) => v === 0 ? "0" : v < 0.01 ? v.toExponential(1) : v < 10 ? v.toFixed(2) : v < 1000 ? v.toFixed(1) : v.toFixed(0);
             document.getElementById("info-dims").textContent =
                 `${fmt(stats.width)} × ${fmt(stats.height)} × ${fmt(stats.depth)}`;
         }
@@ -339,6 +351,13 @@ class App {
         if (bytes < 1024) return `${bytes} B`;
         if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
         return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    /** Escape HTML special characters for safe interpolation. */
+    _escapeHtml(text) {
+        const div = document.createElement("div");
+        div.textContent = text == null ? "" : String(text);
+        return div.innerHTML;
     }
 
     /**
@@ -1284,6 +1303,212 @@ class App {
                 document.body.style.cursor = "";
                 document.body.style.userSelect = "";
             }
+        });
+    }
+
+    // ==========================================================
+    // Animation controls (017)
+    // ==========================================================
+
+    _initAnimationControls() {
+        const bar = document.getElementById("animation-bar");
+        const select = document.getElementById("anim-clip-select");
+        const playBtn = document.getElementById("anim-play-btn");
+        const scrub = document.getElementById("anim-scrub");
+        const speed = document.getElementById("anim-speed");
+        const timeLabel = document.getElementById("anim-time");
+        if (!bar) return;
+
+        // The viewer emits "animations" whenever a model loads (empty ⇒ hide bar).
+        this._elements.viewerContainer.addEventListener("animations", (e) => {
+            const clips = e.detail.clips || [];
+            if (clips.length === 0) {
+                bar.style.display = "none";
+                return;
+            }
+            bar.style.display = "flex";
+            select.innerHTML = clips
+                .map((c) => `<option value="${c.index}">${this._escapeHtml(c.name)}</option>`)
+                .join("");
+            select.style.display = clips.length > 1 ? "" : "none";
+            scrub.value = 0;
+            speed.value = "1";
+            this._setAnimPlayIcon(true);
+        });
+
+        select.addEventListener("change", () => {
+            this._viewer.playAnimation(parseInt(select.value, 10));
+            this._setAnimPlayIcon(true);
+        });
+
+        playBtn.addEventListener("click", () => {
+            const playing = this._viewer.toggleAnimationPlay();
+            this._setAnimPlayIcon(playing);
+        });
+
+        scrub.addEventListener("input", () => {
+            const dur = this._viewer.getAnimationDuration();
+            this._viewer.setAnimationTime((parseFloat(scrub.value) / 100) * dur);
+            this._setAnimPlayIcon(false);
+        });
+
+        speed.addEventListener("change", () => {
+            this._viewer.setAnimationSpeed(parseFloat(speed.value));
+        });
+
+        // Drive the scrubber + time label from playback (~10 fps is plenty).
+        setInterval(() => {
+            if (bar.style.display === "none" || !this._viewer.hasAnimations()) return;
+            const dur = this._viewer.getAnimationDuration();
+            const t = this._viewer.getAnimationTime();
+            if (dur > 0 && document.activeElement !== scrub) {
+                scrub.value = Math.min(100, (t / dur) * 100);
+            }
+            timeLabel.textContent = `${t.toFixed(1)}s / ${dur.toFixed(1)}s`;
+        }, 100);
+    }
+
+    _setAnimPlayIcon(playing) {
+        const playBtn = document.getElementById("anim-play-btn");
+        if (!playBtn) return;
+        playBtn.textContent = playing ? "⏸" : "▶";
+        playBtn.title = playing ? "Pause" : "Play";
+    }
+
+    // ==========================================================
+    // Measurement (020)
+    // ==========================================================
+
+    _initMeasurement() {
+        const btn = document.getElementById("measure-toggle");
+        if (!btn) return;
+        btn.addEventListener("click", () => {
+            const active = this._viewer.toggleMeasureMode();
+            btn.classList.toggle("active", active);
+            this._showToast(
+                active
+                    ? "Measure: click two points on the model to measure distance"
+                    : "Measure mode off",
+                "info"
+            );
+        });
+    }
+
+    // ==========================================================
+    // Drag-and-drop load (019)
+    // ==========================================================
+
+    _initDragAndDrop() {
+        const zone = document.getElementById("viewer-container");
+        if (!zone) return;
+        const supported = [".obj", ".fbx", ".gltf", ".glb", ".stl", ".ply", ".dae", ".3mf", ".usdz"];
+
+        const onDragOver = (e) => {
+            if (e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files")) {
+                e.preventDefault();
+                zone.classList.add("drag-over");
+            }
+        };
+        const onDragLeave = (e) => {
+            if (e.target === zone) zone.classList.remove("drag-over");
+        };
+        const onDrop = async (e) => {
+            e.preventDefault();
+            zone.classList.remove("drag-over");
+            const files = Array.from(e.dataTransfer.files || []);
+            if (files.length === 0) return;
+            const file = files[0];
+            const ext = "." + file.name.split(".").pop().toLowerCase();
+            if (!supported.includes(ext)) {
+                this._showToast(`Unsupported format for drag-drop: ${ext}`, "error");
+                return;
+            }
+            await this._loadDroppedFile(file, ext);
+        };
+
+        zone.addEventListener("dragover", onDragOver);
+        zone.addEventListener("dragleave", onDragLeave);
+        zone.addEventListener("drop", onDrop);
+    }
+
+    /**
+     * Load a dropped File directly from an in-memory object URL. This bypasses the
+     * filesystem API (the file may live outside the allowed root), so it is a
+     * genuine local-preview path that respects the sandbox: nothing is written.
+     */
+    async _loadDroppedFile(file, ext) {
+        this._elements.loadingOverlay.style.display = "flex";
+        this._elements.viewerPlaceholder.style.display = "none";
+        let objectUrl = null;
+        try {
+            objectUrl = URL.createObjectURL(file);
+            await this._viewer.loadModel(objectUrl, ext, { relatedFiles: [], sourcePath: file.name });
+            this._elements.infoSize.textContent = this._formatSize(file.size);
+            this._elements.viewerInfo.style.display = "flex";
+            this._resetScaleControl();
+            this._updateStatus(`Loaded (dropped): ${file.name}`);
+        } catch (err) {
+            console.error("Drop load failed:", err);
+            this._showToast(`Failed to load dropped file: ${err.message}`, "error");
+            this._elements.viewerPlaceholder.style.display = "flex";
+        } finally {
+            if (objectUrl) URL.revokeObjectURL(objectUrl);
+            this._elements.loadingOverlay.style.display = "none";
+        }
+    }
+
+    // ==========================================================
+    // Recent files (019)
+    // ==========================================================
+
+    _initRecentFiles() {
+        this._recentKey = "meshvault_recentFiles";
+        this._renderRecentFiles();
+    }
+
+    _pushRecentFile(asset) {
+        try {
+            const key = asset.is_in_archive
+                ? `${asset.archive_path}!${asset.inner_path}`
+                : asset.path;
+            let recent = JSON.parse(localStorage.getItem(this._recentKey) || "[]");
+            recent = recent.filter((r) => r._key !== key);
+            recent.unshift({
+                _key: key, name: asset.name, extension: asset.extension,
+                path: asset.path, size: asset.size ?? 0, is_in_archive: !!asset.is_in_archive,
+                archive_path: asset.archive_path || null, inner_path: asset.inner_path || null,
+                related_files: asset.related_files || [],
+            });
+            recent = recent.slice(0, 12);
+            localStorage.setItem(this._recentKey, JSON.stringify(recent));
+            this._renderRecentFiles();
+        } catch { /* localStorage may be unavailable; recents are best-effort */ }
+    }
+
+    _renderRecentFiles() {
+        const container = document.getElementById("recent-files");
+        if (!container) return;
+        let recent = [];
+        try {
+            recent = JSON.parse(localStorage.getItem(this._recentKey) || "[]");
+        } catch { recent = []; }
+        if (recent.length === 0) {
+            container.style.display = "none";
+            return;
+        }
+        container.style.display = "block";
+        container.innerHTML =
+            `<div class="recent-title">Recent</div>` +
+            recent.map((r, i) =>
+                `<button class="recent-item" data-idx="${i}" title="${this._escapeHtml(r.path)}">` +
+                `<span class="recent-name">${this._escapeHtml(r.name)}</span>` +
+                `<span class="recent-ext">${this._escapeHtml(r.extension)}</span></button>`
+            ).join("");
+        container.querySelectorAll(".recent-item").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                const idx = parseInt(btn.dataset.idx, 10);
+                this._onAssetSelected(recent[idx]);
+            });
         });
     }
 }

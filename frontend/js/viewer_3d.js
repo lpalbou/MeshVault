@@ -19,6 +19,10 @@ import { MTLLoader } from "three/addons/loaders/MTLLoader.js";
 import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
+import { PLYLoader } from "three/addons/loaders/PLYLoader.js";
+import { ColladaLoader } from "three/addons/loaders/ColladaLoader.js";
+import { ThreeMFLoader } from "three/addons/loaders/3MFLoader.js";
+import { USDZLoader } from "three/addons/loaders/USDZLoader.js";
 import { TGALoader } from "three/addons/loaders/TGALoader.js";
 import { OBJExporter } from "three/addons/exporters/OBJExporter.js";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
@@ -66,6 +70,7 @@ export class Viewer3D {
         this._initRenderer();
         this._initControls();
         this._initPivotPick();
+        this._initMeasurement();
         this._initKeyboardNav();
         this._initFPVMouseLook();
         this._initPostProcessing();
@@ -109,6 +114,14 @@ export class Viewer3D {
                 object = await this._loadGLTF(url, options);
             } else if (ext === ".stl") {
                 object = await this._loadSTL(url);
+            } else if (ext === ".ply") {
+                object = await this._loadPLY(url);
+            } else if (ext === ".dae") {
+                object = await this._loadCollada(url);
+            } else if (ext === ".3mf") {
+                object = await this._load3MF(url);
+            } else if (ext === ".usdz") {
+                object = await this._loadUSDZ(url);
             } else {
                 throw new Error(`Unsupported format: ${ext}`);
             }
@@ -129,6 +142,9 @@ export class Viewer3D {
         // Add to scene
         this._scene.add(object);
         this._currentModel = object;
+
+        // Wire up any animation clips and notify the UI (play/pause/scrub controls).
+        this._setupAnimations(object);
 
         // Save a snapshot of the original geometry for Reset
         this._saveOriginalGeometry();
@@ -154,7 +170,109 @@ export class Viewer3D {
             this._currentModel = null;
         }
         this._mixers = [];
+        this._animationMixer = null;
+        this._animationActions = [];
+        this._animationClips = [];
+        this._activeAction = null;
         this._clearNormalsHelpers();
+        // Drop any measurement overlay from the previous model.
+        if (this._measureGroup) this._clearMeasurement();
+    }
+
+    // ==========================================================
+    // Animation playback (017) — single source of truth for clips
+    // ==========================================================
+
+    /**
+     * Set up the animation mixer for a freshly loaded object and notify the UI.
+     *
+     * Only one mixer is active at a time (the current model's). Clips are exposed by
+     * name so the UI can offer a clip selector; the first clip auto-plays to preserve
+     * prior behavior, but the user can pause/scrub/switch. Emits an "animations" event
+     * on the container with the clip list and duration (empty list ⇒ hide controls).
+     */
+    _setupAnimations(object) {
+        const clips = (object && object.animations) ? object.animations : [];
+        this._mixers = [];
+        this._animationMixer = null;
+        this._animationActions = [];
+        this._animationClips = clips;
+        this._activeAction = null;
+
+        if (clips.length > 0) {
+            const mixer = new THREE.AnimationMixer(object);
+            this._animationMixer = mixer;
+            this._mixers.push(mixer);
+            this._animationActions = clips.map((c) => mixer.clipAction(c));
+            this.playAnimation(0);
+        }
+
+        this._container.dispatchEvent(new CustomEvent("animations", {
+            detail: {
+                clips: clips.map((c, i) => ({
+                    index: i,
+                    name: c.name || `Clip ${i + 1}`,
+                    duration: c.duration,
+                })),
+            },
+        }));
+    }
+
+    /** True if the current model has at least one animation clip. */
+    hasAnimations() {
+        return this._animationClips && this._animationClips.length > 0;
+    }
+
+    /** Play the clip at `index` (stops any other), resetting to its start. */
+    playAnimation(index) {
+        if (!this._animationMixer || !this._animationActions[index]) return;
+        for (const a of this._animationActions) a.stop();
+        const action = this._animationActions[index];
+        action.reset();
+        action.paused = false;
+        action.play();
+        this._activeAction = action;
+        this._animationPlaying = true;
+    }
+
+    /** Pause or resume the active clip. Returns the new playing state. */
+    toggleAnimationPlay() {
+        if (!this._activeAction) return false;
+        this._activeAction.paused = !this._activeAction.paused;
+        this._animationPlaying = !this._activeAction.paused;
+        return this._animationPlaying;
+    }
+
+    setAnimationPlaying(playing) {
+        if (!this._activeAction) return;
+        this._activeAction.paused = !playing;
+        this._animationPlaying = playing;
+    }
+
+    /** Playback speed multiplier for the active mixer (1 = normal). */
+    setAnimationSpeed(multiplier) {
+        if (this._animationMixer) this._animationMixer.timeScale = multiplier;
+    }
+
+    /** Current active clip duration in seconds (0 if none). */
+    getAnimationDuration() {
+        if (!this._activeAction) return 0;
+        return this._activeAction.getClip().duration;
+    }
+
+    /** Current playback time in seconds. */
+    getAnimationTime() {
+        return this._activeAction ? this._activeAction.time : 0;
+    }
+
+    /** Seek the active clip to `seconds` (pauses so the frame holds). */
+    setAnimationTime(seconds) {
+        if (!this._activeAction || !this._animationMixer) return;
+        this._activeAction.paused = true;
+        this._animationPlaying = false;
+        this._activeAction.time = Math.max(0, Math.min(seconds, this.getAnimationDuration()));
+        // Force the mixer to apply the new time to the skeleton/nodes.
+        this._animationMixer.update(0);
     }
 
     /**
@@ -555,6 +673,139 @@ export class Viewer3D {
         });
     }
 
+    // ==========================================================
+    // Measurement (020) — point-to-point distance on the model surface
+    // ==========================================================
+
+    _initMeasurement() {
+        this._measureMode = false;
+        this._measurePoints = [];
+        this._measureGroup = new THREE.Group();
+        this._measureGroup.name = "__measure__";
+        this._scene.add(this._measureGroup);
+
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const canvas = this._renderer.domElement;
+        const CLICK_PX = 6;
+        const CLICK_MS = 350;
+        let downPos = null;
+        let downTime = 0;
+
+        canvas.addEventListener("mousedown", (e) => {
+            if (e.button !== 0 || !this._measureMode) return;
+            downPos = { x: e.clientX, y: e.clientY };
+            downTime = performance.now();
+        });
+
+        canvas.addEventListener("mouseup", (e) => {
+            if (e.button !== 0 || !this._measureMode || !downPos) return;
+            const dx = e.clientX - downPos.x;
+            const dy = e.clientY - downPos.y;
+            const dist = Math.hypot(dx, dy);
+            const elapsed = performance.now() - downTime;
+            downPos = null;
+            if (dist > CLICK_PX || elapsed > CLICK_MS) return; // was a drag/orbit
+            if (!this._currentModel) return;
+
+            const rect = canvas.getBoundingClientRect();
+            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(mouse, this._camera);
+
+            const meshes = [];
+            this._currentModel.traverse((c) => { if (c.isMesh) meshes.push(c); });
+            const hits = raycaster.intersectObjects(meshes, false);
+            if (hits.length === 0) return;
+            this._addMeasurePoint(hits[0].point.clone());
+        });
+    }
+
+    /** Toggle measurement mode. Returns the new state. */
+    toggleMeasureMode() {
+        this._measureMode = !this._measureMode;
+        if (!this._measureMode) this._clearMeasurement();
+        return this._measureMode;
+    }
+
+    _clearMeasurement() {
+        this._measurePoints = [];
+        while (this._measureGroup.children.length) {
+            const child = this._measureGroup.children.pop();
+            child.geometry?.dispose();
+            child.material?.map?.dispose();
+            child.material?.dispose();
+        }
+    }
+
+    _addMeasurePoint(point) {
+        // A third click starts a fresh measurement.
+        if (this._measurePoints.length >= 2) this._clearMeasurement();
+        this._measurePoints.push(point);
+
+        // Marker sphere sized relative to the model for visibility at any scale.
+        const r = this._measureMarkerRadius();
+        const marker = new THREE.Mesh(
+            new THREE.SphereGeometry(r, 16, 16),
+            new THREE.MeshBasicMaterial({ color: 0xffcc33, depthTest: false })
+        );
+        marker.position.copy(point);
+        marker.renderOrder = 999;
+        this._measureGroup.add(marker);
+
+        if (this._measurePoints.length === 2) {
+            this._drawMeasureLine(this._measurePoints[0], this._measurePoints[1]);
+        }
+    }
+
+    _measureMarkerRadius() {
+        if (!this._currentModel) return 0.02;
+        const box = new THREE.Box3().setFromObject(this._currentModel);
+        const size = box.getSize(new THREE.Vector3()).length();
+        return Math.max(size * 0.008, 1e-4);
+    }
+
+    _drawMeasureLine(a, b) {
+        const geom = new THREE.BufferGeometry().setFromPoints([a, b]);
+        const line = new THREE.Line(
+            geom,
+            new THREE.LineBasicMaterial({ color: 0xffcc33, depthTest: false })
+        );
+        line.renderOrder = 999;
+        this._measureGroup.add(line);
+
+        const distance = a.distanceTo(b);
+        const label = this._makeMeasureLabel(distance);
+        label.position.copy(a).add(b).multiplyScalar(0.5);
+        this._measureGroup.add(label);
+
+        this._container.dispatchEvent(new CustomEvent("measurement", {
+            detail: { distance },
+        }));
+    }
+
+    _makeMeasureLabel(distance) {
+        const text = distance < 1 ? distance.toFixed(3) : distance.toFixed(2);
+        const canvas = document.createElement("canvas");
+        canvas.width = 256; canvas.height = 64;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "rgba(20,20,30,0.85)";
+        ctx.fillRect(0, 0, 256, 64);
+        ctx.fillStyle = "#ffcc33";
+        ctx.font = "bold 28px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(text, 128, 32);
+        const tex = new THREE.CanvasTexture(canvas);
+        const sprite = new THREE.Sprite(
+            new THREE.SpriteMaterial({ map: tex, depthTest: false })
+        );
+        const s = this._measureMarkerRadius() * 8;
+        sprite.scale.set(s * 4, s, 1);
+        sprite.renderOrder = 1000;
+        return sprite;
+    }
+
     /**
      * Initialize keyboard navigation.
      *
@@ -946,13 +1197,8 @@ export class Viewer3D {
                 url,
                 async (object) => {
                     try {
-                        // Handle FBX animations
-                        if (object.animations && object.animations.length > 0) {
-                            const mixer = new THREE.AnimationMixer(object);
-                            const action = mixer.clipAction(object.animations[0]);
-                            action.play();
-                            this._mixers.push(mixer);
-                        }
+                        // Animation clips (object.animations) are wired up centrally
+                        // in loadModel via _setupAnimations so the UI can control them.
 
                         // Fallback for FBX exports that omit texture links:
                         // if no maps are bound, auto-assign from related files
@@ -1565,13 +1811,8 @@ export class Viewer3D {
                 (gltf) => {
                     try {
                         const object = gltf.scene;
-                        // Handle GLTF animations
-                        if (gltf.animations && gltf.animations.length > 0) {
-                            const mixer = new THREE.AnimationMixer(object);
-                            const action = mixer.clipAction(gltf.animations[0]);
-                            action.play();
-                            this._mixers.push(mixer);
-                        }
+                        // Expose clips on the object; loadModel wires the mixer/UI.
+                        object.animations = gltf.animations || [];
                         resolve(object);
                     } catch (err) {
                         console.error("GLTF post-load error:", err);
@@ -1587,6 +1828,83 @@ export class Viewer3D {
                 }
             );
         });
+    }
+
+    /**
+     * Wrap a raw BufferGeometry (from PLY) into a mesh + group, mirroring the STL
+     * path. PLY often carries vertex colors; honor them when present so scans and
+     * point-cloud-derived meshes look right instead of flat gray.
+     */
+    _loadPLY(url) {
+        return new Promise((resolve, reject) => {
+            const loader = new PLYLoader();
+            loader.load(
+                url,
+                (geometry) => {
+                    if (!geometry.hasAttribute("normal")) geometry.computeVertexNormals();
+                    const hasColor = geometry.hasAttribute("color");
+                    const material = new THREE.MeshStandardMaterial({
+                        color: hasColor ? 0xffffff : 0x808080,
+                        vertexColors: hasColor,
+                        roughness: 0.6,
+                        metalness: 0.1,
+                        side: THREE.DoubleSide,
+                    });
+                    const group = new THREE.Group();
+                    group.add(new THREE.Mesh(geometry, material));
+                    resolve(group);
+                },
+                undefined,
+                (err) => reject(new Error(
+                    `PLY loading failed: ${err?.message || err || "Unknown error"}`
+                ))
+            );
+        });
+    }
+
+    /** Collada (.dae) returns a scene graph on `collada.scene`. */
+    _loadCollada(url) {
+        return new Promise((resolve, reject) => {
+            const loader = new ColladaLoader();
+            loader.load(
+                url,
+                (collada) => {
+                    const object = collada.scene;
+                    object.animations = collada.animations || object.animations || [];
+                    resolve(object);
+                },
+                undefined,
+                (err) => reject(new Error(
+                    `Collada loading failed: ${err?.message || err || "Unknown error"}`
+                ))
+            );
+        });
+    }
+
+    /** 3MF returns a Group directly. */
+    _load3MF(url) {
+        return new Promise((resolve, reject) => {
+            const loader = new ThreeMFLoader();
+            loader.load(
+                url,
+                (object) => resolve(object),
+                undefined,
+                (err) => reject(new Error(
+                    `3MF loading failed: ${err?.message || err || "Unknown error"}`
+                ))
+            );
+        });
+    }
+
+    /**
+     * USDZ (.usdz) — read-only import. USDZLoader is synchronous-ish (returns a
+     * group) but the underlying fetch is async, so we mirror the async pattern.
+     */
+    async _loadUSDZ(url) {
+        const loader = new USDZLoader();
+        // USDZLoader.loadAsync returns a THREE.Group.
+        const group = await loader.loadAsync(url);
+        return group;
     }
 
     /**
@@ -2272,23 +2590,30 @@ export class Viewer3D {
             if (child.isMesh && child.geometry) {
                 const geo = child.geometry;
 
-                // 1. Remove existing normals so mergeVertices only compares positions
+                // 1. Remove per-face normals AND tangents. Both are per-face-derived
+                //    attributes that differ across faceted duplicate vertices; if
+                //    either remains, mergeVertices refuses to merge those vertices and
+                //    smoothing fails. Tangents are recomputed by loaders when needed
+                //    and are invalidated by new normals anyway, so dropping them is
+                //    correct. We deliberately KEEP the UVs.
                 geo.deleteAttribute("normal");
+                if (geo.hasAttribute("tangent")) geo.deleteAttribute("tangent");
 
-                // 2. Also remove UVs temporarily for merge (preserving them prevents
-                //    merging at UV seams which keeps faces split)
-                const hadUV = geo.hasAttribute("uv");
-                const uvBackup = hadUV ? geo.getAttribute("uv").clone() : null;
-                if (hadUV) geo.deleteAttribute("uv");
+                // 2. Merge vertices that share position AND UV. This preserves the
+                //    texture mapping: a genuine UV seam legitimately keeps two
+                //    vertices, so smoothing stops at seams (correct) while all
+                //    non-seam edges are smoothed. Meshes without UVs merge purely
+                //    by position, so untextured models behave exactly as before.
+                const merged = BufferGeometryUtils.mergeVertices(geo, 0.0001);
 
-                // 3. Merge vertices at same position (tolerance handles float noise)
-                child.geometry = BufferGeometryUtils.mergeVertices(geo, 0.0001);
+                // 3. Compute smooth normals on the merged geometry
+                merged.computeVertexNormals();
+                merged.computeBoundingBox();
+                merged.computeBoundingSphere();
 
-                // 4. Compute smooth normals on the merged geometry
-                child.geometry.computeVertexNormals();
-
-                child.geometry.computeBoundingBox();
-                child.geometry.computeBoundingSphere();
+                // 4. Swap in the new geometry and release the old GPU buffers.
+                child.geometry = merged;
+                geo.dispose();
             }
         });
 
@@ -2572,9 +2897,13 @@ export class Viewer3D {
             const child = meshes[i];
             let geo = child.geometry;
 
-            // Merge vertices
+            // Merge vertices before decimation. Drop per-face normals AND tangents so
+            // faceted duplicate vertices collapse (either attribute would otherwise
+            // block the merge); keep UVs so the merge splits only at genuine UV seams.
+            // SimplifyModifier (r170) carries the `uv` attribute through decimation,
+            // so preserving it here keeps textured meshes textured.
             geo.deleteAttribute("normal");
-            if (geo.hasAttribute("uv")) geo.deleteAttribute("uv");
+            if (geo.hasAttribute("tangent")) geo.deleteAttribute("tangent");
             geo = BufferGeometryUtils.mergeVertices(geo, 0.0001);
 
             const vertCount = geo.attributes.position.count;

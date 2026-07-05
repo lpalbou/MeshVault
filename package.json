@@ -34,13 +34,19 @@
     "LICENSE"
   ],
   "scripts": {
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
     "start": "node bin/meshvault.js",
-    "prepublishOnly": "echo 'Ready to publish MeshVault to NPM'"
+    "prepublishOnly": "npm run build"
   },
   "engines": {
     "node": ">=16.0.0"
   },
   "dependencies": {
     "playwright": "^1.58.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2",
+    "three": "^0.170.0"
   }
 }

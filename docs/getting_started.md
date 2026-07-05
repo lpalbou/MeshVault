@@ -5,7 +5,7 @@
 ## Prerequisites
 
 - **Python 3.10+** · **Poetry** (`curl -sSL https://install.python-poetry.org | python3 -`)
-- Optional: `bsdtar`/`unrar`/`7z`/`unar` for RAR support, **Blender** for `.blend` files
+- Optional: `bsdtar`/`unrar`/`7z`/`unar` for RAR archive support
 
 ## Installation & Run
 
@@ -26,8 +26,6 @@ PORT=9000 poetry run meshvault  # Custom port
 | `.fbx` | 🟠 Orange | v7000+ native, older auto-converted to OBJ |
 | `.gltf`/`.glb` | 🔵 Cyan | GL Transmission Format |
 | `.stl` | 🟣 Violet | Stereolithography |
-| `.blend` | 🟠 Deep orange | Requires Blender installed (auto-converts to GLB) |
-| `.max` | ⚫ Gray | Detection only — convert in 3ds Max first |
 | `.zip`/`.rar` | 📦 | Archive scanning |
 | `.unitypackage` | 📦 | Unity package parsing (GUID-based structure) |
 

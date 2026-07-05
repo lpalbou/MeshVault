@@ -7,29 +7,33 @@
 ```
 Frontend (Browser)                    Backend (FastAPI)
 ┌─────────────────────┐              ┌──────────────────────┐
-│ FileBrowser (sidebar)│──── HTTP ───→│ file_browser.py      │
-│ Viewer3D (Three.js)  │              │ archive_inspector.py │
-│ App.js (orchestrator)│              │ export_manager.py    │
-│ ExportPanel          │              │ fbx_converter.py     │
-└─────────────────────┘              │ blend_converter.py   │
+│ FileBrowser (sidebar)│──── HTTP ───→│ app.py (routes)      │
+│ Viewer3D (Three.js)  │   + token    │ security.py (guard)  │
+│ App.js (orchestrator)│              │ file_browser.py      │
+│ ExportPanel          │              │ archive_inspector.py │
+└─────────────────────┘              │ export_manager.py    │
+                                     │ fbx_converter.py     │
                                      └──────────────────────┘
 ```
 
+All `/api/*` traffic passes through `security.py`: a Host allow-list, a session-token
+gate, and a `PathGuard` that confines every filesystem access to the allowed root(s).
+
 ---
 
-## Backend (14 API endpoints)
+## Backend (15 API endpoints)
 
 ### `app.py` — Server
-Browse, serve, prepare, export (original + modified), reveal, rename, duplicate, delete, scan textures. Auto-converts `.blend` → `.glb` (Blender CLI) and old `.fbx` → `.obj`.
+Browse, serve, prepare, export (original + modified + GLB), reveal, rename, duplicate, delete, scan textures. Auto-converts old `.fbx` (version < 7000) → `.obj`. Every filesystem endpoint routes through `security.py`'s `PathGuard`.
+
+### `security.py` — Trust boundary
+`SecurityConfig` (allowed roots, bind host, session token), `PathGuard` (path confinement + filename sanitization), and ASGI middleware for the Host allow-list and token auth. See [API Reference](api.md#security-model).
 
 ### `file_browser.py`
-Lists directories + 3D assets (`.obj`, `.fbx`, `.gltf`, `.glb`, `.stl`, `.blend`, `.max`). Detects related files. Optional root constraint.
+Lists directories + 3D assets (`.obj`, `.fbx`, `.gltf`, `.glb`, `.stl`). Detects related files. Optional root constraint.
 
 ### `archive_inspector.py`
-ZIP (built-in), RAR (multi-tool fallback), `.unitypackage` (tar.gz with GUID structure).
-
-### `blend_converter.py`
-Finds Blender CLI (PATH, macOS app bundle, Windows Program Files). Runs `blender --background --python export.py` to convert `.blend` → `.glb`. Caches results.
+ZIP (built-in), RAR (multi-tool fallback), `.unitypackage` (tar.gz with GUID structure). Extracts into a single server-controlled temp base directory.
 
 ### `fbx_converter.py`
 Pure Python FBX binary parser (v5000–6100) → OBJ converter. Zero dependencies.
