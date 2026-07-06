@@ -68,6 +68,17 @@
         .lp-val { width: 42px; text-align: right; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
         #lp-reset { margin-top: 8px; }
         #btn-lights.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+        /* Screenshot preview modal */
+        #shot-modal { position: absolute; inset: 0; z-index: 30; display: none; align-items: center;
+            justify-content: center; background: rgba(0,0,0,.6); backdrop-filter: blur(3px); }
+        #shot-modal.open { display: flex; }
+        .shot-box { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+            padding: 12px; max-width: 90vw; max-height: 90vh; display: flex; flex-direction: column; gap: 8px; }
+        .shot-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+            font-size: 13px; font-weight: 600; }
+        .shot-head > div { display: flex; gap: 6px; }
+        #shot-img { max-width: 84vw; max-height: 72vh; border-radius: 8px; background: #000; object-fit: contain; }
+        .shot-hint { font-size: 11px; color: var(--muted); text-align: center; }
         @media (max-width: 640px) { .bar input[type=text] { width: 40vw; } .brand small { display:none; } }
     </style>
 </head>
@@ -139,6 +150,21 @@
         </div>
     </div>
 
+    <!-- Screenshot preview (avoids the browser "allow downloads" prompt) -->
+    <div id="shot-modal">
+        <div class="shot-box">
+            <div class="shot-head">
+                <span>Screenshot</span>
+                <div>
+                    <button id="shot-open" title="Open the image in a new tab to save it">Open in new tab</button>
+                    <button id="shot-close" title="Close">✕</button>
+                </div>
+            </div>
+            <img id="shot-img" alt="screenshot preview" />
+            <div class="shot-hint">Right-click / long-press the image to save it — or open it in a new tab.</div>
+        </div>
+    </div>
+
     <div id="status">Ready.</div>
     <div id="help">Drag: orbit · Scroll: zoom · Right-drag: pan · Space: reset</div>
     <input type="file" id="file" accept=".obj,.fbx,.gltf,.glb,.stl,.ply,.dae,.3mf,.usdz" style="display:none" />
@@ -202,11 +228,25 @@
             $("mode-badge").textContent = modes[mi][1];
             $("btn-mode").classList.toggle("active", modes[mi][0] !== "textured");
         });
+        // Screenshot → show a preview instead of forcing a download (which triggers the
+        // browser's "allow downloads" permission prompt). The user saves via the image's
+        // native right-click/long-press, or opens it in a new tab.
+        let shotBlobUrl = null;
         $("btn-shot").addEventListener("click", async () => {
             const r = await mv.execute({ action: "screenshot", params: { width: 1600, height: 1600 } });
             if (!r.ok) return;
-            const a = document.createElement("a"); a.href = r.result; a.download = "meshvault.png"; a.click();
+            // Show the preview immediately (never blocked by blob creation).
+            $("shot-img").src = r.result;
+            $("shot-modal").classList.add("open");
+            // Prepare a blob URL for the "Open in new tab" action (best-effort).
+            if (shotBlobUrl) { URL.revokeObjectURL(shotBlobUrl); shotBlobUrl = null; }
+            try { shotBlobUrl = URL.createObjectURL(await (await fetch(r.result)).blob()); }
+            catch { shotBlobUrl = r.result; }
         });
+        const closeShot = () => $("shot-modal").classList.remove("open");
+        $("shot-close").addEventListener("click", closeShot);
+        $("shot-modal").addEventListener("click", (e) => { if (e.target.id === "shot-modal") closeShot(); });
+        $("shot-open").addEventListener("click", () => { if (shotBlobUrl) window.open(shotBlobUrl, "_blank"); });
         $("btn-full").addEventListener("click", () => {
             if (document.fullscreenElement) document.exitFullscreen();
             else document.documentElement.requestFullscreen?.();
