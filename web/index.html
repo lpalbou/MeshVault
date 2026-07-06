@@ -30,6 +30,14 @@
         button:hover { border-color: var(--accent); }
         button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
         .badge { display: inline-block; min-width: 1.1em; text-align: center; }
+        /* Icon buttons in the toolbar */
+        .iconbtn { position: relative; width: 34px; height: 34px; padding: 0; display: inline-flex;
+            align-items: center; justify-content: center; }
+        .iconbtn svg { width: 18px; height: 18px; }
+        .iconbtn .badge { position: absolute; right: 1px; bottom: 0; font-size: 8px; font-weight: 700;
+            line-height: 1; padding: 1px 2px; border-radius: 3px; background: var(--accent); color: #fff; }
+        .iconbtn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+        .sep { width: 1px; align-self: stretch; background: var(--border); margin: 2px 2px; }
         #status { position: absolute; left: 14px; bottom: 12px; z-index: 10; font-size: 12px;
             color: var(--muted); background: var(--panel); padding: 6px 10px; border-radius: 8px;
             border: 1px solid var(--border); max-width: 60vw; }
@@ -86,13 +94,29 @@
         <div class="spacer"></div>
         <div class="bar">
             <input type="text" id="url" placeholder="Paste a model URL (glb, obj, …)" />
-            <button id="open-url">Open</button>
-            <button id="open-file">File…</button>
-            <button id="btn-front" title="Auto-find the best/front view">Front</button>
-            <button id="btn-mode" title="Cycle render mode: mesh+texture → mesh → wireframe">Mode <span class="badge" id="mode-badge">T</span></button>
-            <button id="btn-lights" title="Lighting">☀ Lights</button>
-            <button id="btn-shot" title="Download a PNG screenshot">Shot</button>
-            <button id="btn-full" title="Fullscreen">⤢</button>
+            <button id="open-url" class="iconbtn" title="Open the pasted URL" aria-label="Open URL">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+            </button>
+            <button id="open-file" class="iconbtn" title="Open a local file" aria-label="Open file">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </button>
+            <span class="sep"></span>
+            <button id="btn-front" class="iconbtn" title="Auto-find the best / front view" aria-label="Find best view">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="7"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>
+            </button>
+            <button id="btn-mode" class="iconbtn" title="Render mode: mesh + texture (click to cycle → mesh → wireframe)" aria-label="Render mode">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                <span class="badge" id="mode-badge">T</span>
+            </button>
+            <button id="btn-lights" class="iconbtn" title="Lighting" aria-label="Lighting">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.2" y1="4.2" x2="5.6" y2="5.6"/><line x1="18.4" y1="18.4" x2="19.8" y2="19.8"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.2" y1="19.8" x2="5.6" y2="18.4"/><line x1="18.4" y1="5.6" x2="19.8" y2="4.2"/></svg>
+            </button>
+            <button id="btn-shot" class="iconbtn" title="Download a PNG screenshot" aria-label="Screenshot">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            </button>
+            <button id="btn-full" class="iconbtn" title="Fullscreen" aria-label="Fullscreen">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3m13-5v3a2 2 0 0 1-2 2h-3"/></svg>
+            </button>
         </div>
     </header>
 
@@ -168,17 +192,15 @@
         // --- toolbar ---
         $("open-url").addEventListener("click", () => loadUrl($("url").value.trim()));
         $("url").addEventListener("keydown", (e) => { if (e.key === "Enter") loadUrl($("url").value.trim()); });
-        $("try-sample").addEventListener("click", () => {
-            // A small, permissively-licensed sample from the glTF sample models CDN.
-            const url = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/main/2.0/Duck/glTF-Binary/Duck.glb";
-            $("url").value = url; loadUrl(url);
-        });
+        // The demo model is bundled alongside the site (served statically, works offline).
+        $("try-sample").addEventListener("click", () => loadUrl("./sample.glb"));
         $("btn-front").addEventListener("click", () => mv.execute({ action: "find_best_view", params: { fill: 0.85 } }));
         const modes = [["textured","T"],["solid","M"],["wireframe","W"]]; let mi = 0;
         $("btn-mode").addEventListener("click", async () => {
             mi = (mi + 1) % modes.length;
             await mv.execute({ action: "set_render_mode", params: { mode: modes[mi][0] } });
             $("mode-badge").textContent = modes[mi][1];
+            $("btn-mode").classList.toggle("active", modes[mi][0] !== "textured");
         });
         $("btn-shot").addEventListener("click", async () => {
             const r = await mv.execute({ action: "screenshot", params: { width: 1600, height: 1600 } });
