@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "meshvault"
-version = "0.3.0"
+version = "0.3.1"
 description = "A professional 3D asset browser for rapid browsing, previewing, and managing OBJ/FBX files"
 authors = ["Laurent-Philippe Albou <contact@abstractcore.ai>"]
 license = "MIT"
@@ -44,7 +44,8 @@ exclude = [".DS_Store", "frontend/.DS_Store"]
 python = "^3.10"
 # >=0.116 required for starlette>=1.x compatibility (pulled in by the optional mcp extra)
 fastapi = ">=0.116,<1.0"
-uvicorn = {extras = ["standard"], version = "^0.30.0"}
+# >=0.31 required by mcp>=1.28; verified running on 0.50.x
+uvicorn = {extras = ["standard"], version = ">=0.31,<1.0"}
 python-multipart = "^0.0.9"
 rarfile = "^4.2"
 aiofiles = "^24.1.0"
@@ -52,7 +53,7 @@ trimesh = "^4.4.0"
 numpy = "^1.26"   # used directly by the MCP shape-compare engine (also a trimesh dep)
 # Optional: MCP adapter (agents drive the viewer via Model Context Protocol).
 # Install with: pip install "meshvault[mcp]" && playwright install chromium
-mcp = {version = ">=1.2", optional = true}
+mcp = {version = ">=1.28", optional = true}
 playwright = {version = ">=1.48", optional = true}
 
 [tool.poetry.extras]

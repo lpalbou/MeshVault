@@ -4,6 +4,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · [Semantic Ve
 
 ---
 
+## [0.3.1] — 2026-07-07
+
+### Fixed
+- **MCP extra installs a working server**: the optional `mcp` dependency floor is now `>=1.28` — older SDK versions (e.g. 1.12) that pip could previously resolve crash on import with `TypeError: issubclass() arg 1 must be a class` when registering tools with `dict | None` parameters. Found by verifying `pip install "meshvault[mcp]"` from PyPI in a clean environment.
+
 ## [0.3.0] — 2026-07-06
 
 ### Added
