@@ -45,6 +45,21 @@
         body.dragging #drophint { display: flex; }
         #help { position: absolute; right: 14px; bottom: 12px; z-index: 10; font-size: 11px;
             color: var(--muted); text-align: right; line-height: 1.5; }
+        /* Lighting panel */
+        #light-panel { position: absolute; top: 56px; right: 14px; z-index: 12; width: 240px;
+            background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+            display: none; overflow: hidden; }
+        #light-panel.open { display: block; }
+        .lp-head { padding: 9px 12px; border-bottom: 1px solid var(--border); font-size: 12px;
+            font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+        .lp-body { padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+        .lp-body label { font-size: 11px; font-weight: 600; color: var(--muted); margin-top: 4px; }
+        .lp-row { display: flex; align-items: center; gap: 8px; }
+        .lp-row > span:first-child { width: 12px; font-size: 11px; color: var(--muted); }
+        .lp-row input[type=range] { flex: 1; accent-color: var(--accent); }
+        .lp-val { width: 42px; text-align: right; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+        #lp-reset { margin-top: 8px; }
+        #btn-lights.active { background: var(--accent); border-color: var(--accent); color: #fff; }
         @media (max-width: 640px) { .bar input[type=text] { width: 40vw; } .brand small { display:none; } }
     </style>
 </head>
@@ -75,10 +90,30 @@
             <button id="open-file">File…</button>
             <button id="btn-front" title="Auto-find the best/front view">Front</button>
             <button id="btn-mode" title="Cycle render mode: mesh+texture → mesh → wireframe">Mode <span class="badge" id="mode-badge">T</span></button>
+            <button id="btn-lights" title="Lighting">☀ Lights</button>
             <button id="btn-shot" title="Download a PNG screenshot">Shot</button>
             <button id="btn-full" title="Fullscreen">⤢</button>
         </div>
     </header>
+
+    <!-- Lighting panel (mirrors MeshVault's light controls) -->
+    <div id="light-panel">
+        <div class="lp-head">Lighting</div>
+        <div class="lp-body">
+            <label>Direction</label>
+            <div class="lp-row"><span>H</span><input type="range" id="lp-azimuth" min="0" max="360" step="1" value="45"><span class="lp-val" id="lp-azimuth-v">45°</span></div>
+            <div class="lp-row"><span>V</span><input type="range" id="lp-elevation" min="5" max="90" step="1" value="60"><span class="lp-val" id="lp-elevation-v">60°</span></div>
+            <label>Key light</label>
+            <div class="lp-row"><input type="range" id="lp-key" min="0" max="3" step="0.05" value="1.2"><span class="lp-val" id="lp-key-v">1.20</span></div>
+            <label>Fill light</label>
+            <div class="lp-row"><input type="range" id="lp-fill" min="0" max="2" step="0.05" value="0.5"><span class="lp-val" id="lp-fill-v">0.50</span></div>
+            <label>Ambient</label>
+            <div class="lp-row"><input type="range" id="lp-ambient" min="0" max="2" step="0.05" value="0.3"><span class="lp-val" id="lp-ambient-v">0.30</span></div>
+            <label>Exposure (brightness)</label>
+            <div class="lp-row"><input type="range" id="lp-exposure" min="0.3" max="4" step="0.05" value="1.2"><span class="lp-val" id="lp-exposure-v">1.20</span></div>
+            <button id="lp-reset">Reset</button>
+        </div>
+    </div>
 
     <div id="status">Ready.</div>
     <div id="help">Drag: orbit · Scroll: zoom · Right-drag: pan · Space: reset</div>
@@ -153,6 +188,53 @@
         $("btn-full").addEventListener("click", () => {
             if (document.fullscreenElement) document.exitFullscreen();
             else document.documentElement.requestFullscreen?.();
+        });
+
+        // --- Lighting panel (same controls as MeshVault) ---
+        const lp = $("light-panel");
+        const lightDefaults = { azimuth: 45, elevation: 60, key: 1.2, fill: 0.5, ambient: 0.3, exposure: 1.2 };
+        // slider id -> { el, val, fmt, param }  (param = set_lighting field)
+        const lightMap = {
+            azimuth:   { param: "azimuth",        fmt: (v) => `${Math.round(v)}°` },
+            elevation: { param: "elevation",      fmt: (v) => `${Math.round(v)}°` },
+            key:       { param: "key_intensity",  fmt: (v) => v.toFixed(2) },
+            fill:      { param: "fill_intensity", fmt: (v) => v.toFixed(2) },
+            ambient:   { param: "ambient",        fmt: (v) => v.toFixed(2) },
+            exposure:  { param: "exposure",       fmt: (v) => v.toFixed(2) },
+        };
+        const applyLight = (key, value) => {
+            const m = lightMap[key];
+            $(`lp-${key}-v`).textContent = m.fmt(value);
+            mv.execute({ action: "set_lighting", params: { [m.param]: value } });
+        };
+        for (const key of Object.keys(lightMap)) {
+            $(`lp-${key}`).addEventListener("input", (e) => applyLight(key, parseFloat(e.target.value)));
+        }
+        // Sync the sliders to the viewer's current lighting when the panel opens.
+        const syncLightPanel = async () => {
+            const r = await mv.execute({ action: "get_lighting" });
+            if (!r.ok) return;
+            const s = r.result;
+            const cur = { azimuth: s.keyAzimuth, elevation: s.keyElevation, key: s.keyIntensity,
+                          fill: s.fillIntensity, ambient: s.ambientIntensity, exposure: s.exposure };
+            for (const key of Object.keys(lightMap)) {
+                $(`lp-${key}`).value = cur[key];
+                $(`lp-${key}-v`).textContent = lightMap[key].fmt(cur[key]);
+            }
+        };
+        $("btn-lights").addEventListener("click", async () => {
+            const open = !lp.classList.contains("open");
+            lp.classList.toggle("open", open);
+            $("btn-lights").classList.toggle("active", open);
+            if (open) await syncLightPanel();
+        });
+        $("lp-reset").addEventListener("click", async () => {
+            await mv.execute({ action: "set_lighting", params: {
+                azimuth: lightDefaults.azimuth, elevation: lightDefaults.elevation,
+                key_intensity: lightDefaults.key, fill_intensity: lightDefaults.fill,
+                ambient: lightDefaults.ambient, exposure: lightDefaults.exposure,
+            } });
+            await syncLightPanel();
         });
 
         // --- shareable state: ?src=<url> loads a model on open ---
