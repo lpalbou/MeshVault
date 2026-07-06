@@ -4,7 +4,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · [Semantic Ve
 
 ---
 
-## [Unreleased]
+## [0.3.0] — 2026-07-06
 
 ### Added
 - **MCP server (`meshvault-mcp`)** — agents on Claude/Cursor/any MCP client can now drive the viewer natively. A thin 6-tool surface (`load_model`, `describe_scene`, `viewer_execute`, `list_viewer_commands`, `get_state`, `screenshot`) routed through the existing control API, hosted in a headless Chromium page behind a loopback file server. `load_model` accepts an http(s) URL **or an absolute local file path** (local files are served under unguessable tokens; CORS-blocked URLs fall back to a size-capped server-side download) and returns the load result plus a full scene description in one call. Screenshots come back as real MCP image content, with a `best_view` option for one-call hero shots. Optional install: `pip install "meshvault[mcp]"` + `playwright install chromium`; docs in `docs/mcp.md`. Adversarially reviewed (protocol-clean stdio, crash-free under abuse, no orphan processes, path-confined loopback server).
