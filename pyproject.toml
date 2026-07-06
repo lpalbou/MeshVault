@@ -26,8 +26,17 @@ classifiers = [
     "Topic :: Multimedia :: Graphics :: Viewers",
 ]
 packages = [{include = "backend"}]
+# Ship exactly what the server needs at runtime. Enumerated on purpose: poetry-core
+# force-includes win over `exclude`, so a broad frontend/**/* would drag the ~12 MB of
+# test-fixture GLBs and multi-MB source maps into every wheel.
 include = [
-    { path = "frontend/**/*", format = ["sdist", "wheel"] },
+    { path = "frontend/index.html", format = ["sdist", "wheel"] },
+    { path = "frontend/viewer.html", format = ["sdist", "wheel"] },
+    { path = "frontend/llms.txt", format = ["sdist", "wheel"] },
+    { path = "frontend/llms-full.txt", format = ["sdist", "wheel"] },
+    { path = "frontend/css/**/*", format = ["sdist", "wheel"] },
+    { path = "frontend/dist/*.js", format = ["sdist", "wheel"] },
+    { path = "frontend/vendor/**/*", format = ["sdist", "wheel"] },
 ]
 exclude = [".DS_Store", "frontend/.DS_Store"]
 
