@@ -41747,7 +41747,8 @@ var Viewer3D = class {
         playing: !!this._animationPlaying,
         time: round(this.getAnimationTime()),
         duration: round(this.getAnimationDuration())
-      }
+      },
+      lighting: this.getLightSettings()
     };
   }
   /**

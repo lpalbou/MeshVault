@@ -382,8 +382,12 @@ export class ViewerControlAPI {
                 requiresModel: true,
                 handler: (p) => v.frameView({ fill: p.fill, keepDirection: p.keep_direction }),
             },
+            get_lighting: {
+                description: "Return the current studio lighting: key light azimuth/elevation (deg), key/fill/ambient intensities, and exposure.",
+                handler: () => v.getLightSettings(),
+            },
             set_lighting: {
-                description: "Adjust the studio lighting for hero shots. All params optional (degrees / multipliers).",
+                description: "Adjust the studio lighting (brightness). All params optional. azimuth/elevation in degrees; key_intensity/fill_intensity/ambient are light multipliers; exposure is the tone-mapping exposure (overall brightness). Also in getState().lighting.",
                 params: {
                     azimuth: { type: "number", min: 0, max: 360 },
                     elevation: { type: "number", min: 0, max: 90 },

@@ -1807,6 +1807,7 @@ export class Viewer3D {
                 time: round(this.getAnimationTime()),
                 duration: round(this.getAnimationDuration()),
             },
+            lighting: this.getLightSettings(),
         };
     }
 
