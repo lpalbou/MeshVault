@@ -15,6 +15,10 @@ on:
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/pages.yml"
+  # Also redeploy whenever a GitHub Release is published (covers tag/release-based
+  # releases that don't touch the paths above on main).
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
