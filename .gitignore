@@ -15,6 +15,11 @@ build/
 !frontend/dist/
 frontend/dist/*.map
 
+# MCP example outputs (generated evidence images)
+examples/mcp/inspect_out/
+examples/mcp/parts_out/
+examples/mcp/hero_out/
+
 # The web/ Pages site: index.html is tracked; the bundle + copied vendor decoders are
 # build artifacts (CI rebuilds them). The source vendor lives in frontend/vendor.
 web/meshvault-viewer.js

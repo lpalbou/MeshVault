@@ -26,6 +26,13 @@ gate, and a `PathGuard` that confines every filesystem access to the allowed roo
 ### `app.py` — Server
 Browse, serve, prepare, export (original + modified + GLB), reveal, rename, duplicate, delete, scan textures. Auto-converts old `.fbx` (version < 7000) → `.obj`. Every filesystem endpoint routes through `security.py`'s `PathGuard`.
 
+### `mesh_compare.py` — Shape registration
+Registers two surface point sets (PCA-initialized trimmed ICP + Kabsch), returns
+symmetric chamfer/Hausdorff distances (normalized, sampling-floor-corrected), a
+similarity classification, and the alignment transform. Shared by the MCP
+`compare_models` tool and the app's `POST /api/compare` endpoint — one algorithm, two
+front-ends. numpy only.
+
 ### `security.py` — Trust boundary
 `SecurityConfig` (allowed roots, bind host, session token), `PathGuard` (path confinement + filename sanitization), and ASGI middleware for the Host allow-list and token auth. See [API Reference](api.md#security-model).
 
@@ -38,6 +45,13 @@ ZIP (built-in), RAR (multi-tool fallback), `.unitypackage` (tar.gz with GUID str
 ### `fbx_converter.py`
 Pure Python FBX binary parser (v5000–6100) → OBJ converter. Zero dependencies.
 
+### `mcp_server.py` — MCP adapter (optional)
+`meshvault-mcp` exposes the viewer to MCP clients (Claude, Cursor) as 6 tools routed
+through the control API: `load_model` (URL or local path), `describe_scene`,
+`viewer_execute`, `list_viewer_commands`, `get_state`, `screenshot` (MCP image content).
+Runs the standalone viewer in headless Chromium behind a loopback, path-confined file
+server. Optional deps: `pip install "meshvault[mcp]"`. See [MCP Server](mcp.md).
+
 ---
 
 ## Frontend
@@ -49,8 +63,8 @@ Wires everything: file browser, viewer, export panel. Toolbar toggles (screensho
 List + grid view, sort (name/size/type), search filter, inline rename, right-click context menu (rename/duplicate/delete/reveal). Color-coded badges. Remember last directory.
 
 ### `viewer_3d.js`
-- **Rendering**: PBR, 5-light, SSAO, ACES, shadows
-- **Loaders**: OBJ+MTL, FBX, GLTF/GLB, STL (+ Blend/MAX handled by backend)
+- **Rendering**: PBR, 5-light + IBL (procedural environment via PMREM), SSAO, ACES, shadows
+- **Loaders**: OBJ+MTL, FBX, GLTF/GLB (incl. Draco / KTX2-Basis / Meshopt — decoders vendored locally), STL, PLY, DAE, 3MF, USDZ
 - **Navigation**: Orbit + FPV drone with race condition guard
 - **Scene**: Grid (adaptive), axes (labeled), normals viz, wireframe
 - **Transforms**: Center, ground, PCA orient, rotate ±90°, simplify (merge + edge collapse), smooth normals
@@ -61,6 +75,13 @@ List + grid view, sort (name/size/type), search filter, inline rename, right-cli
 
 ### `export_panel.js`
 Modified → `/api/export_modified` (OBJ). Original → `/api/export`. Auto-refreshes browser.
+
+### `compare.js` + `viewer/heatmap.js`
+Shape comparison in the app (backlog 041): right-click an asset → "Compare to loaded
+model" samples both surfaces (candidate in a short-lived offscreen viewer), registers
+them via `POST /api/compare`, and paints a per-vertex deviation heatmap
+(`three-mesh-bvh` closest-distance, unlit colour ramp) on the loaded model + a verdict
+panel. One model displayed at a time; the co-loaded multi-object scene is future work.
 
 ---
 
@@ -84,13 +105,17 @@ A single, self-describing command surface designed to be driven by AI agents or 
 - `getState()` / `getSceneInfo()` — JSON snapshots (model, camera+fov+presets, display, animation; per-mesh/material).
 - `on(event, cb)` — `loaded`, `error`, `animations`, `measurement`, `executed`.
 - Commands: `load`/`unload`, `get_camera`/`set_camera`/`set_view`/`orbit`/`frame`/`reset_camera`/`set_nav_mode`,
-  `set_render_mode` (textured/solid/wireframe/normals)/`set_wireframe`/`set_grid`/`set_axes`/`set_normals`/`set_clip`/`set_fog`/`set_background`/`set_scale`/`set_lighting`,
+  `score_views`/`find_best_view`/`auto_upright` (semantic-front discovery + camera uprighting),
+  `focus` (frame a part by stable mesh id / name / world point — rescales clip planes so tiny parts stay visible),
+  `set_render_mode` (textured/solid/wireframe/normals)/`set_wireframe`/`set_grid`/`set_axes`/`set_normals`/`set_clip`/`set_fog`/`set_background`/`set_scale`/`set_lighting`/`set_environment`/`get_environment` (IBL),
   `center`/`ground`/`auto_orient`/`rotate`/`simplify`/`recompute_normals`/`reset`,
   `play_animation`/`pause_animation`/`set_animation_time`/`set_animation_speed`,
   `measure`/`set_measure_mode`, `export_obj`/`export_glb`,
   `screenshot`/`capture_views`/`turntable` (hero shots: resolution, transparency, fog/ground/SSAO control),
-  `get_state`/`get_scene_info`/`get_bounds`.
+  `get_state`/`get_scene_info`/`get_bounds`/`describe_scene` (structured text snapshot + geometry QA for text-only agents).
   Model-dependent commands return `{ok:false}` when no model is loaded; unknown params are rejected.
+- Agent docs are served at `/llms.txt` (index) and `/llms-full.txt` (full command reference);
+  MCP access is documented in [MCP Server](mcp.md).
 
 ### `viewer/standalone.js` — `createViewer(container, options)`
 Instantiates the engine + control API with a client-only resolver and exposes

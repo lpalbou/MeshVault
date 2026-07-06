@@ -81,6 +81,18 @@ class ExportModifiedRequest(BaseModel):
     obj_content: str
 
 
+class CompareRequest(BaseModel):
+    """Request body for geometric shape comparison.
+
+    Pure point-set math: the frontend samples both models it has loaded and posts the
+    world-space points. No filesystem access, so this endpoint needs no PathGuard.
+    """
+    reference: list[list[float]]
+    candidate: list[list[float]]
+    reference_alt: Optional[list[list[float]]] = None
+    align: bool = True
+
+
 class BrowseResponse(BaseModel):
     """Response for browse endpoint."""
     current_path: str
@@ -510,6 +522,27 @@ def export_modified(request: ExportModifiedRequest):
         "message": f"Exported modified model as OBJ",
         "files_exported": [str(obj_path)],
     }
+
+
+@app.post("/api/compare")
+def compare_shapes(request: CompareRequest):
+    """Register two surface point sets and return the shape-comparison report.
+
+    Shares the exact registration engine the MCP `compare_models` tool uses, so the app
+    and agents get identical geometry verdicts. Pure math — no filesystem, no PathGuard.
+    Synchronous (`def`) so the CPU-bound numpy runs in the threadpool, not the loop.
+    """
+    import numpy as np
+    from backend.mesh_compare import compare_point_sets
+
+    try:
+        ref = np.asarray(request.reference, dtype=np.float64)
+        cand = np.asarray(request.candidate, dtype=np.float64)
+        alt = (np.asarray(request.reference_alt, dtype=np.float64)
+               if request.reference_alt else None)
+        return compare_point_sets(ref, cand, align=request.align, reference_alt=alt)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/api/export_glb")

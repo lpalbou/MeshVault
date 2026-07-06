@@ -133,3 +133,56 @@ version that produced false positives or missed real defects:
 - **Describe the ASSET, not the display override**: render modes swap `child.material`
   and stash the original on `_mvOriginalMaterial`; an inventory that reads the override
   claims a textured model is untextured.
+
+---
+
+## Never bake matrices into quantized (integer) vertex attributes
+
+KHR_mesh_quantization stores positions/normals as normalized Int16/Uint16 with the
+dequantization scale in the NODE transform (common in KTX2/Meshopt pipelines).
+`geometry.applyMatrix4(matrixWorld)` reads through the accessor (denormalizes) but
+writes world-scale floats back into the integer array — overflow garbage that destroys
+the model (live-verified: after `rotate`, bounds exploded to the uint16 range and the
+render went blank). Any in-place bake must first convert affected attributes to plain
+`Float32Array` (read via `getX/getY/getZ`, which decode normalization). MeshVault does
+this in `_dequantizeVectorAttributes()` before `_bakeWorldTransforms()`. The skinned
+sibling of this trap (baking geometry while bones keep transforming it) is still open —
+see backlog follow-ups.
+
+## Part-level camera work needs a clip-plane story, not just coordinates
+
+Exposing per-mesh centers is NOT enough for agents to inspect parts: `camera.near` is
+sized once per model (`0.001 × whole-model frame distance`) and OrbitControls'
+`min/maxDistance` are absolute constants, so framing a part smaller than ~1/800 of the
+model renders ZERO pixels even with mathematically correct `set_camera` values
+(live-verified: 1 cm screw on a 10 m housing). `focus` therefore rescales near/far and
+the distance clamps to the part, and restores them on `reset_camera`/whole-model
+framing. Also: address parts by stable traversal-order id, not name — empirical dump of
+real models showed names are mostly loader garbage ("mesh_0", UUIDs, "(unnamed)").
+
+---
+
+## Shape comparison / registration lives in one place, two front-ends
+
+`backend/mesh_compare.py` (numpy-only ICP+Kabsch with PCA init, trimmed correspondences,
+mirror probe, sampling-noise floor) is the single registration algorithm. It is reached
+by the MCP `compare_models` tool (calls the function directly) and by the app's
+`POST /api/compare` endpoint (pure point-set math — no filesystem, so no PathGuard). The
+frontend samples both models it has loaded (`sample_points`, deterministic area-weighted)
+and posts the point arrays. Do NOT port ICP to JS — one algorithm, no drift; the ~1-2 s
+round trip is fine for a click-driven op. `compare_point_sets` returns `matrix4`
+(column-major) so the app can apply the alignment to a three.js group directly.
+
+## In-app deviation heatmap: read positions via the accessor; make it UNLIT
+
+`frontend/js/viewer/heatmap.js` paints each vertex of the displayed model by its
+closest-distance to another (registered) model's surface, via a `three-mesh-bvh` BVH
+(app bundle only — not the standalone/agent bundle). Two load-bearing lessons:
+- Build the BVH by reading the OTHER model's positions through `fromBufferAttribute`
+  (accessor), NOT `geometry.applyMatrix4`/raw `.array`: quantized/interleaved attributes
+  (KHR_mesh_quantization Int16) overflow otherwise ("offset is out of bounds"). Same trap
+  as `_bakeWorldTransforms` — see the quantization entry above.
+- Use `MeshBasicMaterial` (unlit) for the ramp, not a lit material: a deviation colour
+  must read identically regardless of scene lighting, or a shadowed red patch looks like
+  a lit blue one. Ramp floor at ~1% of the bbox diagonal so compression/sampling noise
+  reads as "matches" (cool) and only genuine edits light up.

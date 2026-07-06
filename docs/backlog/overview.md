@@ -4,7 +4,7 @@ Durable planning memory for MeshVault. Records what exists, what is next, what w
 considered, and why priorities are ordered as they are. Treat stale text here as a bug.
 
 Last update: 2026-07-06 (026 compressed-glTF decoders + 027 IBL + 029 describe_scene
-(incl. 031 QA checks) implemented, each adversarially reviewed by 3 agents).
+(incl. 031 QA checks) + 030 MCP adapter implemented, each adversarially reviewed).
 
 ---
 
@@ -23,9 +23,35 @@ Next free ID: **0025**.
 
 | State | Count | IDs |
 |-------|------:|-----|
-| completed | 21 | 001–005, 009–014, 017–021, 025, 026, 027, 029, 031 |
+| completed | 25 | 001–005, 009–014, 017–021, 025, 026, 027, 029, 030, 031, 036, 037, 039 |
 | planned | 3 | 006, 007, 008 |
-| proposed | 11 | 015, 016, 022, 023, 024, 028, 030, 032, 033, 034, 035 |
+| proposed | 14 | 015, 016, 022, 023, 024, 028, 032, 033, 034, 035, 038 (partial), 040 (parked), 041 (v1 done; v2 proposed), 042 |
+
+Next free ID: **0043**.
+
+Note: `039` completed with `compare_models` (geometric shape comparison / registration —
+`sample_points` + `backend/mesh_compare.py`), 4-agent reviewed; the MCP now exposes 7
+tools. `038` still partial (UV diagnostics / image stats remain).
+
+Note: `041` v1 (in-app compare: deviation heatmap + verdict panel over `POST
+/api/compare`) shipped 2026-07-06 after a 3-agent design review; its v2 (co-loaded
+registered overlay) folds into `042` (virtual scene composition — multi-object scenes,
+positioning gizmos, scene manifest persistence, merged-GLB export, agent parity), the
+natural abstract3d integration point.
+
+Note: `040` and its full staged strategy live in `proposed/browser-free/` — deliberately
+parked (headless Chromium is good enough for current goals); the strategy doc lists the
+concrete triggers that would justify scheduling it (fleet scale, abstract3d batch QA,
+GPU hosts).
+
+## 2026-07-06 MCP field test (3 face-reconstruction iterations, 3 agents + self)
+
+Real-world use surfaced the next high-value gaps, filed as `037` (mesh statistics +
+issue localization — connectivity QA alone gives wrong quality verdicts), `038` (texture
+/material introspection + authored-vs-displayed PBR fidelity), `039` (multi-view MCP
+capture, best-view metadata, A/B compare). Fixed immediately: intra-session load→describe
+race (serialized), measurement overlay not clearable (`clear_measurement` +
+`set_measure_mode false` now clears).
 
 Next free ID: **0036**.
 
@@ -43,7 +69,9 @@ Ranked highest-value additions (market + AI-agent + web-deploy passes):
   (procedural RoomEnvironment PMREM, `set_environment` API, solid-mode suspension).
 - `029` Structured `describe_scene` report — highest leverage for agents. **Done
   2026-07-06** (one-call text snapshot + QA issues; 031 folded in).
-- `028` PBR-Neutral tone mapping (S), `030` thin MCP adapter, `031` model-QA command,
+- `030` thin MCP adapter — **Done 2026-07-06** (`meshvault-mcp`, 6 tools, URL or local
+  file input, image content back; see docs/mcp.md).
+- `028` PBR-Neutral tone mapping (S), `031` model-QA command,
   `032` shareable URL state + embed, `033` scene-graph inspector, `034` CORS-aware load UX,
   `035` secondary bundle (shadow catcher, section caps, video export, A/B compare, splats…).
 
@@ -115,6 +143,10 @@ Editing track — gated behind the shipped Phase 0 (confinement, `010`/`012`) an
 - **Pre-existing bug: `reset` after `simplify` fails** with "offset is out of bounds"
   (found by the 029 robustness reviewer; unrelated to describe_scene — the saved original
   geometry snapshot conflicts with the simplified attribute layout). Needs its own fix.
+- **Pre-existing bug: `rotate` on a playing SKINNED model double-transforms** (baked
+  geometry + live bones render corrupt; found by the 036 design attacker). The quantized
+  sibling of this bug (integer-attribute bake corruption) was fixed with 036; the skinned
+  case still needs a decision (block transform while animated, or re-bind skeletons).
 - **Key/fill direction controls are visually subdued on metallic models while IBL is on**
   (IBL dominates, as in reference viewers) — accepted behavior, documented here.
 - **Vendored decoder wasm (`frontend/vendor/`) must be re-synced when `three` is bumped**

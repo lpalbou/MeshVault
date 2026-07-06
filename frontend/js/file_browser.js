@@ -79,12 +79,14 @@ export class FileBrowser {
      * @param {Function} onStatusUpdate - Callback to update status text
      * @param {Function} [onExportRequest] - Callback when user requests export from context menu
      */
-    constructor(container, pathDisplay, onAssetSelect, onStatusUpdate, onExportRequest = null, thumbnailer = null) {
+    constructor(container, pathDisplay, onAssetSelect, onStatusUpdate, onExportRequest = null, thumbnailer = null, onCompareRequest = null) {
         this._container = container;
         this._pathDisplay = pathDisplay;
         this._onAssetSelect = onAssetSelect;
         this._onStatusUpdate = onStatusUpdate;
         this._onExportRequest = onExportRequest;
+        // Optional: "Compare to loaded model" context action (backlog 041).
+        this._onCompareRequest = onCompareRequest;
         // Optional lazy thumbnail renderer for grid view (backlog 014).
         this._thumbnailer = thumbnailer;
         this._thumbObserver = null;
@@ -619,6 +621,13 @@ export class FileBrowser {
         if (asset && typeof this._onExportRequest === "function") {
             this._addContextMenuItem(menu, "Export…", () => {
                 this._onExportRequest(asset);
+            });
+        }
+
+        // --- Compare to the currently loaded model (backlog 041) ---
+        if (asset && typeof this._onCompareRequest === "function") {
+            this._addContextMenuItem(menu, "Compare to loaded model…", () => {
+                this._onCompareRequest(asset);
             });
         }
 

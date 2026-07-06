@@ -9,6 +9,7 @@ import { FileBrowser } from "./file_browser.js";
 import { Viewer3D } from "./viewer_3d.js";
 import { ExportPanel } from "./export_panel.js";
 import { Thumbnailer } from "./thumbnailer.js";
+import { ModelComparer } from "./compare.js";
 
 
 class App {
@@ -45,6 +46,7 @@ class App {
             (text) => this._updateStatus(text),
             (asset) => this._onExportRequested(asset),
             this._thumbnailer,
+            (asset) => this._onCompareRequested(asset),
         );
 
         this._viewer = new Viewer3D(
@@ -59,6 +61,9 @@ class App {
                     `/api/asset/related?path=${encodeURIComponent(ref)}`,
             }
         );
+
+        // Shape comparison (backlog 041): compare another asset against the loaded model.
+        this._comparer = new ModelComparer(this._viewer, (m, t) => this._showToast(m, t));
 
         this._exportPanel = new ExportPanel(
             {
@@ -211,10 +216,44 @@ class App {
     }
 
     /**
+     * Called when the user picks "Compare to loaded model" on an asset. Builds a
+     * loadable URL for the candidate (same rules as _onAssetSelected) and hands it to
+     * the comparer, which samples both models, registers them, and paints a heatmap.
+     */
+    async _onCompareRequested(asset) {
+        if (!this._viewer._currentModel) {
+            this._showToast("Load a model first, then compare another to it", "error");
+            return;
+        }
+        try {
+            let url;
+            let ext = asset.extension;
+            if (asset.is_in_archive) {
+                const prep = await fetch(
+                    `/api/asset/prepare_archive?archive_path=${encodeURIComponent(asset.archive_path)}` +
+                    `&inner_path=${encodeURIComponent(asset.inner_path)}`);
+                if (!prep.ok) throw new Error("Failed to extract candidate from archive");
+                const p = await prep.json();
+                url = p.file_url;
+                if (p.actual_extension) ext = p.actual_extension;
+            } else {
+                url = `/api/asset/file?path=${encodeURIComponent(asset.path)}`;
+            }
+            await this._comparer.compare({ url, extension: ext, name: `${asset.name}${asset.extension}` });
+        } catch (err) {
+            console.error("Compare request failed:", err);
+            this._showToast(`Compare failed: ${err.message}`, "error");
+        }
+    }
+
+    /**
      * Called when a 3D asset is selected in the file browser.
      * Loads the asset in the 3D viewer and shows the export controls.
      */
     async _onAssetSelected(asset) {
+        // Selecting a new model ends any active comparison (heatmap belongs to the old one).
+        if (this._comparer && this._comparer.isActive) this._comparer.clear();
+
         this._lastLoadedAsset = asset;
 
         // Show loading overlay

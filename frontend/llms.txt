@@ -18,6 +18,9 @@ Key facts for agents:
 - Best first move after loading: `describe_scene` — one structured snapshot (summary sentence,
   inventory, size hint, hierarchy, materials, detected geometry issues, current view) so you can
   reason about the model without any screenshot.
+- Explore parts: describe_scene gives each mesh a stable `id` + world `center`/`size`;
+  `focus {id}` (or name/point) frames that part — even tiny ones — keeping the view direction.
+  `reset_camera` returns to the whole model.
 - "front/back/left/right" presets are WORLD-AXIS conventions and are often wrong for
   mis-oriented models. To find a model's real front, use `find_best_view` (scores angles by
   lighting-independent visible detail and auto-uprights the camera).
@@ -26,14 +29,20 @@ Key facts for agents:
 - Image-based lighting (IBL) is on by default for realistic PBR reflections; control it
   with `set_environment { enabled, intensity, asBackground }` / `get_environment`.
 
+- MCP: agents can drive MeshVault natively via the bundled MCP server (`meshvault-mcp`,
+  6 tools: load_model [URL or local path], describe_scene, viewer_execute,
+  list_viewer_commands, get_state, screenshot). See /static/../docs/mcp.md.
+
 ## Docs
 
 - [Control API reference (full)](/llms-full.txt): Every command, parameters, return shapes, and worked examples for driving the viewer.
-- [Architecture](/static/../docs/architecture.md): System design, the viewer core / control API / standalone bundle, and the backend.
-- [API Reference (backend REST)](/static/../docs/api.md): The local server's HTTP endpoints and security model.
-- [Getting Started](/static/../docs/getting_started.md): Install, run, UI overview.
+- [MCP server](https://github.com/lpalbou/MeshVault/blob/main/docs/mcp.md): Drive the viewer from Claude/Cursor via Model Context Protocol — install, client config, tools.
+- [MCP usage examples](https://github.com/lpalbou/MeshVault/tree/main/examples/mcp): Runnable agent workflows (inspect, compare iterations, explore parts, hero shots).
+- [Architecture](https://github.com/lpalbou/MeshVault/blob/main/docs/architecture.md): System design, the viewer core / control API / standalone bundle, and the backend.
+- [API Reference (backend REST)](https://github.com/lpalbou/MeshVault/blob/main/docs/api.md): The local server's HTTP endpoints and security model.
+- [Getting Started](https://github.com/lpalbou/MeshVault/blob/main/docs/getting_started.md): Install, run, UI overview.
 
 ## Optional
 
-- [FAQ](/static/../docs/faq.md): Formats, troubleshooting, dev/build notes.
+- [FAQ](https://github.com/lpalbou/MeshVault/blob/main/docs/faq.md): Formats, troubleshooting, dev/build notes.
 - [Demo harness](/static/viewer.html): Live standalone viewer exposing `window.mv`.

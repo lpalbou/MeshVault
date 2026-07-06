@@ -1809,3 +1809,71 @@ html, body {
     .anim-scrub { width: 120px; }
     .animation-bar { flex-wrap: wrap; max-width: 90vw; }
 }
+
+/* ==========================================================================
+   Shape comparison panel (backlog 041) — verdict + heatmap legend overlay.
+   ========================================================================== */
+.compare-panel {
+    position: absolute;
+    top: 64px;
+    right: 16px;
+    width: 320px;
+    max-width: 40vw;
+    background: rgba(24, 26, 31, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 10px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    color: #e6e8ec;
+    font-size: 13px;
+    z-index: 50;
+    overflow: hidden;
+}
+.compare-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    font-weight: 600;
+    background: rgba(255, 255, 255, 0.04);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.compare-panel-close {
+    background: none;
+    border: none;
+    color: #9aa0a6;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+.compare-panel-close:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
+.compare-panel-body { padding: 12px; }
+.compare-panel-body.error { color: #f2a3a0; }
+.cmp-verdict {
+    font-size: 15px;
+    font-weight: 600;
+    padding: 6px 10px;
+    margin-bottom: 8px;
+    border-left: 3px solid #888;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 4px;
+}
+.cmp-warn {
+    font-size: 12px;
+    color: #e0c07a;
+    background: rgba(224, 165, 43, 0.1);
+    border-radius: 4px;
+    padding: 5px 8px;
+    margin-bottom: 6px;
+}
+.cmp-table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+.cmp-table th {
+    text-align: left;
+    font-weight: 500;
+    color: #9aa0a6;
+    padding: 4px 8px 4px 0;
+    vertical-align: top;
+    white-space: nowrap;
+}
+.cmp-table td { padding: 4px 0; }
+.cmp-hint { margin-top: 10px; font-size: 11px; color: #7f858c; }

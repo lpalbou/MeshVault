@@ -23,6 +23,16 @@ const mv = window.MeshVaultViewer.createViewer(document.getElementById("app"));
 Live harness for experimentation: open `/static/viewer.html`; `window.mv` is a ready
 instance.
 
+MCP (Model Context Protocol): if you are an MCP-connected agent, you don't need a
+browser at all — the `meshvault-mcp` server hosts this same viewer headlessly and
+exposes 6 tools: `load_model` (http(s) URL or absolute local file path; loads AND
+returns a scene description in one call), `describe_scene`, `viewer_execute`
+({action, params} passthrough to every command in this document),
+`list_viewer_commands`, `get_state`, and `screenshot` (returns real MCP image content;
+`best_view:true` for a one-call hero shot). Install: `pip install "meshvault[mcp]"`,
+`playwright install chromium`, then wire `meshvault-mcp` into your client config.
+Full setup + behavior notes: docs/mcp.md.
+
 `createViewer(container, options)` returns an object with:
 - `execute(command)` → Promise<{ok, result|error}> — the one command entry point.
 - `getState()` → JSON snapshot (also available as the `get_state` command).
@@ -54,6 +64,9 @@ Rules an agent can rely on:
 
 - `get_state` → {
     model: { loaded, name, vertices, faces, dimensions{width,height,depth}, bounds{min,max,center,size}, scale, modified },
+    NOTE: get_state.model.vertices counts UNIQUE welded positions; describe_scene and
+    get_scene_info count position-attribute entries (seam duplicates included) — the two
+    numbers legitimately differ on any mesh with UV/normal seams.
     camera: { mode, position[3], target[3], fov, presets[] },
     display: { wireframe, grid, axes, normals, background, renderMode, clip, fog },
     animation: { hasAnimations, clips[], playing, time, duration }
@@ -70,8 +83,14 @@ Rules an agent can rely on:
              animated, animationClips[], dimensions{width,height,depth},
              bounds{min,max,center,size}, sizeHint, userScale, modified },
     hierarchy: { nodes:[{name,kind,depth}], totalNodes, truncated },   // outline, depth<=4
-    meshes:    { items:[{name,triangles,vertices,materials[],hasUVs,
-                         hasVertexColors?,skinned?}], omitted },       // largest first
+    meshes:    { items:[{id,name,triangles,vertices,center[3],size[3],materials[],
+                         hasUVs,hasVertexColors?,skinned?}], omitted },  // largest first
+                // id = stable mesh id (pass to `focus {id}`); center/size = world-space
+                // placement of the part (skinned meshes report the bind pose)
+                // materials items also carry: textures {slot:{width,height,colorSpace}}
+                // and, when the viewer adjusted PBR values for preview, the asset's
+                // ORIGINAL values in `authored` + modifiedByViewer:true — audit the
+                // authored values, not the displayed ones.
     materials: { items:[{name,type,color,metalness,roughness,maps[],transparent,doubleSided}], omitted },
     issues:    [{ severity:error|warning|info, code, message, meshes?[] }],
     view:      { camera{position,target,fov,mode}, renderMode, environment, clip, grid },
@@ -89,6 +108,20 @@ Rules an agent can rely on:
   (signed-volume test on closed meshes), and checks_skipped when the scene exceeds the
   300k-triangle QA budget (report stays fast).
   With no model loaded it returns { loaded:false, summary } instead of an error.
+
+- `sample_points { count?:16..20000=4096, seed?=42 }` → { count, seed, surfaceArea,
+  points:[[x,y,z],...] } — deterministic, area-weighted surface samples in WORLD space
+  (the geometric fingerprint used for comparison; same model+seed = same points).
+- `get_mesh_stats` → numeric surface-quality statistics: per-mesh + total surface area,
+  volume (NULL for open meshes — not computable reliably when the surface isn't closed),
+  edge-length distribution (min/median/p95/max), sliver %, dihedral roughness (mean/p95
+  angle between adjacent faces — a RELATIVE indicator for comparing iterations of the
+  same asset; hard-edged models legitimately score high, e.g. a cube is 60° mean),
+  open/non-manifold/degenerate counts, and `issuePoints`: representative world locations
+  of defects to `focus {point}` on. Multi-mesh totals carry `approx:true` on median/mean
+  fields (triangle-weighted; read per-mesh entries for precision). USE THIS to compare
+  mesh iterations: connectivity QA alone can mislead (a topologically perfect mesh can
+  be visual garbage). Skipped with `skipped:true` above 300k triangles.
 
 After any command, re-read `get_state` to verify the effect. To SEE the result, call
 `screenshot` and read the returned PNG data URL.
@@ -127,6 +160,32 @@ models are baked in odd orientations (lying down, facing an unexpected axis). Th
 
   `auto_upright` — correct only the camera roll for the CURRENT view (uses left-right
   symmetry of the framed subject). Useful after a manual `orbit`/`set_view`.
+
+================================================================================
+## 5b. Exploring parts of a model  (focus)
+
+After `describe_scene` you know each mesh's `id`, `name`, world `center` and `size`.
+`focus` points the camera at one of them (or any world point) — including parts far too
+small to see in the whole-model view (it rescales clip planes and zoom limits; a 1 cm
+part on a 10 m assembly frames correctly):
+
+  `focus { id?:number, name?:string, point?:[x,y,z], radius?:number, fill?:0.1..1 }`
+    → { target:{kind,id?,name?}, center[3], size[3], distance, camera, note }
+
+  - PREFER `id` (from describe_scene/get_scene_info): real-world mesh names are often
+    meaningless ("mesh_0", UUIDs) or absent. `name` matches meshes AND groups
+    (exact > case-insensitive > substring) and errors with candidates when ambiguous.
+  - The view DIRECTION is kept; only target/distance change. The part may be OCCLUDED
+    by surrounding geometry — combine with `set_clip {axis:'camera'}` or
+    `set_render_mode wireframe` to see through, then `screenshot` to verify.
+  - `orbit`/`set_view`/`frame`/`find_best_view` re-frame the WHOLE model (they do not
+    know about the focused part) — call `focus` again afterwards if needed.
+  - `reset_camera` restores the whole-model view and the original clip planes.
+  - Skinned meshes: positions are the bind pose, not the animated pose.
+
+Exploration recipe: `describe_scene` → pick parts by size/name/issues → `focus {id}` →
+`screenshot` → repeat. For interior parts: `focus` + `set_clip {enabled:true,
+axis:'camera', position:0.3}`.
 
 Recommended agent recipe for a hero shot of an unknown model:
 ```js
@@ -167,6 +226,8 @@ const shot = await mv.execute({ action: "screenshot", params: { width: 1024, hei
 - `set_background { color: "#rrggbb" }`, `set_scale { scale }`.
 - `set_lighting { azimuth?, elevation?, key_intensity?, fill_intensity?, ambient?, exposure? }`
   — studio light rig for a hero look (degrees / multipliers; only provided fields apply).
+  NOTE: with IBL on (the default), light-direction changes are visually subtle — call
+  `set_environment {enabled:false}` first when you need a directional lighting sweep.
 - `set_environment { enabled?, intensity?:0..5, asBackground? }` — image-based lighting
   (IBL): a procedural studio environment that gives PBR/metallic materials realistic
   reflections. ON by default at intensity 1 (the studio light rig above stays active as
@@ -200,7 +261,9 @@ const shot = await mv.execute({ action: "screenshot", params: { width: 1024, hei
 ## 10. Measurement
 
 - `measure { a:[x,y,z], b:[x,y,z] }` → { distance } and draws the line.
-- `set_measure_mode { enabled }` — interactive click-to-measure.
+- `set_measure_mode { enabled }` — interactive click-to-measure; disabling clears the overlay.
+- `clear_measurement` — remove the measurement markers/line/label (do this before a
+  clean screenshot; a prior `measure` otherwise stays visible in every capture).
 
 ================================================================================
 ## 11. Capture / hero shots

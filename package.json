@@ -43,7 +43,8 @@
     "node": ">=16.0.0"
   },
   "dependencies": {
-    "playwright": "^1.58.2"
+    "playwright": "^1.58.2",
+    "three-mesh-bvh": "^0.7.8"
   },
   "devDependencies": {
     "esbuild": "^0.24.2",

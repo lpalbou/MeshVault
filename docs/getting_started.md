@@ -133,6 +133,15 @@ Click **Export** → folder browser dialog → filename pre-filled → **Save**.
 
 ---
 
+## Driving MeshVault with AI agents
+
+The viewer has a self-describing JSON control API (~48 commands) designed for agents:
+`describe_scene` gives a structured text snapshot (no vision needed), `find_best_view`
+finds a model's semantic front, `screenshot` captures hero shots. Agent-ready docs are
+served at `/llms.txt` and `/llms-full.txt`, and the optional MCP server
+(`pip install "meshvault[mcp]"`) lets Claude/Cursor drive a headless viewer directly —
+see [MCP Server](mcp.md).
+
 ## Next Steps
 
-- [Architecture](architecture.md) · [API Reference](api.md) · [FAQ](faq.md)
+- [Architecture](architecture.md) · [API Reference](api.md) · [MCP Server](mcp.md) · [FAQ](faq.md)

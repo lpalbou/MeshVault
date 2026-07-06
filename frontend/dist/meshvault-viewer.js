@@ -2286,12 +2286,12 @@ var Quaternion = class {
     const theta2 = 2 * Math.PI * Math.random();
     const x0 = Math.random();
     const r1 = Math.sqrt(1 - x0);
-    const r2 = Math.sqrt(x0);
+    const r22 = Math.sqrt(x0);
     return this.set(
       r1 * Math.sin(theta1),
       r1 * Math.cos(theta1),
-      r2 * Math.sin(theta2),
-      r2 * Math.cos(theta2)
+      r22 * Math.sin(theta2),
+      r22 * Math.cos(theta2)
     );
   }
   equals(quaternion) {
@@ -25906,12 +25906,12 @@ function calcBasisFunctionDerivatives(span, u2, p, n2, U) {
     left[j] = u2 - U[span + 1 - j];
     right[j] = U[span + j] - u2;
     let saved = 0;
-    for (let r2 = 0; r2 < j; ++r2) {
-      const rv = right[r2 + 1];
-      const lv = left[j - r2];
-      ndu[j][r2] = rv + lv;
-      const temp = ndu[r2][j - 1] / ndu[j][r2];
-      ndu[r2][j] = saved + rv * temp;
+    for (let r5 = 0; r5 < j; ++r5) {
+      const rv = right[r5 + 1];
+      const lv = left[j - r5];
+      ndu[j][r5] = rv + lv;
+      const temp = ndu[r5][j - 1] / ndu[j][r5];
+      ndu[r5][j] = saved + rv * temp;
       saved = lv * temp;
     }
     ndu[j][j] = saved;
@@ -25919,7 +25919,7 @@ function calcBasisFunctionDerivatives(span, u2, p, n2, U) {
   for (let j = 0; j <= p; ++j) {
     ders[0][j] = ndu[j][p];
   }
-  for (let r2 = 0; r2 <= p; ++r2) {
+  for (let r5 = 0; r5 <= p; ++r5) {
     let s1 = 0;
     let s2 = 1;
     const a = [];
@@ -25929,23 +25929,23 @@ function calcBasisFunctionDerivatives(span, u2, p, n2, U) {
     a[0][0] = 1;
     for (let k = 1; k <= n2; ++k) {
       let d = 0;
-      const rk = r2 - k;
+      const rk = r5 - k;
       const pk = p - k;
-      if (r2 >= k) {
+      if (r5 >= k) {
         a[s2][0] = a[s1][0] / ndu[pk + 1][rk];
         d = a[s2][0] * ndu[rk][pk];
       }
       const j1 = rk >= -1 ? 1 : -rk;
-      const j2 = r2 - 1 <= pk ? k - 1 : p - r2;
+      const j2 = r5 - 1 <= pk ? k - 1 : p - r5;
       for (let j3 = j1; j3 <= j2; ++j3) {
         a[s2][j3] = (a[s1][j3] - a[s1][j3 - 1]) / ndu[pk + 1][rk + j3];
         d += a[s2][j3] * ndu[rk + j3][pk];
       }
-      if (r2 <= pk) {
-        a[s2][k] = -a[s1][k - 1] / ndu[pk + 1][r2];
-        d += a[s2][k] * ndu[r2][pk];
+      if (r5 <= pk) {
+        a[s2][k] = -a[s1][k - 1] / ndu[pk + 1][r5];
+        d += a[s2][k] * ndu[r5][pk];
       }
-      ders[k][r2] = d;
+      ders[k][r5] = d;
       const j = s1;
       s1 = s2;
       s2 = j;
@@ -40960,8 +40960,6 @@ var Viewer3D = class {
    */
   async loadModel(url, extension, options = {}) {
     const thisLoadId = ++this._loadId;
-    this._clearModel();
-    this._resetViewerState();
     const ext = extension.toLowerCase();
     let object;
     try {
@@ -40992,6 +40990,8 @@ var Viewer3D = class {
       this._disposeObject(object);
       return { vertices: 0, faces: 0 };
     }
+    this._clearModel();
+    this._resetViewerState();
     this._enhanceModel(object);
     this._scene.add(object);
     this._currentModel = object;
@@ -41782,6 +41782,7 @@ var Viewer3D = class {
    * Also switches back to orbit mode.
    */
   _resetView() {
+    this._restoreFocusClip();
     this._camera.position.copy(this._initialCameraPos);
     this._controls.target.copy(this._initialTarget);
     this._controls.enabled = true;
@@ -41825,6 +41826,161 @@ var Viewer3D = class {
     this._lastStats = { vertices: 0, faces: 0, width: 0, height: 0, depth: 0 };
     this._modelScale = 1;
     return true;
+  }
+  // ==========================================================
+  // Part-level exploration (focus) — frame a named/id'd part or a world point.
+  // Reduced design from the adversarial review: keep the current view direction
+  // (the only predictable policy), retarget the orbit controls, and — the load-
+  // bearing part — rescale near/far and the orbit distance clamps, because a part
+  // smaller than ~1/800 of the model otherwise vanishes behind the near plane.
+  // Occlusion is explicitly out of scope (use set_clip / set_render_mode).
+  // ==========================================================
+  /**
+   * Enumerate focusable parts: every mesh (stable traversal-order id, matching
+   * describe_scene ids) and every NAMED group with mesh descendants.
+   */
+  listParts() {
+    const meshes = [];
+    const groups = [];
+    if (!this._currentModel) return { meshes, groups };
+    let id = 0;
+    this._currentModel.updateMatrixWorld(true);
+    this._currentModel.traverse((child) => {
+      if (child.isMesh && child.geometry) {
+        meshes.push({ id: id++, name: child.name || "(unnamed)", object: child });
+      } else if (!child.isMesh && child.name && child !== this._currentModel) {
+        let hasMesh = false;
+        child.traverse((d) => {
+          if (d.isMesh) hasMesh = true;
+        });
+        if (hasMesh) groups.push({ name: child.name, object: child });
+      }
+    });
+    return { meshes, groups };
+  }
+  /** World-space Box3 of an object (mesh: geometry bbox × matrixWorld; group: union). */
+  _worldBoxOf(object) {
+    const box = new Box3();
+    object.traverse((child) => {
+      if (!child.isMesh || !child.geometry) return;
+      const geo = child.geometry;
+      if (!geo.boundingBox) geo.computeBoundingBox();
+      if (!geo.boundingBox || geo.boundingBox.isEmpty()) return;
+      box.union(geo.boundingBox.clone().applyMatrix4(child.matrixWorld));
+    });
+    return box;
+  }
+  /**
+   * Focus the camera on a part of the model or a world-space point.
+   *
+   * @param {object} opts
+   * @param {number}   [opts.id]     - stable mesh id (from describe_scene / get_scene_info)
+   * @param {string}   [opts.name]   - mesh or group name; exact > case-insensitive >
+   *                                   substring. Ambiguity returns an error listing candidates.
+   * @param {number[]} [opts.point]  - [x,y,z] world point to focus instead of a part
+   * @param {number}   [opts.radius] - framing radius for point focus (default 5% of model)
+   * @param {number}   [opts.fill]   - framing tightness (0.1..1)
+   * @returns {object} { target, center, size, distance, camera } — or throws with candidates.
+   */
+  focusOn(opts = {}) {
+    if (!this._currentModel) throw new Error("No model loaded");
+    const { meshes, groups } = this.listParts();
+    let object = null;
+    let target = null;
+    let box = null;
+    if (opts.id !== void 0 && opts.id !== null) {
+      const hit = meshes.find((m) => m.id === opts.id);
+      if (!hit) throw new Error(
+        `No mesh with id ${opts.id}. Valid ids: 0..${meshes.length - 1} (see describe_scene).`
+      );
+      object = hit.object;
+      target = { kind: "mesh", id: hit.id, name: hit.name };
+    } else if (opts.name) {
+      const all = [
+        ...meshes.map((m) => ({ ...m, kind: "mesh" })),
+        ...groups.map((g3) => ({ ...g3, kind: "group" }))
+      ];
+      const q = String(opts.name);
+      const ql = q.toLowerCase();
+      let matches = all.filter((p) => p.name === q);
+      if (matches.length === 0) matches = all.filter((p) => p.name.toLowerCase() === ql);
+      if (matches.length === 0) matches = all.filter((p) => p.name.toLowerCase().includes(ql));
+      if (matches.length === 0) {
+        const names = all.slice(0, 12).map((p) => p.kind === "mesh" ? `${p.name} (id ${p.id})` : `${p.name} (group)`);
+        throw new Error(`No part matches "${q}". Parts: ${names.join(", ")}${all.length > 12 ? ", \u2026" : ""}`);
+      }
+      if (matches.length > 1) {
+        const names = matches.slice(0, 12).map((p) => p.kind === "mesh" ? `${p.name} (id ${p.id})` : `${p.name} (group)`);
+        throw new Error(`Ambiguous name "${q}" \u2014 ${matches.length} matches: ${names.join(", ")}. Use a mesh id.`);
+      }
+      object = matches[0].object;
+      target = { kind: matches[0].kind, id: matches[0].id, name: matches[0].name };
+    } else if (Array.isArray(opts.point) && opts.point.length === 3) {
+      const modelBox2 = new Box3().setFromObject(this._currentModel);
+      const modelMax = modelBox2.getSize(new Vector3());
+      const r = opts.radius || Math.max(modelMax.x, modelMax.y, modelMax.z) * 0.05 || 0.1;
+      const c = new Vector3(...opts.point);
+      box = new Box3(
+        c.clone().subScalar(r),
+        c.clone().addScalar(r)
+      );
+      target = { kind: "point", point: opts.point, radius: r };
+    } else {
+      throw new Error("focus requires one of: id (mesh id), name (mesh/group name), or point [x,y,z]");
+    }
+    if (!box) {
+      box = this._worldBoxOf(object);
+      if (box.isEmpty()) throw new Error(`Part "${target.name}" has no geometry to frame`);
+    }
+    const center = box.getCenter(new Vector3());
+    const size = box.getSize(new Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z) || 1e-3;
+    if (this._navMode === "fpv") this.setNavMode("orbit");
+    const dir = this._camera.position.clone().sub(this._controls.target);
+    if (dir.lengthSq() < 1e-12) dir.set(1, 0.6, 1);
+    dir.normalize();
+    const distance = this._frameDistance(maxDim, opts.fill || 0.7);
+    this._camera.position.copy(center).addScaledVector(dir, distance);
+    this._controls.target.copy(center);
+    if (!this._preFocusClip) {
+      this._preFocusClip = {
+        near: this._camera.near,
+        far: this._camera.far,
+        minDistance: this._controls.minDistance,
+        maxDistance: this._controls.maxDistance
+      };
+    }
+    const modelBox = new Box3().setFromObject(this._currentModel);
+    const modelSpan = modelBox.getSize(new Vector3()).length() || distance * 10;
+    this._camera.near = Math.max(distance * 1e-3, 1e-7);
+    this._camera.far = Math.max(distance * 10, modelSpan * 4);
+    this._camera.updateProjectionMatrix();
+    this._controls.minDistance = distance * 0.05;
+    this._controls.maxDistance = Math.max(this._preFocusClip.maxDistance, modelSpan * 4);
+    this._controls.update();
+    this._refreshCameraClip && this._refreshCameraClip();
+    const r32 = (v) => Math.round(v * 1e3) / 1e3;
+    return {
+      target,
+      center: [r32(center.x), r32(center.y), r32(center.z)],
+      size: [r32(size.x), r32(size.y), r32(size.z)],
+      distance: r32(distance),
+      camera: {
+        position: [r32(this._camera.position.x), r32(this._camera.position.y), r32(this._camera.position.z)],
+        target: [r32(center.x), r32(center.y), r32(center.z)]
+      },
+      note: "View direction kept. The part may be occluded by surrounding geometry \u2014 use set_clip or set_render_mode wireframe to see through. reset_camera restores the whole-model view."
+    };
+  }
+  /** Restore pre-focus clip planes / orbit clamps (called by reset & frame paths). */
+  _restoreFocusClip() {
+    if (!this._preFocusClip) return;
+    this._camera.near = this._preFocusClip.near;
+    this._camera.far = this._preFocusClip.far;
+    this._camera.updateProjectionMatrix();
+    this._controls.minDistance = this._preFocusClip.minDistance;
+    this._controls.maxDistance = this._preFocusClip.maxDistance;
+    this._preFocusClip = null;
   }
   /** Distance from the model center that frames it to a target fill fraction. */
   _frameDistance(maxDim, fill) {
@@ -42416,6 +42572,9 @@ var Viewer3D = class {
     const meshes = [];
     const materials = [];
     if (this._currentModel) {
+      this._currentModel.updateMatrixWorld(true);
+      const round = (v) => Math.round(v * 1e3) / 1e3;
+      let id = 0;
       this._currentModel.traverse((child) => {
         if (child.isMesh && child.geometry) {
           const pos = child.geometry.getAttribute("position");
@@ -42423,10 +42582,23 @@ var Viewer3D = class {
           const index = child.geometry.getIndex();
           const faces = index ? index.count / 3 : vertices / 3;
           const matNames = (Array.isArray(child.material) ? child.material : [child.material]).filter(Boolean).map((m) => m.name || "(unnamed)");
+          let center = null, size = null;
+          const geo = child.geometry;
+          if (!geo.boundingBox) geo.computeBoundingBox();
+          if (geo.boundingBox && !geo.boundingBox.isEmpty()) {
+            const wb = geo.boundingBox.clone().applyMatrix4(child.matrixWorld);
+            const c = wb.getCenter(new Vector3());
+            const s = wb.getSize(new Vector3());
+            center = [round(c.x), round(c.y), round(c.z)];
+            size = [round(s.x), round(s.y), round(s.z)];
+          }
           meshes.push({
+            id: id++,
             name: child.name || "(unnamed)",
             vertices,
             faces: Math.floor(faces),
+            center,
+            size,
             materials: matNames
           });
         }
@@ -43068,6 +43240,7 @@ var Viewer3D = class {
             metalness: 0.1,
             side: DoubleSide
           });
+          material.userData._mvViewerDefault = true;
           const mesh = new Mesh(geometry, material);
           const group = new Group();
           group.add(mesh);
@@ -43163,6 +43336,7 @@ var Viewer3D = class {
             metalness: 0.1,
             side: DoubleSide
           });
+          material.userData._mvViewerDefault = true;
           const group = new Group();
           group.add(new Mesh(geometry, material));
           resolve(group);
@@ -43275,10 +43449,28 @@ var Viewer3D = class {
     });
   }
   /**
+   * Record the AUTHORED material values before any viewer adjustment. The viewer
+   * defensively clamps extreme PBR params for preview (see _fixDarkColor), which is
+   * right for display but must never masquerade as asset data: describe_scene reports
+   * these authored values alongside the displayed ones so material audits stay honest.
+   */
+  _stashAuthoredMaterial(material) {
+    if (!material || material.userData._mvAuthored) return;
+    if (material.userData._mvViewerDefault) return;
+    material.userData._mvAuthored = {
+      metalness: typeof material.metalness === "number" ? material.metalness : null,
+      roughness: typeof material.roughness === "number" ? material.roughness : null,
+      color: material.color ? `#${material.color.getHexString()}` : null,
+      opacity: typeof material.opacity === "number" ? material.opacity : null,
+      transparent: !!material.transparent
+    };
+  }
+  /**
    * Upgrade a basic material to MeshStandardMaterial for PBR rendering.
    * Preserves existing textures and colors.
    */
   _upgradeMaterial(material) {
+    this._stashAuthoredMaterial(material);
     this._sanitizeMaterialTextureSlots(material);
     if (material.isMeshStandardMaterial || material.isMeshPhysicalMaterial) {
       this._fixDarkColor(material);
@@ -43317,6 +43509,8 @@ var Viewer3D = class {
       }
     }
     const upgraded = new MeshStandardMaterial(params);
+    upgraded.userData._mvAuthored = material.userData._mvAuthored;
+    upgraded.name = material.name;
     this._fixDarkColor(upgraded);
     material.dispose();
     return upgraded;
@@ -43391,6 +43585,7 @@ var Viewer3D = class {
    * Auto-frame the camera to fit the model in view.
    */
   _frameModel(object) {
+    this._preFocusClip = null;
     const box = new Box3().setFromObject(object);
     const size = box.getSize(new Vector3());
     const center = box.getCenter(new Vector3());
@@ -43662,6 +43857,7 @@ var Viewer3D = class {
     this._currentModel.updateMatrixWorld(true);
     this._currentModel.traverse((child) => {
       if (child.isMesh && child.geometry) {
+        this._dequantizeVectorAttributes(child.geometry);
         child.geometry.applyMatrix4(child.matrixWorld);
         child.position.set(0, 0, 0);
         child.rotation.set(0, 0, 0);
@@ -43677,6 +43873,28 @@ var Viewer3D = class {
         node.updateMatrix();
       }
     });
+  }
+  /**
+   * Replace integer/normalized vector attributes (position/normal/tangent) with plain
+   * Float32 copies, reading through the accessor so normalization is decoded. Required
+   * before any in-place matrix bake; a no-op for already-float geometry.
+   */
+  _dequantizeVectorAttributes(geometry) {
+    for (const name of ["position", "normal", "tangent"]) {
+      const attr = geometry.getAttribute(name);
+      if (!attr) continue;
+      const needsConvert = attr.normalized || !(attr.array instanceof Float32Array);
+      if (!needsConvert) continue;
+      const itemSize = attr.itemSize;
+      const out = new Float32Array(attr.count * itemSize);
+      for (let i = 0; i < attr.count; i++) {
+        out[i * itemSize] = attr.getX(i);
+        if (itemSize > 1) out[i * itemSize + 1] = attr.getY(i);
+        if (itemSize > 2) out[i * itemSize + 2] = attr.getZ(i);
+        if (itemSize > 3) out[i * itemSize + 3] = attr.getW(i);
+      }
+      geometry.setAttribute(name, new BufferAttribute(out, itemSize));
+    }
   }
   /**
    * Center the model so its bounding box center is at (0, 0, 0).
@@ -44562,6 +44780,8 @@ function extOf(name) {
 }
 function collectMeshes(model) {
   const out = [];
+  model.updateMatrixWorld(true);
+  let id = 0;
   model.traverse((child) => {
     if (!child.isMesh || !child.geometry) return;
     const geo = child.geometry;
@@ -44569,9 +44789,21 @@ function collectMeshes(model) {
     const index = geo.getIndex();
     const vertices = pos ? pos.count : 0;
     const triangles = Math.floor(index ? index.count / 3 : vertices / 3);
+    let center = null, size = null;
+    if (!geo.boundingBox) geo.computeBoundingBox();
+    if (geo.boundingBox && !geo.boundingBox.isEmpty()) {
+      const wb = geo.boundingBox.clone().applyMatrix4(child.matrixWorld);
+      const c = wb.getCenter(new Vector3());
+      const s = wb.getSize(new Vector3());
+      center = [r3(c.x), r3(c.y), r3(c.z)];
+      size = [r3(s.x), r3(s.y), r3(s.z)];
+    }
     const raw = child._mvOriginalMaterial || child.material;
     const mats = (Array.isArray(raw) ? raw : [raw]).filter(Boolean);
     out.push({
+      id: id++,
+      center,
+      size,
       name: child.name || "(unnamed)",
       mesh: child,
       geometry: geo,
@@ -44607,14 +44839,35 @@ function collectMaterials(meshes) {
         continue;
       }
       const maps = MAP_SLOTS.filter((slot) => mat[slot] && mat[slot].isTexture);
+      const textures = {};
+      for (const slot of maps) {
+        const tex = mat[slot];
+        const img = tex.image || {};
+        textures[slot] = {
+          width: img.width || null,
+          height: img.height || null,
+          // three uses "" (NoColorSpace) for linear data textures — say
+          // "linear" instead of leaving agents to guess what null means.
+          colorSpace: tex.colorSpace || "linear"
+        };
+      }
+      const authored = mat.userData && mat.userData._mvAuthored ? mat.userData._mvAuthored : null;
+      const displayed = {
+        metalness: numOrNull(mat.metalness),
+        roughness: numOrNull(mat.roughness)
+      };
+      const modifiedByViewer = !!(authored && (authored.metalness !== null && authored.metalness !== displayed.metalness || authored.roughness !== null && authored.roughness !== displayed.roughness || authored.color && mat.color && authored.color !== `#${mat.color.getHexString()}`));
       seen.set(mat, {
         material: mat,
         name: mat.name || "(unnamed)",
         type: mat.type,
         color: mat.color ? `#${mat.color.getHexString()}` : null,
-        metalness: numOrNull(mat.metalness),
-        roughness: numOrNull(mat.roughness),
+        metalness: displayed.metalness,
+        roughness: displayed.roughness,
+        authored,
+        modifiedByViewer,
         maps,
+        textures,
         transparent: !!mat.transparent,
         doubleSided: mat.side === DoubleSide,
         meshes: [m.name]
@@ -44659,9 +44912,14 @@ function collectHierarchy(model, cap) {
 function topMeshes(meshes, maxItems) {
   const sorted = [...meshes].sort((a, b) => b.triangles - a.triangles);
   const items = sorted.slice(0, maxItems).map((m) => ({
+    id: m.id,
+    // stable traversal-order id — pass to `focus { id }`
     name: m.name,
     triangles: m.triangles,
     vertices: m.vertices,
+    center: m.center,
+    // world-space part placement
+    size: m.size,
     materials: m.materials.map((x) => x.name || "(unnamed)"),
     hasUVs: m.hasUVs,
     hasVertexColors: m.hasVertexColors || void 0,
@@ -44676,7 +44934,11 @@ function materialSummaries(materials, maxItems) {
     color: m.color,
     metalness: m.metalness,
     roughness: m.roughness,
+    // Present only when the viewer changed something: the asset's original values.
+    authored: m.modifiedByViewer ? m.authored : void 0,
+    modifiedByViewer: m.modifiedByViewer || void 0,
     maps: m.maps,
+    textures: Object.keys(m.textures).length ? m.textures : void 0,
     transparent: m.transparent,
     doubleSided: m.doubleSided
   }));
@@ -44840,6 +45102,324 @@ function buildSummary(r) {
   }
   parts.push(`Current view: ${r.view.renderMode} render mode, camera at [${r.view.camera.position.join(", ")}].`);
   return parts.join(" ");
+}
+
+// frontend/js/viewer/mesh_stats.js
+var TRIANGLE_BUDGET = 3e5;
+var MAX_LOCALIZED = 5;
+var MAX_SAMPLES2 = 2e3;
+function meshStatistics(viewer, opts = {}) {
+  if (!viewer._currentModel) return { loaded: false, error: "No model loaded" };
+  const model = viewer._currentModel;
+  model.updateMatrixWorld(true);
+  const perMesh = [];
+  let totalTris = 0;
+  model.traverse((child) => {
+    if (child.isMesh && child.geometry) {
+      const pos = child.geometry.getAttribute("position");
+      const idx = child.geometry.getIndex();
+      totalTris += Math.floor((idx ? idx.count : pos ? pos.count : 0) / 3);
+    }
+  });
+  if (totalTris > TRIANGLE_BUDGET) {
+    return {
+      loaded: true,
+      skipped: true,
+      triangles: totalTris,
+      note: `Statistics skipped: ${totalTris.toLocaleString()} triangles exceeds the ${TRIANGLE_BUDGET.toLocaleString()} budget.`
+    };
+  }
+  let id = 0;
+  model.traverse((child) => {
+    if (!child.isMesh || !child.geometry) {
+      return;
+    }
+    const meshId = id++;
+    const stats = analyzeMesh(child);
+    if (stats) perMesh.push({ id: meshId, name: child.name || "(unnamed)", ...stats });
+  });
+  const agg = aggregate(perMesh);
+  return { loaded: true, skipped: false, total: agg, meshes: perMesh };
+}
+function aggregate(perMesh) {
+  const total = {
+    triangles: 0,
+    surfaceArea: 0,
+    volume: 0,
+    sliverPct: 0,
+    openEdges: 0,
+    nonManifoldEdges: 0,
+    degenerate: 0,
+    dihedral: { meanDeg: 0, p95Deg: 0 },
+    edgeLength: { min: Infinity, median: 0, p95: 0, max: 0 },
+    issuePoints: { openEdges: [], nonManifold: [], degenerate: [] }
+  };
+  let tris = 0;
+  let anyOpenVolume = false;
+  for (const m of perMesh) {
+    tris += m.triangles;
+    total.triangles += m.triangles;
+    total.surfaceArea += m.surfaceArea;
+    if (m.volume === null) anyOpenVolume = true;
+    else total.volume += m.volume;
+    total.sliverPct += m.sliverPct * m.triangles;
+    total.openEdges += m.openEdges;
+    total.nonManifoldEdges += m.nonManifoldEdges;
+    total.degenerate += m.degenerate;
+    total.dihedral.meanDeg += m.dihedral.meanDeg * m.triangles;
+    total.dihedral.p95Deg = Math.max(total.dihedral.p95Deg, m.dihedral.p95Deg);
+    total.edgeLength.min = Math.min(total.edgeLength.min, m.edgeLength.min);
+    total.edgeLength.max = Math.max(total.edgeLength.max, m.edgeLength.max);
+    total.edgeLength.median += m.edgeLength.median * m.triangles;
+    total.edgeLength.p95 = Math.max(total.edgeLength.p95, m.edgeLength.p95);
+    for (const k of ["openEdges", "nonManifold", "degenerate"]) {
+      total.issuePoints[k].push(...m.issuePoints[k]);
+    }
+  }
+  if (tris > 0) {
+    total.sliverPct = r4(total.sliverPct / tris);
+    total.dihedral.meanDeg = r2(total.dihedral.meanDeg / tris);
+    total.edgeLength.median = sci(total.edgeLength.median / tris);
+  }
+  if (perMesh.length > 1) {
+    total.edgeLength.approx = true;
+    total.dihedral.approx = true;
+  }
+  if (!Number.isFinite(total.edgeLength.min)) total.edgeLength.min = 0;
+  total.surfaceArea = sci(total.surfaceArea);
+  total.volume = anyOpenVolume ? null : sci(total.volume);
+  total.edgeLength.min = sci(total.edgeLength.min);
+  total.edgeLength.max = sci(total.edgeLength.max);
+  total.edgeLength.p95 = sci(total.edgeLength.p95);
+  for (const k of ["openEdges", "nonManifold", "degenerate"]) {
+    total.issuePoints[k] = spread(total.issuePoints[k], MAX_LOCALIZED);
+  }
+  return total;
+}
+function analyzeMesh(mesh) {
+  const geo = mesh.geometry;
+  const pos = geo.getAttribute("position");
+  if (!pos || pos.count === 0) return null;
+  const idx = geo.getIndex();
+  const triCount = Math.floor((idx ? idx.count : pos.count) / 3);
+  if (triCount === 0) return null;
+  const mw = mesh.matrixWorld;
+  if (!geo.boundingBox) geo.computeBoundingBox();
+  const scale = Math.max(1e-30, geo.boundingBox.max.distanceTo(geo.boundingBox.min));
+  const q = 1e-6 * scale;
+  const canon = /* @__PURE__ */ new Map();
+  const canonOf = new Int32Array(pos.count);
+  let nextId = 0;
+  for (let i = 0; i < pos.count; i++) {
+    const key = `${Math.round(pos.getX(i) / q)},${Math.round(pos.getY(i) / q)},${Math.round(pos.getZ(i) / q)}`;
+    let cid = canon.get(key);
+    if (cid === void 0) {
+      cid = nextId++;
+      canon.set(key, cid);
+    }
+    canonOf[i] = cid;
+  }
+  const nVerts = Math.max(1, nextId);
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const ab = new Vector3(), ac = new Vector3(), n2 = new Vector3();
+  const edgeInfo = /* @__PURE__ */ new Map();
+  const edgeLengths = [];
+  const dihedrals = [];
+  const degeneratePts = [];
+  let area2sum = 0, vol6 = 0, sliver = 0;
+  const vi = (t2, k) => idx ? idx.getX(t2 * 3 + k) : t2 * 3 + k;
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const i0 = vi(t2, 0), i1 = vi(t2, 1), i2 = vi(t2, 2);
+    a.fromBufferAttribute(pos, i0).applyMatrix4(mw);
+    b.fromBufferAttribute(pos, i1).applyMatrix4(mw);
+    c.fromBufferAttribute(pos, i2).applyMatrix4(mw);
+    ab.subVectors(b, a);
+    ac.subVectors(c, a);
+    n2.crossVectors(ab, ac);
+    const area2 = n2.lengthSq();
+    const lenSq = ab.lengthSq() * ac.lengthSq();
+    if (area2 < 1e-12 * lenSq) {
+      sliver += 1;
+      if (degeneratePts.length < MAX_SAMPLES2) {
+        degeneratePts.push([(a.x + b.x + c.x) / 3, (a.y + b.y + c.y) / 3, (a.z + b.z + c.z) / 3]);
+      }
+      continue;
+    }
+    const area3 = Math.sqrt(area2) / 2;
+    area2sum += area3;
+    vol6 += a.x * (b.y * c.z - b.z * c.y) + a.y * (b.z * c.x - b.x * c.z) + a.z * (b.x * c.y - b.y * c.x);
+    n2.normalize();
+    const corners = [[i0, i1, a, b], [i1, i2, b, c], [i2, i0, c, a]];
+    for (const [u2, v, p1, p2] of corners) {
+      const cu = canonOf[u2], cv = canonOf[v];
+      if (cu === cv) continue;
+      edgeLengths.push(p1.distanceTo(p2));
+      const key = cu < cv ? cu * nVerts + cv : cv * nVerts + cu;
+      const e = edgeInfo.get(key);
+      if (!e) {
+        edgeInfo.set(key, {
+          count: 1,
+          nx: n2.x,
+          ny: n2.y,
+          nz: n2.z,
+          mx: (p1.x + p2.x) / 2,
+          my: (p1.y + p2.y) / 2,
+          mz: (p1.z + p2.z) / 2
+        });
+      } else {
+        e.count += 1;
+        if (e.count === 2) {
+          const dot = Math.min(1, Math.max(-1, e.nx * n2.x + e.ny * n2.y + e.nz * n2.z));
+          dihedrals.push(Math.acos(dot) * (180 / Math.PI));
+        }
+      }
+    }
+  }
+  let openEdges = 0, nonManifoldEdges = 0;
+  const openPts = [], nmPts = [];
+  for (const e of edgeInfo.values()) {
+    if (e.count === 1) {
+      openEdges += 1;
+      if (openPts.length < MAX_SAMPLES2) openPts.push([e.mx, e.my, e.mz]);
+    } else if (e.count > 2) {
+      nonManifoldEdges += 1;
+      if (nmPts.length < MAX_SAMPLES2) nmPts.push([e.mx, e.my, e.mz]);
+    }
+  }
+  edgeLengths.sort((x, y) => x - y);
+  dihedrals.sort((x, y) => x - y);
+  const pct = (arr, p) => arr.length ? arr[Math.min(arr.length - 1, Math.floor(arr.length * p))] : 0;
+  const mean = (arr) => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : 0;
+  return {
+    triangles: triCount,
+    surfaceArea: sci(area2sum),
+    // Signed-volume sums are only translation-invariant for CLOSED surfaces; on an
+    // open mesh the number silently changes with the origin (verified live: a pure
+    // `center` changed it). Report null rather than a plausible-looking lie.
+    volume: openEdges === 0 ? sci(Math.abs(vol6) / 6) : null,
+    sliverPct: r4(triCount ? sliver / triCount * 100 : 0),
+    degenerate: sliver,
+    openEdges,
+    nonManifoldEdges,
+    edgeLength: {
+      min: sci(edgeLengths[0] || 0),
+      median: sci(pct(edgeLengths, 0.5)),
+      p95: sci(pct(edgeLengths, 0.95)),
+      max: sci(edgeLengths[edgeLengths.length - 1] || 0)
+    },
+    // Roughness: how much adjacent faces disagree. Smooth surface → small angles.
+    dihedral: { meanDeg: r2(mean(dihedrals)), p95Deg: r2(pct(dihedrals, 0.95)) },
+    issuePoints: {
+      openEdges: spread(openPts, MAX_LOCALIZED),
+      nonManifold: spread(nmPts, MAX_LOCALIZED),
+      degenerate: spread(degeneratePts, MAX_LOCALIZED)
+    }
+  };
+}
+function spread(points, k) {
+  if (points.length <= k) return points.map(roundPt);
+  const chosen = [points[0]];
+  while (chosen.length < k) {
+    let best = null, bestD = -1;
+    for (const p of points) {
+      let d = Infinity;
+      for (const c of chosen) {
+        const dx = p[0] - c[0], dy = p[1] - c[1], dz = p[2] - c[2];
+        d = Math.min(d, dx * dx + dy * dy + dz * dz);
+      }
+      if (d > bestD) {
+        bestD = d;
+        best = p;
+      }
+    }
+    chosen.push(best);
+  }
+  return chosen.map(roundPt);
+}
+var roundPt = (p) => p.map((v) => Math.round(v * 1e3) / 1e3);
+var r2 = (v) => Math.round(v * 100) / 100;
+var r4 = (v) => Math.round(v * 1e4) / 1e4;
+var sci = (v) => v === 0 ? 0 : Number(v.toPrecision(4));
+
+// frontend/js/viewer/sample_points.js
+var MAX_POINTS = 2e4;
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function() {
+    a |= 0;
+    a = a + 1831565813 | 0;
+    let t2 = Math.imul(a ^ a >>> 15, 1 | a);
+    t2 = t2 + Math.imul(t2 ^ t2 >>> 7, 61 | t2) ^ t2;
+    return ((t2 ^ t2 >>> 14) >>> 0) / 4294967296;
+  };
+}
+function samplePoints(viewer, opts = {}) {
+  if (!viewer._currentModel) return { error: "No model loaded" };
+  const count = Math.max(16, Math.min(MAX_POINTS, opts.count || 4096));
+  const rand = mulberry32(opts.seed !== void 0 ? opts.seed : 42);
+  const model = viewer._currentModel;
+  model.updateMatrixWorld(true);
+  const tris = [];
+  const cumArea = [];
+  let total = 0;
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  model.traverse((child) => {
+    if (!child.isMesh || !child.geometry) return;
+    const pos = child.geometry.getAttribute("position");
+    if (!pos) return;
+    const idx = child.geometry.getIndex();
+    const triCount = Math.floor((idx ? idx.count : pos.count) / 3);
+    const mw = child.matrixWorld;
+    const vi = (t2, k) => idx ? idx.getX(t2 * 3 + k) : t2 * 3 + k;
+    for (let t2 = 0; t2 < triCount; t2++) {
+      a.fromBufferAttribute(pos, vi(t2, 0)).applyMatrix4(mw);
+      b.fromBufferAttribute(pos, vi(t2, 1)).applyMatrix4(mw);
+      c.fromBufferAttribute(pos, vi(t2, 2)).applyMatrix4(mw);
+      const area2 = triArea(a, b, c);
+      if (!(area2 > 0) || !Number.isFinite(area2)) continue;
+      total += area2;
+      tris.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+      cumArea.push(total);
+    }
+  });
+  if (cumArea.length === 0) return { error: "Model has no sampleable surface" };
+  const bbox = new Box3().setFromObject(model);
+  const span = bbox.getSize(new Vector3()).length() || 1;
+  const roundP = Math.max(3, Math.min(9, Math.ceil(-Math.log10(span * 1e-6))));
+  const rnd = (v) => Number(v.toFixed(roundP));
+  const points = new Array(count);
+  for (let i = 0; i < count; i++) {
+    const r = rand() * total;
+    let lo = 0, hi = cumArea.length - 1;
+    while (lo < hi) {
+      const mid = lo + hi >> 1;
+      if (cumArea[mid] < r) lo = mid + 1;
+      else hi = mid;
+    }
+    const o = lo * 9;
+    const su = Math.sqrt(rand());
+    const v = rand();
+    const w0 = 1 - su, w1 = su * (1 - v), w2 = su * v;
+    points[i] = [
+      rnd(w0 * tris[o] + w1 * tris[o + 3] + w2 * tris[o + 6]),
+      rnd(w0 * tris[o + 1] + w1 * tris[o + 4] + w2 * tris[o + 7]),
+      rnd(w0 * tris[o + 2] + w1 * tris[o + 5] + w2 * tris[o + 8])
+    ];
+  }
+  return {
+    count,
+    seed: opts.seed !== void 0 ? opts.seed : 42,
+    surfaceArea: Number(total.toPrecision(5)),
+    points
+  };
+}
+var _ab3 = new Vector3();
+var _ac = new Vector3();
+var _cr = new Vector3();
+function triArea(a, b, c) {
+  _ab3.subVectors(b, a);
+  _ac.subVectors(c, a);
+  return _cr.crossVectors(_ab3, _ac).length() / 2;
 }
 
 // frontend/js/viewer/control_api.js
@@ -45017,6 +45597,20 @@ var ViewerControlAPI = class {
         description: "Return the model's world-space bounding box {min,max,center,size} or null.",
         handler: () => v.getBounds()
       },
+      sample_points: {
+        description: "Deterministic, area-weighted surface point samples in world space \u2014 the geometric fingerprint used for shape registration / model comparison. Returns { count, seed, surfaceArea, points:[[x,y,z],...] }. Same model + same seed = same points (reproducible comparisons). count 16..20000 (default 4096).",
+        params: {
+          count: { type: "number", min: 16, max: 2e4 },
+          seed: { type: "number" }
+        },
+        requiresModel: true,
+        handler: (p) => samplePoints(v, { count: p.count, seed: p.seed })
+      },
+      get_mesh_stats: {
+        description: "Numeric surface-quality statistics \u2014 use to COMPARE iterations of the same asset or judge quality beyond connectivity QA (a topologically perfect mesh can still be visual garbage). Returns per-mesh + total: surface area, volume (null for open meshes \u2014 the signed-volume sum is origin-dependent when the surface is not closed), edge-length distribution (min/median/p95/max), sliver %, dihedral roughness (mean/p95 angle between adjacent faces \u2014 a RELATIVE indicator: compare across versions of the same asset; hard-edged models legitimately score high, e.g. a cube is 60\xB0 mean), open/non-manifold/degenerate counts, and issuePoints: representative world-space defect locations to pass to `focus {point}`. Multi-mesh totals carry approx:true on median/mean fields (triangle-weighted combinations; read per-mesh entries when precision matters). Budget: skipped (with skipped:true) above 300k triangles.",
+        requiresModel: true,
+        handler: () => meshStatistics(v)
+      },
       score_views: {
         description: "Score candidate camera angles by how much visible surface DETAIL each shows (edge energy), and return them ranked. Use this to find a model's semantic 'front' when it is not axis-aligned (e.g. a face): the most detailed side ranks first. Returns [{azimuth, elevation, score, coverage}]. NOTE: presets front/back/left/right are WORLD-AXIS conventions, not the model's real front \u2014 this command discovers the real one.",
         params: {
@@ -45043,6 +45637,18 @@ var ViewerControlAPI = class {
         description: "Correct the camera roll for the CURRENT view so a mis-oriented (e.g. lying-down) subject appears upright, without modifying the model. Uses left-right symmetry of the framed subject.",
         requiresModel: true,
         handler: () => v.autoUpright()
+      },
+      focus: {
+        description: "Frame a PART of the model (or a world point): moves the camera to look at it, keeping the current view direction, and rescales clip planes/zoom limits so even tiny parts are visible. Target by `id` (the stable mesh id from describe_scene/get_scene_info \u2014 most reliable, since real-world mesh names are often meaningless), by `name` (mesh or group; exact > case-insensitive > substring; ambiguity returns candidates), or by `point` [x,y,z] (+ optional radius). The part may be occluded by surrounding geometry \u2014 combine with set_clip or set_render_mode wireframe to see through. reset_camera returns to the whole-model view. Note: orbit/set_view/frame re-frame the WHOLE model; re-focus afterwards if needed.",
+        params: {
+          id: { type: "number", min: 0 },
+          name: { type: "string" },
+          point: { type: "array" },
+          radius: { type: "number", min: 0 },
+          fill: { type: "number", min: 0.1, max: 1 }
+        },
+        requiresModel: true,
+        handler: (p) => v.focusOn({ id: p.id, name: p.name, point: p.point, radius: p.radius, fill: p.fill })
       },
       list_commands: {
         description: "List all available commands and their parameters.",
@@ -45430,12 +46036,20 @@ var ViewerControlAPI = class {
         }
       },
       set_measure_mode: {
-        description: "Enable/disable interactive click-to-measure mode.",
+        description: "Enable/disable interactive click-to-measure mode. Disabling also clears any measurement overlay.",
         params: { enabled: { type: "boolean", required: true } },
         handler: (p) => {
           const cur = !!v._measureMode;
           if (cur !== p.enabled) v.toggleMeasureMode();
+          if (!p.enabled) v._clearMeasurement();
           return v._measureMode;
+        }
+      },
+      clear_measurement: {
+        description: "Remove the measurement markers/line/label from the scene (e.g. before a clean screenshot).",
+        handler: () => {
+          v._clearMeasurement();
+          return true;
         }
       },
       // --- export ---

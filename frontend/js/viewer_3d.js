@@ -142,12 +142,11 @@ export class Viewer3D {
         // (user clicking multiple assets rapidly)
         const thisLoadId = ++this._loadId;
 
-        // Remove previous model and reset all viewer state
-        this._clearModel();
-        this._resetViewerState();
-
         const ext = extension.toLowerCase();
 
+        // Fetch + parse FIRST, and only swap models on success: a failed load must not
+        // destroy the currently displayed model (an agent/user retrying a bad URL would
+        // otherwise silently end up with an empty scene).
         let object;
         try {
             if (ext === ".obj") {
@@ -180,6 +179,10 @@ export class Viewer3D {
             this._disposeObject(object);
             return { vertices: 0, faces: 0 };
         }
+
+        // Success — now remove the previous model and reset viewer state for the new one.
+        this._clearModel();
+        this._resetViewerState();
 
         // Apply high-quality materials and settings
         this._enhanceModel(object);
@@ -1174,6 +1177,7 @@ export class Viewer3D {
      * Also switches back to orbit mode.
      */
     _resetView() {
+        this._restoreFocusClip();  // undo any part-focus near/far + distance clamps
         this._camera.position.copy(this._initialCameraPos);
         this._controls.target.copy(this._initialTarget);
         this._controls.enabled = true;
@@ -1225,6 +1229,171 @@ export class Viewer3D {
         this._lastStats = { vertices: 0, faces: 0, width: 0, height: 0, depth: 0 };
         this._modelScale = 1;
         return true;
+    }
+
+    // ==========================================================
+    // Part-level exploration (focus) — frame a named/id'd part or a world point.
+    // Reduced design from the adversarial review: keep the current view direction
+    // (the only predictable policy), retarget the orbit controls, and — the load-
+    // bearing part — rescale near/far and the orbit distance clamps, because a part
+    // smaller than ~1/800 of the model otherwise vanishes behind the near plane.
+    // Occlusion is explicitly out of scope (use set_clip / set_render_mode).
+    // ==========================================================
+
+    /**
+     * Enumerate focusable parts: every mesh (stable traversal-order id, matching
+     * describe_scene ids) and every NAMED group with mesh descendants.
+     */
+    listParts() {
+        const meshes = [];
+        const groups = [];
+        if (!this._currentModel) return { meshes, groups };
+        let id = 0;
+        this._currentModel.updateMatrixWorld(true);
+        this._currentModel.traverse((child) => {
+            if (child.isMesh && child.geometry) {
+                meshes.push({ id: id++, name: child.name || "(unnamed)", object: child });
+            } else if (!child.isMesh && child.name && child !== this._currentModel) {
+                let hasMesh = false;
+                child.traverse((d) => { if (d.isMesh) hasMesh = true; });
+                if (hasMesh) groups.push({ name: child.name, object: child });
+            }
+        });
+        return { meshes, groups };
+    }
+
+    /** World-space Box3 of an object (mesh: geometry bbox × matrixWorld; group: union). */
+    _worldBoxOf(object) {
+        const box = new THREE.Box3();
+        object.traverse((child) => {
+            if (!child.isMesh || !child.geometry) return;
+            const geo = child.geometry;
+            if (!geo.boundingBox) geo.computeBoundingBox();
+            if (!geo.boundingBox || geo.boundingBox.isEmpty()) return;
+            box.union(geo.boundingBox.clone().applyMatrix4(child.matrixWorld));
+        });
+        return box;
+    }
+
+    /**
+     * Focus the camera on a part of the model or a world-space point.
+     *
+     * @param {object} opts
+     * @param {number}   [opts.id]     - stable mesh id (from describe_scene / get_scene_info)
+     * @param {string}   [opts.name]   - mesh or group name; exact > case-insensitive >
+     *                                   substring. Ambiguity returns an error listing candidates.
+     * @param {number[]} [opts.point]  - [x,y,z] world point to focus instead of a part
+     * @param {number}   [opts.radius] - framing radius for point focus (default 5% of model)
+     * @param {number}   [opts.fill]   - framing tightness (0.1..1)
+     * @returns {object} { target, center, size, distance, camera } — or throws with candidates.
+     */
+    focusOn(opts = {}) {
+        if (!this._currentModel) throw new Error("No model loaded");
+        const { meshes, groups } = this.listParts();
+
+        let object = null;
+        let target = null;
+        let box = null;
+
+        if (opts.id !== undefined && opts.id !== null) {
+            const hit = meshes.find((m) => m.id === opts.id);
+            if (!hit) throw new Error(
+                `No mesh with id ${opts.id}. Valid ids: 0..${meshes.length - 1} (see describe_scene).`);
+            object = hit.object;
+            target = { kind: "mesh", id: hit.id, name: hit.name };
+        } else if (opts.name) {
+            const all = [
+                ...meshes.map((m) => ({ ...m, kind: "mesh" })),
+                ...groups.map((g) => ({ ...g, kind: "group" })),
+            ];
+            const q = String(opts.name);
+            const ql = q.toLowerCase();
+            // Tiered matching: exact > case-insensitive > substring (case-insensitive).
+            let matches = all.filter((p) => p.name === q);
+            if (matches.length === 0) matches = all.filter((p) => p.name.toLowerCase() === ql);
+            if (matches.length === 0) matches = all.filter((p) => p.name.toLowerCase().includes(ql));
+            if (matches.length === 0) {
+                const names = all.slice(0, 12).map((p) => p.kind === "mesh" ? `${p.name} (id ${p.id})` : `${p.name} (group)`);
+                throw new Error(`No part matches "${q}". Parts: ${names.join(", ")}${all.length > 12 ? ", …" : ""}`);
+            }
+            if (matches.length > 1) {
+                const names = matches.slice(0, 12).map((p) => p.kind === "mesh" ? `${p.name} (id ${p.id})` : `${p.name} (group)`);
+                throw new Error(`Ambiguous name "${q}" — ${matches.length} matches: ${names.join(", ")}. Use a mesh id.`);
+            }
+            object = matches[0].object;
+            target = { kind: matches[0].kind, id: matches[0].id, name: matches[0].name };
+        } else if (Array.isArray(opts.point) && opts.point.length === 3) {
+            const modelBox = new THREE.Box3().setFromObject(this._currentModel);
+            const modelMax = modelBox.getSize(new THREE.Vector3());
+            const r = opts.radius || Math.max(modelMax.x, modelMax.y, modelMax.z) * 0.05 || 0.1;
+            const c = new THREE.Vector3(...opts.point);
+            box = new THREE.Box3(
+                c.clone().subScalar(r), c.clone().addScalar(r));
+            target = { kind: "point", point: opts.point, radius: r };
+        } else {
+            throw new Error("focus requires one of: id (mesh id), name (mesh/group name), or point [x,y,z]");
+        }
+
+        if (!box) {
+            box = this._worldBoxOf(object);
+            if (box.isEmpty()) throw new Error(`Part "${target.name}" has no geometry to frame`);
+        }
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z) || 0.001;
+
+        // Keep the current view direction — the only policy without pathological cases.
+        if (this._navMode === "fpv") this.setNavMode("orbit");
+        const dir = this._camera.position.clone().sub(this._controls.target);
+        if (dir.lengthSq() < 1e-12) dir.set(1, 0.6, 1);
+        dir.normalize();
+
+        const distance = this._frameDistance(maxDim, opts.fill || 0.7);
+        this._camera.position.copy(center).addScaledVector(dir, distance);
+        this._controls.target.copy(center);
+
+        // The substance: rescale clip planes + orbit clamps to the part, or a small part
+        // is invisible (near-plane) and the orbit distance clamp blocks getting close.
+        if (!this._preFocusClip) {
+            this._preFocusClip = {
+                near: this._camera.near, far: this._camera.far,
+                minDistance: this._controls.minDistance,
+                maxDistance: this._controls.maxDistance,
+            };
+        }
+        const modelBox = new THREE.Box3().setFromObject(this._currentModel);
+        const modelSpan = modelBox.getSize(new THREE.Vector3()).length() || distance * 10;
+        this._camera.near = Math.max(distance * 0.001, 1e-7);
+        this._camera.far = Math.max(distance * 10, modelSpan * 4);
+        this._camera.updateProjectionMatrix();
+        this._controls.minDistance = distance * 0.05;
+        this._controls.maxDistance = Math.max(this._preFocusClip.maxDistance, modelSpan * 4);
+        this._controls.update();
+        this._refreshCameraClip && this._refreshCameraClip();
+
+        const r3 = (v) => Math.round(v * 1000) / 1000;
+        return {
+            target,
+            center: [r3(center.x), r3(center.y), r3(center.z)],
+            size: [r3(size.x), r3(size.y), r3(size.z)],
+            distance: r3(distance),
+            camera: {
+                position: [r3(this._camera.position.x), r3(this._camera.position.y), r3(this._camera.position.z)],
+                target: [r3(center.x), r3(center.y), r3(center.z)],
+            },
+            note: "View direction kept. The part may be occluded by surrounding geometry — use set_clip or set_render_mode wireframe to see through. reset_camera restores the whole-model view.",
+        };
+    }
+
+    /** Restore pre-focus clip planes / orbit clamps (called by reset & frame paths). */
+    _restoreFocusClip() {
+        if (!this._preFocusClip) return;
+        this._camera.near = this._preFocusClip.near;
+        this._camera.far = this._preFocusClip.far;
+        this._camera.updateProjectionMatrix();
+        this._controls.minDistance = this._preFocusClip.minDistance;
+        this._controls.maxDistance = this._preFocusClip.maxDistance;
+        this._preFocusClip = null;
     }
 
     /** Distance from the model center that frames it to a target fill fraction. */
@@ -1851,6 +2020,9 @@ export class Viewer3D {
         const meshes = [];
         const materials = [];
         if (this._currentModel) {
+            this._currentModel.updateMatrixWorld(true);
+            const round = (v) => Math.round(v * 1000) / 1000;
+            let id = 0;
             this._currentModel.traverse((child) => {
                 if (child.isMesh && child.geometry) {
                     const pos = child.geometry.getAttribute("position");
@@ -1860,10 +2032,24 @@ export class Viewer3D {
                     const matNames = (Array.isArray(child.material)
                         ? child.material : [child.material])
                         .filter(Boolean).map((m) => m.name || "(unnamed)");
+                    // World placement + stable id (same as describe_scene / focus).
+                    let center = null, size = null;
+                    const geo = child.geometry;
+                    if (!geo.boundingBox) geo.computeBoundingBox();
+                    if (geo.boundingBox && !geo.boundingBox.isEmpty()) {
+                        const wb = geo.boundingBox.clone().applyMatrix4(child.matrixWorld);
+                        const c = wb.getCenter(new THREE.Vector3());
+                        const s = wb.getSize(new THREE.Vector3());
+                        center = [round(c.x), round(c.y), round(c.z)];
+                        size = [round(s.x), round(s.y), round(s.z)];
+                    }
                     meshes.push({
+                        id: id++,
                         name: child.name || "(unnamed)",
                         vertices,
                         faces: Math.floor(faces),
+                        center,
+                        size,
                         materials: matNames,
                     });
                 }
@@ -2680,6 +2866,9 @@ export class Viewer3D {
                         metalness: 0.1,
                         side: THREE.DoubleSide,
                     });
+                    // STL has no material concept — this is the VIEWER's default, and
+                    // must never be reported as an "authored" value (see describe_scene).
+                    material.userData._mvViewerDefault = true;
                     const mesh = new THREE.Mesh(geometry, material);
                     const group = new THREE.Group();
                     group.add(mesh);
@@ -2775,6 +2964,8 @@ export class Viewer3D {
                         metalness: 0.1,
                         side: THREE.DoubleSide,
                     });
+                    // PLY carries no material — viewer default, not authored data.
+                    material.userData._mvViewerDefault = true;
                     const group = new THREE.Group();
                     group.add(new THREE.Mesh(geometry, material));
                     resolve(group);
@@ -2895,10 +3086,30 @@ export class Viewer3D {
     }
 
     /**
+     * Record the AUTHORED material values before any viewer adjustment. The viewer
+     * defensively clamps extreme PBR params for preview (see _fixDarkColor), which is
+     * right for display but must never masquerade as asset data: describe_scene reports
+     * these authored values alongside the displayed ones so material audits stay honest.
+     */
+    _stashAuthoredMaterial(material) {
+        if (!material || material.userData._mvAuthored) return;
+        // Viewer-created defaults (STL/PLY wrappers) have no authored values to report.
+        if (material.userData._mvViewerDefault) return;
+        material.userData._mvAuthored = {
+            metalness: typeof material.metalness === "number" ? material.metalness : null,
+            roughness: typeof material.roughness === "number" ? material.roughness : null,
+            color: material.color ? `#${material.color.getHexString()}` : null,
+            opacity: typeof material.opacity === "number" ? material.opacity : null,
+            transparent: !!material.transparent,
+        };
+    }
+
+    /**
      * Upgrade a basic material to MeshStandardMaterial for PBR rendering.
      * Preserves existing textures and colors.
      */
     _upgradeMaterial(material) {
+        this._stashAuthoredMaterial(material);
         this._sanitizeMaterialTextureSlots(material);
 
         // Skip if already a standard/physical material
@@ -2958,6 +3169,9 @@ export class Viewer3D {
         }
 
         const upgraded = new THREE.MeshStandardMaterial(params);
+        // Carry the authored snapshot onto the replacement material.
+        upgraded.userData._mvAuthored = material.userData._mvAuthored;
+        upgraded.name = material.name;
 
         // Fix dark color after creation
         this._fixDarkColor(upgraded);
@@ -3065,6 +3279,7 @@ export class Viewer3D {
      * Auto-frame the camera to fit the model in view.
      */
     _frameModel(object) {
+        this._preFocusClip = null;  // whole-model framing supersedes any part focus
         const box = new THREE.Box3().setFromObject(object);
         const size = box.getSize(new THREE.Vector3());
         const center = box.getCenter(new THREE.Vector3());
@@ -3413,6 +3628,12 @@ export class Viewer3D {
 
         this._currentModel.traverse((child) => {
             if (child.isMesh && child.geometry) {
+                // Quantized attributes (KHR_mesh_quantization: normalized Int16/Uint16
+                // positions with the dequant scale in the node transform) MUST be
+                // converted to plain Float32 before baking. applyMatrix4 would write
+                // world-scale floats back into the integer array — overflow garbage
+                // that destroys the model (verified live on a KTX2/quantized GLB).
+                this._dequantizeVectorAttributes(child.geometry);
                 child.geometry.applyMatrix4(child.matrixWorld);
                 child.position.set(0, 0, 0);
                 child.rotation.set(0, 0, 0);
@@ -3430,6 +3651,29 @@ export class Viewer3D {
                 node.updateMatrix();
             }
         });
+    }
+
+    /**
+     * Replace integer/normalized vector attributes (position/normal/tangent) with plain
+     * Float32 copies, reading through the accessor so normalization is decoded. Required
+     * before any in-place matrix bake; a no-op for already-float geometry.
+     */
+    _dequantizeVectorAttributes(geometry) {
+        for (const name of ["position", "normal", "tangent"]) {
+            const attr = geometry.getAttribute(name);
+            if (!attr) continue;
+            const needsConvert = attr.normalized || !(attr.array instanceof Float32Array);
+            if (!needsConvert) continue;
+            const itemSize = attr.itemSize;
+            const out = new Float32Array(attr.count * itemSize);
+            for (let i = 0; i < attr.count; i++) {
+                out[i * itemSize] = attr.getX(i);
+                if (itemSize > 1) out[i * itemSize + 1] = attr.getY(i);
+                if (itemSize > 2) out[i * itemSize + 2] = attr.getZ(i);
+                if (itemSize > 3) out[i * itemSize + 3] = attr.getW(i);
+            }
+            geometry.setAttribute(name, new THREE.BufferAttribute(out, itemSize));
+        }
     }
 
     /**

@@ -33,12 +33,21 @@ exclude = [".DS_Store", "frontend/.DS_Store"]
 
 [tool.poetry.dependencies]
 python = "^3.10"
-fastapi = "^0.115.0"
+# >=0.116 required for starlette>=1.x compatibility (pulled in by the optional mcp extra)
+fastapi = ">=0.116,<1.0"
 uvicorn = {extras = ["standard"], version = "^0.30.0"}
 python-multipart = "^0.0.9"
 rarfile = "^4.2"
 aiofiles = "^24.1.0"
 trimesh = "^4.4.0"
+numpy = "^1.26"   # used directly by the MCP shape-compare engine (also a trimesh dep)
+# Optional: MCP adapter (agents drive the viewer via Model Context Protocol).
+# Install with: pip install "meshvault[mcp]" && playwright install chromium
+mcp = {version = ">=1.2", optional = true}
+playwright = {version = ">=1.48", optional = true}
+
+[tool.poetry.extras]
+mcp = ["mcp", "playwright"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"
@@ -46,6 +55,7 @@ httpx = "^0.27.0"
 
 [tool.poetry.scripts]
 meshvault = "backend.app:main"
+meshvault-mcp = "backend.mcp_server:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

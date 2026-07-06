@@ -15,6 +15,8 @@
  */
 
 import { describeScene } from "./describe_scene.js";
+import { meshStatistics } from "./mesh_stats.js";
+import { samplePoints } from "./sample_points.js";
 
 export class ViewerControlAPI {
     /**
@@ -205,6 +207,20 @@ export class ViewerControlAPI {
                 description: "Return the model's world-space bounding box {min,max,center,size} or null.",
                 handler: () => v.getBounds(),
             },
+            sample_points: {
+                description: "Deterministic, area-weighted surface point samples in world space — the geometric fingerprint used for shape registration / model comparison. Returns { count, seed, surfaceArea, points:[[x,y,z],...] }. Same model + same seed = same points (reproducible comparisons). count 16..20000 (default 4096).",
+                params: {
+                    count: { type: "number", min: 16, max: 20000 },
+                    seed: { type: "number" },
+                },
+                requiresModel: true,
+                handler: (p) => samplePoints(v, { count: p.count, seed: p.seed }),
+            },
+            get_mesh_stats: {
+                description: "Numeric surface-quality statistics — use to COMPARE iterations of the same asset or judge quality beyond connectivity QA (a topologically perfect mesh can still be visual garbage). Returns per-mesh + total: surface area, volume (null for open meshes — the signed-volume sum is origin-dependent when the surface is not closed), edge-length distribution (min/median/p95/max), sliver %, dihedral roughness (mean/p95 angle between adjacent faces — a RELATIVE indicator: compare across versions of the same asset; hard-edged models legitimately score high, e.g. a cube is 60° mean), open/non-manifold/degenerate counts, and issuePoints: representative world-space defect locations to pass to `focus {point}`. Multi-mesh totals carry approx:true on median/mean fields (triangle-weighted combinations; read per-mesh entries when precision matters). Budget: skipped (with skipped:true) above 300k triangles.",
+                requiresModel: true,
+                handler: () => meshStatistics(v),
+            },
             score_views: {
                 description: "Score candidate camera angles by how much visible surface DETAIL each shows (edge energy), and return them ranked. Use this to find a model's semantic 'front' when it is not axis-aligned (e.g. a face): the most detailed side ranks first. Returns [{azimuth, elevation, score, coverage}]. NOTE: presets front/back/left/right are WORLD-AXIS conventions, not the model's real front — this command discovers the real one.",
                 params: {
@@ -231,6 +247,18 @@ export class ViewerControlAPI {
                 description: "Correct the camera roll for the CURRENT view so a mis-oriented (e.g. lying-down) subject appears upright, without modifying the model. Uses left-right symmetry of the framed subject.",
                 requiresModel: true,
                 handler: () => v.autoUpright(),
+            },
+            focus: {
+                description: "Frame a PART of the model (or a world point): moves the camera to look at it, keeping the current view direction, and rescales clip planes/zoom limits so even tiny parts are visible. Target by `id` (the stable mesh id from describe_scene/get_scene_info — most reliable, since real-world mesh names are often meaningless), by `name` (mesh or group; exact > case-insensitive > substring; ambiguity returns candidates), or by `point` [x,y,z] (+ optional radius). The part may be occluded by surrounding geometry — combine with set_clip or set_render_mode wireframe to see through. reset_camera returns to the whole-model view. Note: orbit/set_view/frame re-frame the WHOLE model; re-focus afterwards if needed.",
+                params: {
+                    id: { type: "number", min: 0 },
+                    name: { type: "string" },
+                    point: { type: "array" },
+                    radius: { type: "number", min: 0 },
+                    fill: { type: "number", min: 0.1, max: 1 },
+                },
+                requiresModel: true,
+                handler: (p) => v.focusOn({ id: p.id, name: p.name, point: p.point, radius: p.radius, fill: p.fill }),
             },
             list_commands: {
                 description: "List all available commands and their parameters.",
@@ -563,14 +591,21 @@ export class ViewerControlAPI {
                 },
             },
             set_measure_mode: {
-                description: "Enable/disable interactive click-to-measure mode.",
+                description: "Enable/disable interactive click-to-measure mode. Disabling also clears any measurement overlay.",
                 params: { enabled: { type: "boolean", required: true } },
                 handler: (p) => {
                     // toggleMeasureMode flips; drive it to the requested state.
                     const cur = !!v._measureMode;
                     if (cur !== p.enabled) v.toggleMeasureMode();
+                    // A programmatic `measure` draws without the mode being on — make
+                    // disabling always remove the overlay (it polluted agent screenshots).
+                    if (!p.enabled) v._clearMeasurement();
                     return v._measureMode;
                 },
+            },
+            clear_measurement: {
+                description: "Remove the measurement markers/line/label from the scene (e.g. before a clean screenshot).",
+                handler: () => { v._clearMeasurement(); return true; },
             },
 
             // --- export ---

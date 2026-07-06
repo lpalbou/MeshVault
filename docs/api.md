@@ -31,11 +31,12 @@ default = whole filesystem), `MESHVAULT_HOST` (bind host — non-loopback prints
 
 ---
 
-## Endpoints Overview (15 routes)
+## Endpoints Overview (16 routes)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/` | Serve the main HTML page (issues the session cookie) |
+| `POST` | `/api/compare` | Register two surface point sets and return a shape-comparison report (pure math; no filesystem) |
 | `GET` | `/api/browse` | Browse a directory for 3D assets and folders |
 | `GET` | `/api/asset/file` | Serve a 3D file (auto-converts old `.fbx`→`.obj`) |
 | `GET` | `/api/asset/archive` | Extract and serve a 3D file from an archive |

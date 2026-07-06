@@ -106,6 +106,8 @@ function extOf(name) {
 
 function collectMeshes(model) {
     const out = [];
+    model.updateMatrixWorld(true);
+    let id = 0;
     model.traverse((child) => {
         if (!child.isMesh || !child.geometry) return;
         const geo = child.geometry;
@@ -113,11 +115,26 @@ function collectMeshes(model) {
         const index = geo.getIndex();
         const vertices = pos ? pos.count : 0;
         const triangles = Math.floor(index ? index.count / 3 : vertices / 3);
+        // World-space placement of the part, so an agent can locate it spatially and
+        // `focus` it. Same traversal-order id as the focus command. Skinned meshes
+        // report the bind pose (three's cached bounds ignore the animated pose).
+        let center = null, size = null;
+        if (!geo.boundingBox) geo.computeBoundingBox();
+        if (geo.boundingBox && !geo.boundingBox.isEmpty()) {
+            const wb = geo.boundingBox.clone().applyMatrix4(child.matrixWorld);
+            const c = wb.getCenter(new THREE.Vector3());
+            const s = wb.getSize(new THREE.Vector3());
+            center = [r3(c.x), r3(c.y), r3(c.z)];
+            size = [r3(s.x), r3(s.y), r3(s.z)];
+        }
         // Describe the ASSET, not the current display override: render modes (solid/
         // normals) swap child.material and stash the real one on _mvOriginalMaterial.
         const raw = child._mvOriginalMaterial || child.material;
         const mats = (Array.isArray(raw) ? raw : [raw]).filter(Boolean);
         out.push({
+            id: id++,
+            center,
+            size,
             name: child.name || "(unnamed)",
             mesh: child,
             geometry: geo,
@@ -145,14 +162,43 @@ function collectMaterials(meshes) {
         for (const mat of m.materials) {
             if (seen.has(mat)) { seen.get(mat).meshes.push(m.name); continue; }
             const maps = MAP_SLOTS.filter((slot) => mat[slot] && mat[slot].isTexture);
+            // Texture facts per slot: resolution + color space. `image` may be an
+            // ImageBitmap/HTMLImage/compressed-data descriptor — all expose width/height.
+            const textures = {};
+            for (const slot of maps) {
+                const tex = mat[slot];
+                const img = tex.image || {};
+                textures[slot] = {
+                    width: img.width || null,
+                    height: img.height || null,
+                    // three uses "" (NoColorSpace) for linear data textures — say
+                    // "linear" instead of leaving agents to guess what null means.
+                    colorSpace: tex.colorSpace || "linear",
+                };
+            }
+            // The viewer clamps extreme PBR values for preview (_fixDarkColor). Report
+            // the AUTHORED values too, so a material audit sees the asset, not the clamp.
+            const authored = mat.userData && mat.userData._mvAuthored ? mat.userData._mvAuthored : null;
+            const displayed = {
+                metalness: numOrNull(mat.metalness),
+                roughness: numOrNull(mat.roughness),
+            };
+            const modifiedByViewer = !!(authored && (
+                (authored.metalness !== null && authored.metalness !== displayed.metalness) ||
+                (authored.roughness !== null && authored.roughness !== displayed.roughness) ||
+                (authored.color && mat.color && authored.color !== `#${mat.color.getHexString()}`)
+            ));
             seen.set(mat, {
                 material: mat,
                 name: mat.name || "(unnamed)",
                 type: mat.type,
                 color: mat.color ? `#${mat.color.getHexString()}` : null,
-                metalness: numOrNull(mat.metalness),
-                roughness: numOrNull(mat.roughness),
+                metalness: displayed.metalness,
+                roughness: displayed.roughness,
+                authored,
+                modifiedByViewer,
                 maps,
+                textures,
                 transparent: !!mat.transparent,
                 doubleSided: mat.side === THREE.DoubleSide,
                 meshes: [m.name],
@@ -208,9 +254,12 @@ function collectHierarchy(model, cap) {
 function topMeshes(meshes, maxItems) {
     const sorted = [...meshes].sort((a, b) => b.triangles - a.triangles);
     const items = sorted.slice(0, maxItems).map((m) => ({
+        id: m.id,          // stable traversal-order id — pass to `focus { id }`
         name: m.name,
         triangles: m.triangles,
         vertices: m.vertices,
+        center: m.center,  // world-space part placement
+        size: m.size,
         materials: m.materials.map((x) => x.name || "(unnamed)"),
         hasUVs: m.hasUVs,
         hasVertexColors: m.hasVertexColors || undefined,
@@ -223,7 +272,12 @@ function materialSummaries(materials, maxItems) {
     const items = materials.slice(0, maxItems).map((m) => ({
         name: m.name, type: m.type, color: m.color,
         metalness: m.metalness, roughness: m.roughness,
-        maps: m.maps, transparent: m.transparent, doubleSided: m.doubleSided,
+        // Present only when the viewer changed something: the asset's original values.
+        authored: m.modifiedByViewer ? m.authored : undefined,
+        modifiedByViewer: m.modifiedByViewer || undefined,
+        maps: m.maps,
+        textures: Object.keys(m.textures).length ? m.textures : undefined,
+        transparent: m.transparent, doubleSided: m.doubleSided,
     }));
     return { items, omitted: Math.max(0, materials.length - items.length) };
 }
