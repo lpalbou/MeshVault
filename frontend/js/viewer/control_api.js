@@ -14,6 +14,8 @@
  * structured `{ok:false, error}`. It adds no rendering logic of its own.
  */
 
+import { describeScene } from "./describe_scene.js";
+
 export class ViewerControlAPI {
     /**
      * @param {import("../viewer_3d.js").Viewer3D} viewer
@@ -156,7 +158,12 @@ export class ViewerControlAPI {
                 if (spec.max !== undefined && n > spec.max) return { error: `Param '${key}' must be <= ${spec.max}` };
                 v = n;
             } else if (spec.type === "boolean") {
-                v = (v === true || v === "true" || v === 1 || v === "1");
+                // Accept real booleans and the common string/number forms, but reject
+                // anything ambiguous instead of silently coercing it to false.
+                if (typeof v === "boolean") { /* ok */ }
+                else if (v === "true" || v === 1 || v === "1") v = true;
+                else if (v === "false" || v === 0 || v === "0") v = false;
+                else return { error: `Param '${key}' must be a boolean (got ${JSON.stringify(v)})` };
             } else if (spec.type === "array") {
                 if (!Array.isArray(v)) return { error: `Param '${key}' must be an array` };
             } else if (spec.type === "string") {
@@ -183,6 +190,16 @@ export class ViewerControlAPI {
             get_scene_info: {
                 description: "Return per-mesh and per-material details of the loaded model.",
                 handler: () => v.getSceneInfo(),
+            },
+            describe_scene: {
+                description: "One-call structured TEXT snapshot of the loaded model, designed so an agent can reason WITHOUT screenshots: natural-language summary, inventory (meshes/materials/textures/triangles — live counts, correct after transforms), size + bounds + real-world scale hint, capped hierarchy outline, largest meshes, material properties (of the asset, even while a render-mode override is active), detected geometry issues (missing normals/UVs, degenerate faces, watertightness, flipped normals via signed volume, scale sanity), and the current camera/render state. Options: maxItems caps list lengths (default 8); checks:false skips geometry QA; views:true adds the top-3 detail-ranked camera angles (renders ~24 offscreen views — seconds on software GL). Prefer this over screenshot for understanding WHAT is loaded; use screenshot only to verify aesthetics.",
+                params: {
+                    maxItems: { type: "number", min: 1, max: 50 },
+                    checks: { type: "boolean", default: true },
+                    views: { type: "boolean", default: false },
+                },
+                requiresModel: false,
+                handler: (p) => describeScene(v, { maxItems: p.maxItems, checks: p.checks, views: p.views }),
             },
             get_bounds: {
                 description: "Return the model's world-space bounding box {min,max,center,size} or null.",
@@ -457,6 +474,19 @@ export class ViewerControlAPI {
                     density: { type: "number", min: 0, max: 1 },
                 },
                 handler: (p) => v.setFog({ enabled: p.enabled, density: p.density }),
+            },
+            set_environment: {
+                description: "Control image-based lighting (IBL): environment reflections on PBR materials. enabled on/off; intensity multiplier; asBackground shows the environment as the scene background. On by default for realistic metal/rough shading.",
+                params: {
+                    enabled: { type: "boolean" },
+                    intensity: { type: "number", min: 0, max: 5 },
+                    asBackground: { type: "boolean" },
+                },
+                handler: (p) => v.setEnvironment({ enabled: p.enabled, intensity: p.intensity, asBackground: p.asBackground }),
+            },
+            get_environment: {
+                description: "Return the current IBL/environment settings { enabled, intensity, asBackground }.",
+                handler: () => v.getEnvironment(),
             },
             set_background: {
                 description: "Set the background color (CSS hex, e.g. #202030).",

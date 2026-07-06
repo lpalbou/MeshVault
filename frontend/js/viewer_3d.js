@@ -18,6 +18,9 @@ import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import { MTLLoader } from "three/addons/loaders/MTLLoader.js";
 import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
+import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
 import { PLYLoader } from "three/addons/loaders/PLYLoader.js";
 import { ColladaLoader } from "three/addons/loaders/ColladaLoader.js";
@@ -30,11 +33,24 @@ import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js"
 import { deinterleaveGeometry } from "three/addons/utils/BufferGeometryUtils.js";
 import { SimplifyModifier } from "three/addons/modifiers/SimplifyModifier.js";
 import { VertexNormalsHelper } from "three/addons/helpers/VertexNormalsHelper.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { SSAOPass } from "three/addons/postprocessing/SSAOPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 
+/**
+ * Turn a loader failure into a readable message. Loaders (and the Draco/Basis worker
+ * bridges) reject with Error objects, strings, or plain objects — a bare template
+ * literal on the latter yields "[object Object]".
+ */
+function describeLoadError(err) {
+    if (!err) return "Unknown error";
+    if (typeof err === "string") return err;
+    if (err.message) return err.message;
+    if (err.error && err.error.message) return err.error.message;
+    try { return JSON.stringify(err); } catch { return String(err); }
+}
 
 export class Viewer3D {
     /**
@@ -58,6 +74,11 @@ export class Viewer3D {
         this._resolveResource =
             options.resolveResource ||
             ((ref) => `/api/asset/related?path=${encodeURIComponent(ref)}`);
+
+        // Base URL under which the vendored decoder assets (Draco/Basis) are served.
+        // Full app: "/static/" (StaticFiles → frontend/). Standalone/Pages: "" so
+        // "vendor/..." resolves relative to the host page. Locally bundled = no CDN.
+        this._assetBaseUrl = options.assetBaseUrl != null ? options.assetBaseUrl : "/static/";
 
         // Lightweight state tracking so the control API (and AI agents) can query a
         // JSON snapshot without reaching into internals.
@@ -91,6 +112,7 @@ export class Viewer3D {
         this._initLights();
         this._initGround();
         this._initRenderer();
+        this._initEnvironment();
         this._initControls();
         this._initPivotPick();
         this._initMeasurement();
@@ -174,6 +196,9 @@ export class Viewer3D {
 
         // Re-apply persistent scene settings to the new model
         this._applySceneSettings();
+
+        // Re-assert the current IBL state for the new model.
+        this._applyEnvironment();
 
         // Auto-frame the model
         this._frameModel(object);
@@ -433,6 +458,11 @@ export class Viewer3D {
         if (this._controls && this._controls.dispose) this._controls.dispose();
         if (this._ssaoPass && this._ssaoPass.dispose) this._ssaoPass.dispose();
         if (this._composer && this._composer.dispose) this._composer.dispose();
+
+        if (this._envRT && this._envRT.dispose) this._envRT.dispose();
+        if (this._pmrem && this._pmrem.dispose) this._pmrem.dispose();
+        if (this._dracoLoader && this._dracoLoader.dispose) this._dracoLoader.dispose();
+        if (this._ktx2Loader && this._ktx2Loader.dispose) this._ktx2Loader.dispose();
 
         if (this._renderer) {
             this._renderer.dispose();
@@ -1620,8 +1650,8 @@ export class Viewer3D {
         });
         this.setWireframe(false);
 
-        if (m === "textured") { this._renderMode = "textured"; return true; }
-        if (m === "wireframe") { this.setWireframe(true); this._renderMode = "wireframe"; return true; }
+        if (m === "textured") { this._renderMode = "textured"; this._applyEnvironment(); return true; }
+        if (m === "wireframe") { this.setWireframe(true); this._renderMode = "wireframe"; this._applyEnvironment(); return true; }
 
         // solid / normals: override the material (keep the original for restore).
         this._currentModel.traverse((child) => {
@@ -1637,6 +1667,7 @@ export class Viewer3D {
             }
         });
         this._renderMode = m;
+        this._applyEnvironment();  // damp IBL in matte 'solid' mode so form stays readable
         return true;
     }
 
@@ -1799,6 +1830,7 @@ export class Viewer3D {
                 renderMode: this.getRenderMode(),
                 clip: this._clip ? { axis: this._clip.axis, position: this._clip.t, flip: this._clip.flip } : null,
                 fog: !!this._scene.fog,
+                environment: this.getEnvironment(),
             },
             animation: {
                 hasAnimations: this.hasAnimations(),
@@ -1846,6 +1878,78 @@ export class Viewer3D {
             }
         } catch { /* getMaterialsInfo may vary; meshes are the primary signal */ }
         return { meshes, materials };
+    }
+
+    // ==========================================================
+    // Image-based lighting (IBL) — environment map for realistic PBR reflections.
+    // Generated procedurally from RoomEnvironment (no HDRI asset to ship), so metallic
+    // / rough materials get real reflections instead of looking flat. The existing
+    // key/fill/ambient rig stays as the baseline; IBL is layered on top.
+    // ==========================================================
+    _initEnvironment() {
+        this._environmentIntensity = 1.0;
+        this._environmentEnabled = true;
+        try {
+            this._pmrem = new THREE.PMREMGenerator(this._renderer);
+            const room = new RoomEnvironment();
+            this._envRT = this._pmrem.fromScene(room, 0.04);
+            if (typeof room.dispose === "function") room.dispose();
+            this._environmentTexture = this._envRT.texture;
+            this._applyEnvironment();
+        } catch (e) {
+            console.warn("Environment (IBL) init failed:", e);
+            this._environmentEnabled = false;
+        }
+    }
+
+    /**
+     * Apply the current IBL state to the scene. In three r170, image-based lighting from
+     * `scene.environment` is scaled by `scene.environmentIntensity` (NOT per-material
+     * envMapIntensity, which the renderer overrides for materials with no own envMap). So
+     * we drive those two — see KnowledgeBase "IBL in three r170".
+     */
+    _applyEnvironment() {
+        // In the matte "solid" inspection mode, suppress the env entirely: it is exactly
+        // the pre-IBL clay look (analytic rig only), which is what form-reading needs.
+        const solid = this.getRenderMode() === "solid";
+        const on = this._environmentEnabled && !solid;
+        this._scene.environment = on ? this._environmentTexture : null;
+        if ("environmentIntensity" in this._scene) {
+            this._scene.environmentIntensity = on ? this._environmentIntensity : 0;
+        }
+    }
+
+    /**
+     * Control image-based lighting.
+     * @param {object} opts
+     * @param {boolean} [opts.enabled]  - turn IBL on/off
+     * @param {number}  [opts.intensity] - environment intensity multiplier
+     * @param {boolean} [opts.asBackground] - show the environment as the background
+     */
+    setEnvironment(opts = {}) {
+        if (opts.enabled !== undefined) this._environmentEnabled = !!opts.enabled;
+        if (opts.intensity !== undefined) this._environmentIntensity = opts.intensity;
+        this._applyEnvironment();
+        if (opts.asBackground !== undefined) {
+            this._envAsBackground = !!opts.asBackground;
+            this._scene.background = this._envAsBackground && this._environmentTexture
+                ? this._environmentTexture
+                : new THREE.Color(this._background);
+        }
+        // When IBL is turned off, don't leave the environment image as the background.
+        if (opts.enabled !== undefined && !this._environmentEnabled && this._envAsBackground) {
+            this._envAsBackground = false;
+            this._scene.background = new THREE.Color(this._background);
+        }
+        return true;
+    }
+
+    getEnvironment() {
+        return {
+            enabled: !!this._environmentEnabled,
+            intensity: this._environmentIntensity,
+            asBackground: !!this._envAsBackground,
+        };
     }
 
     _initPostProcessing() {
@@ -2007,7 +2111,7 @@ export class Viewer3D {
                 (err) => {
                     console.error("FBX loader error:", err);
                     reject(new Error(
-                        `FBX loading failed: ${err?.message || err || "Unknown error. The file may use an unsupported FBX version."}`
+                        `FBX loading failed: ${describeLoadError(err) || 'Unknown error. The file may use an unsupported FBX version.'}`
                     ));
                 }
             );
@@ -2585,16 +2689,48 @@ export class Viewer3D {
                 (err) => {
                     console.error("STL loader error:", err);
                     reject(new Error(
-                        `STL loading failed: ${err?.message || err || "Unknown error"}`
+                        `STL loading failed: ${describeLoadError(err)}`
                     ));
                 }
             );
         });
     }
 
+    /**
+     * A GLTFLoader with the compressed-glTF decoders attached: Draco (geometry),
+     * KTX2/Basis (textures), and Meshopt. Many real-world GLBs ship compressed and
+     * won't load without these. All decoder assets are vendored locally (no CDN), so
+     * this works offline and in the standalone/Pages bundle.
+     */
+    _makeGLTFLoader() {
+        const loader = new GLTFLoader();
+        const base = this._assetBaseUrl;
+        // Create the decoders ONCE and reuse them. DRACOLoader/KTX2Loader each spawn web
+        // workers; making a new set per load (and never disposing the old) leaks workers.
+        try {
+            if (!this._dracoLoader) {
+                this._dracoLoader = new DRACOLoader();
+                this._dracoLoader.setDecoderPath(`${base}vendor/draco/gltf/`);
+            }
+            loader.setDRACOLoader(this._dracoLoader);
+        } catch (e) { console.warn("Draco decoder unavailable:", e); }
+        try {
+            if (!this._ktx2Loader) {
+                this._ktx2Loader = new KTX2Loader();
+                this._ktx2Loader.setTranscoderPath(`${base}vendor/basis/`);
+                this._ktx2Loader.detectSupport(this._renderer);
+            }
+            loader.setKTX2Loader(this._ktx2Loader);
+        } catch (e) { console.warn("KTX2 transcoder unavailable:", e); }
+        try {
+            loader.setMeshoptDecoder(MeshoptDecoder);
+        } catch (e) { console.warn("Meshopt decoder unavailable:", e); }
+        return loader;
+    }
+
     _loadGLTF(url) {
         return new Promise((resolve, reject) => {
-            const loader = new GLTFLoader();
+            const loader = this._makeGLTFLoader();
             loader.load(
                 url,
                 (gltf) => {
@@ -2612,7 +2748,7 @@ export class Viewer3D {
                 (err) => {
                     console.error("GLTF loader error:", err);
                     reject(new Error(
-                        `GLTF loading failed: ${err?.message || err || "Unknown error"}`
+                        `GLTF loading failed: ${describeLoadError(err)}`
                     ));
                 }
             );
@@ -2645,7 +2781,7 @@ export class Viewer3D {
                 },
                 undefined,
                 (err) => reject(new Error(
-                    `PLY loading failed: ${err?.message || err || "Unknown error"}`
+                    `PLY loading failed: ${describeLoadError(err)}`
                 ))
             );
         });
@@ -2664,7 +2800,7 @@ export class Viewer3D {
                 },
                 undefined,
                 (err) => reject(new Error(
-                    `Collada loading failed: ${err?.message || err || "Unknown error"}`
+                    `Collada loading failed: ${describeLoadError(err)}`
                 ))
             );
         });
@@ -2679,7 +2815,7 @@ export class Viewer3D {
                 (object) => resolve(object),
                 undefined,
                 (err) => reject(new Error(
-                    `3MF loading failed: ${err?.message || err || "Unknown error"}`
+                    `3MF loading failed: ${describeLoadError(err)}`
                 ))
             );
         });
@@ -2772,7 +2908,8 @@ export class Viewer3D {
         ) {
             // Fix unreasonably dark colors that make the model invisible
             this._fixDarkColor(material);
-            material.envMapIntensity = 0.5;
+            // NOTE: don't set envMapIntensity here — for scene-environment IBL the r170
+            // renderer overrides it with scene.environmentIntensity (see KnowledgeBase).
             material.needsUpdate = true;
             return material;
         }
@@ -2786,7 +2923,6 @@ export class Viewer3D {
             color: color,
             roughness: 0.6,
             metalness: 0.1,
-            envMapIntensity: 0.5,
             side: THREE.DoubleSide,
         };
 
@@ -3150,7 +3286,8 @@ export class Viewer3D {
      */
     setBackground(hex) {
         const color = new THREE.Color(hex);
-        this._scene.background = color;
+        // Don't clobber an environment-as-background; just remember the color for later.
+        if (!this._envAsBackground) this._scene.background = color;
         if (this._scene.fog) this._scene.fog.color.copy(color);  // fog may be disabled
         this._currentBgHex = hex;
         this._background = hex;

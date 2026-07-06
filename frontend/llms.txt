@@ -15,9 +15,16 @@ Key facts for agents:
   schemas at runtime with `api.listCommands()`.
 - Observe state (JSON, no vision needed) with `api.getState()`, `api.getSceneInfo()`, and the
   `get_bounds` command. Capture what the viewer sees with `screenshot` (returns a PNG data URL).
+- Best first move after loading: `describe_scene` — one structured snapshot (summary sentence,
+  inventory, size hint, hierarchy, materials, detected geometry issues, current view) so you can
+  reason about the model without any screenshot.
 - "front/back/left/right" presets are WORLD-AXIS conventions and are often wrong for
   mis-oriented models. To find a model's real front, use `find_best_view` (scores angles by
   lighting-independent visible detail and auto-uprights the camera).
+- Compressed glTF (Draco geometry, KTX2/Basis textures, Meshopt) loads transparently;
+  decoders are bundled locally (offline-safe, no CDN).
+- Image-based lighting (IBL) is on by default for realistic PBR reflections; control it
+  with `set_environment { enabled, intensity, asBackground }` / `get_environment`.
 
 ## Docs
 

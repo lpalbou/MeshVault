@@ -53,6 +53,7 @@ jobs:
           cp web/index.html site/index.html
           cp web/meshvault-viewer.js site/meshvault-viewer.js
           cp web/sample.glb site/sample.glb
+          cp -r frontend/vendor site/vendor   # Draco/Basis decoders for compressed glTF
           touch site/.nojekyll
 
       - name: Setup Pages

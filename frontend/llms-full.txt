@@ -53,13 +53,42 @@ Rules an agent can rely on:
 ## 3. Observing state (no vision required)
 
 - `get_state` → {
-    model: { loaded, name, vertices, faces, dimensions{w,h,d}, bounds{min,max,center,size}, scale, modified },
+    model: { loaded, name, vertices, faces, dimensions{width,height,depth}, bounds{min,max,center,size}, scale, modified },
     camera: { mode, position[3], target[3], fov, presets[] },
     display: { wireframe, grid, axes, normals, background, renderMode, clip, fog },
     animation: { hasAnimations, clips[], playing, time, duration }
   }
 - `get_scene_info` → { meshes:[{name, vertices, faces, materials[]}], materials:[{name,type,color,roughness,metalness}] }
 - `get_bounds` → { min[3], max[3], center[3], size[3] } (world units) or null.
+
+- `describe_scene { maxItems?:1..50=8, checks?=true, views?=false }` — THE recommended
+  first observation after `load`: one token-bounded snapshot with everything needed to
+  reason without vision. Returns:
+  {
+    loaded, summary,                       // 2–4 plain sentences, safe to show a human
+    model: { name, format, vertices, triangles, meshCount, materialCount, textureCount,
+             animated, animationClips[], dimensions{width,height,depth},
+             bounds{min,max,center,size}, sizeHint, userScale, modified },
+    hierarchy: { nodes:[{name,kind,depth}], totalNodes, truncated },   // outline, depth<=4
+    meshes:    { items:[{name,triangles,vertices,materials[],hasUVs,
+                         hasVertexColors?,skinned?}], omitted },       // largest first
+    materials: { items:[{name,type,color,metalness,roughness,maps[],transparent,doubleSided}], omitted },
+    issues:    [{ severity:error|warning|info, code, message, meshes?[] }],
+    view:      { camera{position,target,fov,mode}, renderMode, environment, clip, grid },
+    suggestedViews?: [{azimuth, elevation, score}]   // only when views:true
+  }
+  Notes: counts and dimensions are LIVE (recomputed from the current buffers, correct
+  after simplify/rotate/reset). `vertices` sums position-attribute counts, the same basis
+  as meshes.items[].vertices — seam-duplicated vertices count once per duplicate.
+  Materials describe the ASSET even while a solid/normals render-mode override is active.
+  `views:true` renders ~24 offscreen scoring views — expect seconds on software GL.
+  Issue codes: missing_normals, missing_uvs (textured but no UVs — error), empty_meshes,
+  unindexed_geometry, scale_tiny/scale_huge, nan_positions, degenerate_faces (relative
+  sliver test on raw positions), not_watertight (open edges; counted on position-welded
+  vertices so UV seams don't false-positive), non_manifold_edges, normals_maybe_flipped
+  (signed-volume test on closed meshes), and checks_skipped when the scene exceeds the
+  300k-triangle QA budget (report stays fast).
+  With no model loaded it returns { loaded:false, summary } instead of an error.
 
 After any command, re-read `get_state` to verify the effect. To SEE the result, call
 `screenshot` and read the returned PNG data URL.
@@ -70,6 +99,8 @@ After any command, re-read `get_state` to verify the effect. To SEE the result, 
 - `load { url:string, extension?:string, name?:string }` — load from a URL (extension
   inferred if omitted). Resolves only when the model is render-ready. Returns {stats, state}.
   Formats: .obj .fbx .gltf .glb .stl .ply .dae .3mf .usdz.
+  Compressed glTF is supported transparently: Draco geometry, KTX2/Basis textures, and
+  Meshopt (EXT_meshopt_compression). Decoders are bundled locally — no CDN, works offline.
 - `unload` — clear the model, reset to an empty scene.
 - Local files (no URL): use `mv.loadFile(file)` (not an execute command).
 
@@ -136,6 +167,15 @@ const shot = await mv.execute({ action: "screenshot", params: { width: 1024, hei
 - `set_background { color: "#rrggbb" }`, `set_scale { scale }`.
 - `set_lighting { azimuth?, elevation?, key_intensity?, fill_intensity?, ambient?, exposure? }`
   — studio light rig for a hero look (degrees / multipliers; only provided fields apply).
+- `set_environment { enabled?, intensity?:0..5, asBackground? }` — image-based lighting
+  (IBL): a procedural studio environment that gives PBR/metallic materials realistic
+  reflections. ON by default at intensity 1 (the studio light rig above stays active as
+  the baseline). `intensity` scales the environment contribution; `asBackground:true`
+  shows the environment image behind the model (disabling IBL also clears it). In the
+  matte `solid` render mode the environment is automatically suspended so the clay
+  surface stays readable. Turn IBL off to reproduce the plain light-rig-only look.
+- `get_environment` → { enabled, intensity, asBackground } (also in
+  `get_state().display.environment`).
 
 ================================================================================
 ## 8. Transforms (mutate the model geometry)

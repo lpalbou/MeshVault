@@ -2,8 +2,17 @@
 
 **Priority**: Medium
 **Effort**: Medium
-**Status**: Proposed
+**Status**: Done (2026-07-06) — folded into 029 `describe_scene` (its `issues[]` array)
 **Created**: 2026-07-06
+
+## Completion note
+
+Delivered inside `describe_scene` rather than as a separate `validate_model` command:
+normals present, flipped-normal detection (signed volume, closed meshes), degenerate
+faces, watertightness + non-manifold edges (position-welded), scale sanity, missing UVs
+on textured meshes, NaN positions, empty meshes — as `issues:[{severity, code, message,
+meshes?}]`. NOT included (still open if ever needed): texture-slot resolution checks
+(unresolved texture files) and an explicit poly-budget threshold.
 
 ## Summary
 

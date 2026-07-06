@@ -50,6 +50,9 @@ export function createViewer(container, options = {}) {
 
     const viewer = new Viewer3D(container, options.onInfoUpdate || (() => {}), {
         resolveResource,
+        // Vendored Draco/Basis decoders live next to the page (e.g. ./vendor/...), so
+        // compressed glTF works offline with no CDN. Override for custom hosting.
+        assetBaseUrl: options.assetBaseUrl != null ? options.assetBaseUrl : "",
     });
     const api = new ViewerControlAPI(viewer, { onEvent: options.onEvent });
 

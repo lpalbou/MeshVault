@@ -3,7 +3,8 @@
 Durable planning memory for MeshVault. Records what exists, what is next, what was
 considered, and why priorities are ordered as they are. Treat stale text here as a bug.
 
-Last update: 2026-07-05 (Phase 0–2 implemented, adversarially reviewed over 2 cycles).
+Last update: 2026-07-06 (026 compressed-glTF decoders + 027 IBL + 029 describe_scene
+(incl. 031 QA checks) implemented, each adversarially reviewed by 3 agents).
 
 ---
 
@@ -22,9 +23,9 @@ Next free ID: **0025**.
 
 | State | Count | IDs |
 |-------|------:|-----|
-| completed | 17 | 001–005, 009–014, 017–021, 025 |
-| planned | 6 | 006, 007, 008, 026, 027, 029 |
-| proposed | 12 | 015, 016, 022, 023, 024, 028, 030, 031, 032, 033, 034, 035 |
+| completed | 21 | 001–005, 009–014, 017–021, 025, 026, 027, 029, 031 |
+| planned | 3 | 006, 007, 008 |
+| proposed | 11 | 015, 016, 022, 023, 024, 028, 030, 032, 033, 034, 035 |
 
 Next free ID: **0036**.
 
@@ -37,9 +38,11 @@ split of `viewer_3d.js`) is now lower-risk and still open.
 
 Ranked highest-value additions (market + AI-agent + web-deploy passes):
 - `026` Compressed glTF decoders (Draco/KTX2/Meshopt) — **top pick**: many real GLBs don't
-  open today. planned/High.
-- `027` HDRI/IBL environment lighting — biggest realism win. planned/High.
-- `029` Structured `describe_scene` report — highest leverage for agents. planned/High.
+  open today. **Done 2026-07-06** (vendored decoders, offline-verified, worker-safe).
+- `027` HDRI/IBL environment lighting — biggest realism win. **Done 2026-07-06**
+  (procedural RoomEnvironment PMREM, `set_environment` API, solid-mode suspension).
+- `029` Structured `describe_scene` report — highest leverage for agents. **Done
+  2026-07-06** (one-call text snapshot + QA issues; 031 folded in).
 - `028` PBR-Neutral tone mapping (S), `030` thin MCP adapter, `031` model-QA command,
   `032` shareable URL state + embed, `033` scene-graph inspector, `034` CORS-aware load UX,
   `035` secondary bundle (shadow catcher, section caps, video export, A/B compare, splats…).
@@ -106,6 +109,20 @@ Editing track — gated behind the shipped Phase 0 (confinement, `010`/`012`) an
 - **Thumbnails for degenerate/flat meshes** render near-blank (expected, not a bug).
 - **First-thumbnail feedback:** cards show the format icon with no spinner while the first
   render is in flight — minor UX polish candidate.
+
+## Known follow-ups from the 2026-07-06 adversarial reviews (026/027/029)
+
+- **Pre-existing bug: `reset` after `simplify` fails** with "offset is out of bounds"
+  (found by the 029 robustness reviewer; unrelated to describe_scene — the saved original
+  geometry snapshot conflicts with the simplified attribute layout). Needs its own fix.
+- **Key/fill direction controls are visually subdued on metallic models while IBL is on**
+  (IBL dominates, as in reference viewers) — accepted behavior, documented here.
+- **Vendored decoder wasm (`frontend/vendor/`) must be re-synced when `three` is bumped**
+  (loader/decoder are a matched pair; see KnowledgeBase).
+- **Embedders hosting `meshvault-viewer.js` away from `vendor/` must pass `assetBaseUrl`**
+  or compressed glTF decoding 404s (documented constraint).
+- **IBL control has no human UI** (agents have `set_environment`); lighting panels in the
+  app + web viewer could grow an environment toggle/slider.
 
 ---
 

@@ -17,6 +17,7 @@
 import * as esbuild from "esbuild";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { cpSync, existsSync } from "node:fs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, "..");
@@ -56,6 +57,13 @@ async function build() {
             await esbuild.build(opts);
         }
     }
+    // Copy the vendored decoder assets (Draco/Basis) next to the standalone bundle so the
+    // web/ site can serve them (./vendor/...) for offline compressed-glTF support.
+    const vendorSrc = resolve(root, "frontend/vendor");
+    if (existsSync(vendorSrc)) {
+        cpSync(vendorSrc, resolve(root, "web/vendor"), { recursive: true });
+    }
+
     if (watch) {
         console.log("esbuild: watching for changes… (Ctrl+C to stop)");
     } else {

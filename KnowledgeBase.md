@@ -64,3 +64,72 @@ The original arbitrary read/write/delete exposure came from each endpoint callin
 
 FastAPI runs `async def` handlers on the event loop and `def` handlers in a threadpool. Endpoints that do blocking work — archive extraction (subprocess up to 120s), RAR inspection, FBX conversion, SQLite queries, `rglob` texture scans, large file copies — must be plain `def` so one slow request doesn't stall every other request. Only genuinely async work (`await file.read()`, spawning a background thread) stays `async def`. Long scans (library reindex) run in an explicit background thread and commit in small batches so writers (tag/collection edits) can interleave instead of waiting for the whole walk.
 
+
+---
+
+## IBL in three r170: control it via `scene.environmentIntensity`, NOT `material.envMapIntensity`
+
+### Insight (measured, adversarially verified)
+For materials that get their environment from `scene.environment` (i.e. no own `envMap` —
+the normal case for loaded glTF), the r170 renderer **overrides** the material's
+`envMapIntensity` uniform with `scene.environmentIntensity` every frame:
+`WebGLMaterials.refreshMaterialUniforms` → `if (material.isMeshStandardMaterial &&
+material.envMap === null && scene.environment !== null) envMapIntensity.value =
+scene.environmentIntensity`. Setting `material.envMapIntensity` in this case is a
+**silent no-op** (measured: 0.0 mean pixel diff). `material.envMapIntensity` only applies
+when the material has its **own** `envMap`.
+
+### Consequences
+- All IBL enable/intensity control must go through `scene.environment` (null to disable)
+  and `scene.environmentIntensity` — one place, applied in `_applyEnvironment()`.
+- Never zero `envMapIntensity` across a model's materials to "disable IBL": it does
+  nothing for scene-env materials, and it would wrongly kill reflections for assets that
+  ship their own baked `envMap`.
+- A procedural `RoomEnvironment` → `PMREMGenerator.fromScene()` gives credible studio IBL
+  with zero shipped assets (offline/Pages-safe). Dispose the temp room scene, the PMREM
+  generator, and the render target (`destroy()`).
+- The matte "solid" (clay) inspection mode must suspend the environment: full-strength
+  IBL washes a matte white override to ~230/255 mean luminance and destroys form reading.
+
+## Vendored decoder binaries (Draco/Basis) are version-coupled to `three`
+
+`frontend/vendor/{draco/gltf,basis}` are copied from
+`node_modules/three/examples/jsm/libs/` and must be **re-synced whenever `three` is
+bumped** — loader JS and decoder wasm are a matched pair. They are committed (source of
+truth), served at `/static/vendor/` by the app, copied to `web/vendor/` by
+`scripts/build.mjs` for local static serving, and shipped as `site/vendor/` by the Pages
+workflow. Decoder paths resolve via the viewer's `assetBaseUrl` option (`/static/` in the
+app, page-relative in the standalone bundle), so embedders hosting the bundle elsewhere
+must pass their own `assetBaseUrl`. DRACOLoader/KTX2Loader spawn worker pools: create
+them once per viewer, reuse across loads, and `dispose()` them in `destroy()` (verified:
+workers bounded at 8 across 10 loads, 0 after destroy).
+
+---
+
+## Geometry QA heuristics that survive real-world meshes (`describe_scene`)
+
+Adversarially validated against trimesh ground truth; each rule below replaced a naive
+version that produced false positives or missed real defects:
+
+- **Watertight/manifold topology must be computed on position-welded vertices** (quantize
+  at 1e-6 × bbox diagonal, canonical id per position). Raw indices report every UV/normal
+  seam as a boundary edge — a textured cube would look "full of holes".
+- **Degeneracy must be judged on RAW positions with a RELATIVE sliver test**
+  (|cross|² < 1e-12 × |ab|²|ac|², i.e. sin²θ): an absolute area epsilon flags legitimately
+  small triangles in fine-detail meshes, and using welded ids flags genuinely tiny-but-valid
+  triangles whose corners quantize together.
+- **Flipped normals: use the SIGNED VOLUME of the winding, not a centroid test.** A
+  centroid ray test fails on tori and other shapes whose faces legitimately point "toward
+  the centroid". Signed volume (Σ a·(b×c)/6, translation-invariant for closed surfaces) is
+  reliable — and only meaningful when the mesh is closed (boundaryEdges === 0).
+- **Budget-gate per-triangle work BEFORE doing it** and say so in the output
+  (`checks_skipped` issue) — an agent must never mistake "skipped" for "clean".
+- **Main-thread hot loops must be allocation-light**: a `new Vector3` per vertex plus
+  string Map keys per edge cost ~0.9 s and ~30 MB of garbage at 292k triangles; scalar
+  math + numeric edge keys (u·nVerts+v) removed the freeze.
+- **Report LIVE numbers, not cached loader stats**: `_lastStats` goes stale after
+  simplify/rotate and the report would contradict its own mesh list. Recompute counts and
+  bounds from the current buffers at call time.
+- **Describe the ASSET, not the display override**: render modes swap `child.material`
+  and stash the original on `_mvOriginalMaterial`; an inventory that reads the override
+  claims a textured model is untextured.

@@ -15,9 +15,11 @@ build/
 !frontend/dist/
 frontend/dist/*.map
 
-# The web/ Pages site: index.html is tracked; the bundle is a build artifact (CI rebuilds it).
+# The web/ Pages site: index.html is tracked; the bundle + copied vendor decoders are
+# build artifacts (CI rebuilds them). The source vendor lives in frontend/vendor.
 web/meshvault-viewer.js
 web/meshvault-viewer.js.map
+web/vendor/
 
 # ===========================
 # Virtual environments

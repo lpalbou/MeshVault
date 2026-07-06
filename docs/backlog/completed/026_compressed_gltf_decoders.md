@@ -3,8 +3,24 @@
 **Priority**: High
 **Effort**: Medium
 **Category**: Format support / correctness
-**Status**: Proposed
+**Status**: Done (2026-07-06)
 **Created**: 2026-07-06
+
+## Implementation notes (done)
+
+- `_makeGLTFLoader()` in `frontend/js/viewer_3d.js` wires `DRACOLoader`, `KTX2Loader`
+  (with `detectSupport(renderer)`), and `MeshoptDecoder`. Draco/KTX2 loaders are created
+  once per viewer and reused (bounded worker pools); `destroy()` disposes them.
+- Decoder assets vendored at `frontend/vendor/{draco/gltf,basis}` (~1.3 MB, from the
+  matching `three` release — re-sync when bumping three). Served at `/static/vendor/` in
+  the app; `scripts/build.mjs` copies them to `web/vendor/` and the Pages workflow ships
+  `site/vendor/`. `assetBaseUrl` option: `/static/` (app) or relative (standalone/Pages).
+- Thumbnailer (`frontend/js/thumbnailer.js`) shares the same decoders, so compressed
+  models get grid thumbnails too.
+- Adversarially verified: Draco + KTX2 + Meshopt load in app, standalone, and a `/repo/`
+  Pages simulation with ALL external requests blocked (fully offline, zero CDN); worker
+  counts bounded at 8 across 10 loads and drop to 0 on destroy; corrupt files reject with
+  readable errors (`describeLoadError`).
 
 ## Summary
 

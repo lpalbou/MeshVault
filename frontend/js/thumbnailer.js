@@ -16,6 +16,9 @@ import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
 import { PLYLoader } from "three/addons/loaders/PLYLoader.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
+import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
 
 const THUMB_SIZE = 256;
@@ -178,7 +181,7 @@ export class Thumbnailer {
         switch (ext) {
             case ".glb":
             case ".gltf": {
-                const gltf = await new GLTFLoader().loadAsync(url);
+                const gltf = await this._gltfLoader().loadAsync(url);
                 return gltf.scene;
             }
             case ".obj":
@@ -198,6 +201,34 @@ export class Thumbnailer {
             default:
                 return null;
         }
+    }
+
+    /**
+     * GLTFLoader with the compressed-glTF decoders attached (Draco/KTX2/Meshopt), so
+     * compressed models get real thumbnails instead of downloading fully just to fail.
+     * Decoders are created once and shared across all thumbnail renders (worker reuse).
+     * The full app serves the vendored decoders under /static/vendor/.
+     */
+    _gltfLoader() {
+        const loader = new GLTFLoader();
+        try {
+            if (!this._draco) {
+                this._draco = new DRACOLoader();
+                this._draco.setDecoderPath("/static/vendor/draco/gltf/");
+            }
+            loader.setDRACOLoader(this._draco);
+        } catch { /* thumbnails degrade to icons */ }
+        try {
+            if (!this._ktx2) {
+                this._ensureRenderer();  // KTX2 support detection needs a renderer
+                this._ktx2 = new KTX2Loader();
+                this._ktx2.setTranscoderPath("/static/vendor/basis/");
+                this._ktx2.detectSupport(this._renderer);
+            }
+            loader.setKTX2Loader(this._ktx2);
+        } catch { /* thumbnails degrade to icons */ }
+        try { loader.setMeshoptDecoder(MeshoptDecoder); } catch { /* optional */ }
+        return loader;
     }
 
     _wrapGeometry(geo, vertexColors = false) {
