@@ -54,6 +54,9 @@ jobs:
           cp web/meshvault-viewer.js site/meshvault-viewer.js
           cp web/sample.glb site/sample.glb
           cp -r frontend/vendor site/vendor   # Draco/Basis decoders for compressed glTF
+          # Agent discoverability: llms.txt (remote-specific) + the full API reference.
+          cp web/llms.txt site/llms.txt
+          cp frontend/llms-full.txt site/llms-full.txt
           touch site/.nojekyll
 
       - name: Setup Pages

@@ -2,6 +2,14 @@
 
 A professional, local web-based tool for rapidly browsing, previewing, and managing 3D assets across your filesystem — including assets inside archives.
 
+**Three ways to use it:**
+
+| | For humans | For AI agents |
+|---|---|---|
+| **Online, zero install** | [Open the live viewer](https://www.lpalbou.info/MeshVault/) — drag-drop a model or pass `?src=<url>`; nothing is uploaded | Drive `window.mv` on the live page via browser automation — see the site's [`llms.txt`](https://www.lpalbou.info/MeshVault/llms.txt) |
+| **Local app** | `pip install meshvault` → `meshvault` → browse your filesystem at `http://localhost:8420` | Same server also serves the JSON control API docs at `/llms.txt` |
+| **MCP server** | — | `pip install "meshvault[mcp]"` → `meshvault-mcp`: 7 tools (load by path/URL, describe, mesh stats, geometric compare, screenshots) for Claude/Cursor — [docs/mcp.md](docs/mcp.md) |
+
 [![CI](https://github.com/lpalbou/meshvault/actions/workflows/ci.yml/badge.svg)](https://github.com/lpalbou/meshvault/actions)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688)](https://fastapi.tiangolo.com)

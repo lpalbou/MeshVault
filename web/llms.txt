@@ -1,0 +1,42 @@
+# MeshVault Web Viewer (static site)
+
+> This is the LIVE, server-less build of the MeshVault 3D viewer. The full control API
+> is exposed on `window.mv` — an agent with browser automation (Playwright MCP, Chrome
+> DevTools MCP, …) can drive everything on this page via JavaScript evaluation. Nothing
+> is uploaded; models are processed entirely in the browser.
+
+How to drive this page as an agent:
+- `window.mv.execute({ action, params }) → Promise<{ ok, result | error }>` — ONE entry
+  point, never throws. Discover all ~50 commands + parameter schemas at runtime with
+  `window.mv.listCommands()`.
+- Load a model: `execute({action:"load", params:{url:"https://…/model.glb"}})` — the URL
+  must allow cross-origin fetch (CORS). Formats: .obj .fbx .gltf .glb (incl. Draco /
+  KTX2 / Meshopt — decoders are bundled) .stl .ply .dae .3mf .usdz. A sample model is
+  at `./sample.glb`.
+- Understand WHAT loaded without vision: `execute({action:"describe_scene"})` (summary,
+  inventory, per-mesh ids + world placement, geometry-QA issues) and
+  `execute({action:"get_mesh_stats"})` (surface area, volume, edge stats, dihedral
+  roughness, defect locations for `focus {point}`).
+- See it: `execute({action:"screenshot", params:{width:1024, height:1024}})` → PNG data
+  URL. `find_best_view` first for the model's semantic front (world-axis "front" presets
+  are often wrong for scanned/generated models).
+- Full command reference (same API as this page): ./llms-full.txt
+
+What is NOT available on this static site (requires the installed app / MCP server):
+- Loading models by local file path, browsing a filesystem, exporting to disk.
+- `compare_models` / shape registration (needs the Python backend).
+- The `meshvault-mcp` tools. For those: `pip install "meshvault[mcp]"` +
+  `playwright install chromium`, then wire `meshvault-mcp` into your MCP client — see
+  https://github.com/lpalbou/MeshVault/blob/main/docs/mcp.md
+
+Notes for this remote context when reading ./llms-full.txt:
+- Ignore its local setup paths (`/static/…`) — on this site the viewer is already
+  running with `window.mv` ready.
+- Screenshot/turntable results are data URLs returned to YOUR evaluation call; there is
+  no server to save them.
+
+## Docs
+
+- [Full control API reference](./llms-full.txt)
+- [Project + install (humans)](https://github.com/lpalbou/MeshVault)
+- [MCP server for agents](https://github.com/lpalbou/MeshVault/blob/main/docs/mcp.md)

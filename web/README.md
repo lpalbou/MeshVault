@@ -18,22 +18,19 @@ Serve locally to test:
 cd web && python3 -m http.server 8799   # → http://localhost:8799
 ```
 
-The two files that make up the deployable site are `web/index.html` and the built
-`web/meshvault-viewer.js`. The bundle is self-contained (no source dependency), so those
-two files ARE the entire site.
+The deployed site consists of: `index.html`, the built `meshvault-viewer.js`,
+`sample.glb`, `vendor/` (Draco/KTX2 decoders for compressed glTF), and the agent docs
+`llms.txt` (remote-specific) + `llms-full.txt` (full control-API reference). The bundle
+is self-contained — no CDN, works offline.
 
-## Deploy — option A: this repo's `gh-pages` (simplest)
+## Deploy — option A: this repo's GitHub Pages (what's live)
 
-The workflow `.github/workflows/pages.yml` builds the bundle and publishes `web/` to the
-`gh-pages` branch on every push to `main` that touches the viewer/site (and via manual
-"Run workflow"). To finish setup once:
-
-1. Push these files to `main` (the workflow needs `contents: write`, already set).
-2. GitHub → **Settings → Pages → Build and deployment → Source: Deploy from a branch**,
-   Branch: **`gh-pages`** / `(root)`.
-3. Site goes live at `https://<user>.github.io/<repo>/` (e.g. `.../meshvault/`).
-
+The workflow `.github/workflows/pages.yml` builds the bundle and deploys the assembled
+site via the official Pages actions (Source: **GitHub Actions**) on every push to `main`
+that touches the viewer/site, on every published release, and via manual "Run workflow".
 Relative asset paths are used, so it works under the `/<repo>/` sub-path with no config.
+
+Live: https://www.lpalbou.info/MeshVault/
 
 ## Deploy — option B: its OWN repo
 

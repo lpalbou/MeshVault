@@ -30,8 +30,12 @@ Key facts for agents:
   with `set_environment { enabled, intensity, asBackground }` / `get_environment`.
 
 - MCP: agents can drive MeshVault natively via the bundled MCP server (`meshvault-mcp`,
-  6 tools: load_model [URL or local path], describe_scene, viewer_execute,
-  list_viewer_commands, get_state, screenshot). See /static/../docs/mcp.md.
+  7 tools: load_model [URL or local path], describe_scene, viewer_execute,
+  list_viewer_commands, get_state, compare_models [geometric shape registration],
+  screenshot). See https://github.com/lpalbou/MeshVault/blob/main/docs/mcp.md.
+- A hosted, zero-install build of this viewer (same window.mv control API, URL-loading
+  only, no backend tools) is live at https://www.lpalbou.info/MeshVault/ with its own
+  llms.txt for the remote context.
 
 ## Docs
 

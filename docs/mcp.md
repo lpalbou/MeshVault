@@ -6,9 +6,13 @@ a deliberately thin surface routed through the viewer's self-describing control 
 (one-tool-per-command surfaces measurably degrade agent performance).
 
 An agent can: load a model from a **URL or a local file path**, get a structured text
-description (no vision needed), discover and run any of the ~48 viewer commands (camera,
-render modes, lighting/IBL, transforms, cross-sections, measurement, animation), and get
-PNG screenshots back as proper MCP image content.
+description (no vision needed), discover and run any of the ~50 viewer commands (camera,
+render modes, lighting/IBL, transforms, cross-sections, measurement, animation), compare
+models geometrically, and get PNG screenshots back as proper MCP image content.
+
+> No install at all? Agents with plain browser automation can drive the hosted viewer at
+> <https://www.lpalbou.info/MeshVault/> via `window.mv` (URL-loaded models only, no
+> backend tools) — see that site's `llms.txt`. This MCP server is the full-featured path.
 
 ## Install
 
