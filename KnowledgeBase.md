@@ -186,3 +186,55 @@ closest-distance to another (registered) model's surface, via a `three-mesh-bvh`
   must read identically regardless of scene lighting, or a shadowed red patch looks like
   a lit blue one. Ramp floor at ~1% of the bbox diagonal so compression/sampling noise
   reads as "matches" (cool) and only genuine edits light up.
+
+---
+
+## Agent bridge (process-to-app push): discovery file + SSE, and the traps
+
+The MCP server and the app are separate processes; the "shared session" feature
+(backlog 043) bridges them with a session file + one POST endpoint + SSE fan-out.
+Load-bearing details:
+
+- **Discovery via a 0600 session file** (`~/.meshvault/app_session.json`, {url, token,
+  pid}) — same sensitivity as the launch banner that already prints the token; readable
+  only by the OS user who already owns the server. Removal is **pid-checked** (lifespan
+  + atexit) so an old instance's exit never deletes a newer instance's file.
+- **EventSource cannot set headers** — the SSE endpoint must live under `/api/*` and be
+  authenticated by the session COOKIE (sent automatically same-origin). Same-origin
+  policy: the cookie is HttpOnly+SameSite=Strict, but `GET /` re-issues it on every
+  shell load, so cross-site deep-link navigations still authenticate the SPA's fetches.
+- **Starlette's TestClient cannot consume an infinite StreamingResponse through
+  BaseHTTPMiddleware** — iterating the stream deadlocks the test (observed: full-suite
+  hang). Test streaming endpoints against a REAL uvicorn server in a thread
+  (`tests/test_agent_bridge.py::test_events_stream_delivers_push_real_server`); keep
+  TestClient for the non-streaming routes.
+- **Bounded per-client queues, drop on overflow** — a wedged tab must not grow server
+  memory; the SSE generator (not the publisher) owns disconnect cleanup, and 15 s
+  heartbeats guarantee a dead connection surfaces as a send error.
+- **Validate the camera payload at the boundary (422 on malformed)** — the message is
+  relayed verbatim to app tabs; a silently-partial camera apply would leave human and
+  agent looking at DIFFERENT views, which is the exact failure the feature exists to
+  remove.
+- **Server paths are canonicalized** (`/tmp` → `/private/tmp` on macOS, symlinks): a
+  deep link's caller-spelled path can differ from the browse response's canonical path
+  for the same file. `findAsset` matches exact key first, then basename within the
+  browsed directory (still exact — one directory cannot contain two entries with the
+  same basename).
+- **SSE breaks uvicorn's default graceful shutdown** — an `EventSource` connection
+  never closes on its own, and uvicorn waits for active connections indefinitely, so
+  Ctrl-C/SIGTERM hung while any app tab was open (live-verified). Fix:
+  `timeout_graceful_shutdown=3` in the uvicorn config — linger briefly, then
+  force-close stragglers. Any future long-lived endpoint inherits this protection.
+- **Publish discovery state only after the bind succeeds, and pid-probe on read**
+  (external tester finding, 0.4.0). Writing the session file before `uvicorn` bound
+  the port meant a launch that failed to bind (port taken, reaped by a supervisor)
+  left a file pointing agents at a port owned by a DIFFERENT (older) instance —
+  hours of 404 chasing. Fix pair: a watcher thread polls `uvicorn.Server.started`
+  and writes the file only then; `discover_app_session()` probes the publisher pid
+  and raises `StaleSessionError(pid)` (removing the file) when it is dead. SIGKILL
+  cannot run cleanup — only read-side probing covers it.
+- **`os.kill(pid, 0)` is a liveness probe ONLY on POSIX.** On Windows, Python
+  implements non-CTRL signals via `TerminateProcess` — a "probe" would KILL the
+  target. `_pid_alive()` therefore probes only when `os.name == "posix"` and trusts
+  the file elsewhere (worst case: the connection error surfaces the problem, as
+  before). `PermissionError` from the probe means "exists, other user" → alive.

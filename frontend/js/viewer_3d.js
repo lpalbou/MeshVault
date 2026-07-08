@@ -1214,10 +1214,14 @@ export class Viewer3D {
      * @param {number[]} position - [x,y,z]
      * @param {number[]} [target] - [x,y,z]; defaults to current target
      */
-    setCamera(position, target) {
+    setCamera(position, target, fov) {
         if (this._navMode === "fpv") this.setNavMode("orbit");
         this._camera.position.set(position[0], position[1], position[2]);
         if (target) this._controls.target.set(target[0], target[1], target[2]);
+        if (typeof fov === "number" && fov >= 1 && fov <= 179) {
+            this._camera.fov = fov;
+            this._camera.updateProjectionMatrix();
+        }
         this._controls.update();
         return true;
     }

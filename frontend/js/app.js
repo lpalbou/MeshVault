@@ -5,11 +5,12 @@
  * Handles global state and inter-component communication.
  */
 
-import { FileBrowser } from "./file_browser.js";
+import { FileBrowser, assetKey } from "./file_browser.js";
 import { Viewer3D } from "./viewer_3d.js";
 import { ExportPanel } from "./export_panel.js";
 import { Thumbnailer } from "./thumbnailer.js";
 import { ModelComparer } from "./compare.js";
+import { AgentLink } from "./agent_link.js";
 
 
 class App {
@@ -184,8 +185,35 @@ class App {
         this._initDragAndDrop();
         this._initRecentFiles();
 
-        // --- Start (resume last directory, or home) ---
-        this._fileBrowser.goLastOrHome();
+        // --- Agent link: deep links (?path=/?dir=) + live agent push (SSE) ---
+        this._agentLink = new AgentLink({
+            fileBrowser: this._fileBrowser,
+            openAsset: (asset) => this._onAssetSelected(asset),
+            applyCamera: (cam) => this._applyAgentCamera(cam),
+            getLoadedAssetKey: () =>
+                this._lastLoadedAsset ? assetKey(this._lastLoadedAsset) : null,
+            showToast: (m, t) => this._showToast(m, t),
+        });
+        this._fileBrowser.setNavigateListener((path) => this._agentLink.syncDir(path));
+        this._agentLink.connect();
+
+        // --- Start: URL deep link wins over the localStorage default ---
+        this._agentLink.boot().then((handled) => {
+            if (!handled) this._fileBrowser.goLastOrHome();
+        });
+    }
+
+    /**
+     * Apply a camera pose pushed by an agent ({position, target?, fov?} — the same
+     * shape get_camera/set_camera use), so the human sees the agent's exact view.
+     */
+    _applyAgentCamera(cam) {
+        if (!cam || !Array.isArray(cam.position)) return;
+        this._viewer.setCamera(
+            cam.position,
+            Array.isArray(cam.target) ? cam.target : undefined,
+            typeof cam.fov === "number" ? cam.fov : undefined,
+        );
     }
 
     /**
@@ -327,6 +355,9 @@ class App {
 
             // Record in recent files (dedup, most-recent-first, capped).
             this._pushRecentFile(asset);
+
+            // Keep the URL shareable: it now deep-links to this exact asset.
+            this._agentLink.syncAsset(asset);
 
             // A fresh model loads as mesh+texture — reset the render-mode button.
             if (this._resetRenderModeUI) this._resetRenderModeUI();
@@ -1559,9 +1590,7 @@ class App {
 
     _pushRecentFile(asset) {
         try {
-            const key = asset.is_in_archive
-                ? `${asset.archive_path}!${asset.inner_path}`
-                : asset.path;
+            const key = assetKey(asset);
             let recent = JSON.parse(localStorage.getItem(this._recentKey) || "[]");
             recent = recent.filter((r) => r._key !== key);
             recent.unshift({

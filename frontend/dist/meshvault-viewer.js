@@ -41812,10 +41812,14 @@ var Viewer3D = class {
    * @param {number[]} position - [x,y,z]
    * @param {number[]} [target] - [x,y,z]; defaults to current target
    */
-  setCamera(position, target) {
+  setCamera(position, target, fov2) {
     if (this._navMode === "fpv") this.setNavMode("orbit");
     this._camera.position.set(position[0], position[1], position[2]);
     if (target) this._controls.target.set(target[0], target[1], target[2]);
+    if (typeof fov2 === "number" && fov2 >= 1 && fov2 <= 179) {
+      this._camera.fov = fov2;
+      this._camera.updateProjectionMatrix();
+    }
     this._controls.update();
     return true;
   }
@@ -45780,16 +45784,17 @@ var ViewerControlAPI = class {
         handler: () => v.getState().camera
       },
       set_camera: {
-        description: "Set the camera to an explicit position and look-at target (world coords).",
+        description: "Set the camera to an explicit position and look-at target (world coords), optionally with a field of view (degrees). Mirrors get_camera, so a pose can be captured in one session and reproduced in another.",
         params: {
           position: { type: "array", required: true },
-          target: { type: "array" }
+          target: { type: "array" },
+          fov: { type: "number", min: 1, max: 179 }
         },
         requiresModel: false,
         handler: (p) => {
           if (p.position.length !== 3) throw new Error("position must be [x,y,z]");
           if (p.target && p.target.length !== 3) throw new Error("target must be [x,y,z]");
-          return v.setCamera(p.position, p.target);
+          return v.setCamera(p.position, p.target, p.fov);
         }
       },
       set_view: {

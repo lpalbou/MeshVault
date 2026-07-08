@@ -30,9 +30,15 @@ Key facts for agents:
   with `set_environment { enabled, intensity, asBackground }` / `get_environment`.
 
 - MCP: agents can drive MeshVault natively via the bundled MCP server (`meshvault-mcp`,
-  7 tools: load_model [URL or local path], describe_scene, viewer_execute,
+  8 tools: load_model [URL or local path], describe_scene, viewer_execute,
   list_viewer_commands, get_state, compare_models [geometric shape registration],
-  screenshot). See https://github.com/lpalbou/MeshVault/blob/main/docs/mcp.md.
+  screenshot [supports preset:"studio"|"neutral"|"dark" for renders comparable across
+  sessions], open_in_app [push your model + camera into the running app so a human
+  co-views live]). See https://github.com/lpalbou/MeshVault/blob/main/docs/mcp.md.
+- Deep links (local app): `/?path=/abs/model.glb` selects + loads an asset;
+  `/?dir=/abs/folder` opens a folder; `/?path=/abs/pack.zip!inner/model.obj` loads an
+  archive member. URL params win over the remembered last directory, and the URL stays
+  in sync while browsing — the address bar is always a shareable deep link.
 - A hosted, zero-install build of this viewer (same window.mv control API, URL-loading
   only, no backend tools) is live at https://www.lpalbou.info/MeshVault/ with its own
   llms.txt for the remote context.

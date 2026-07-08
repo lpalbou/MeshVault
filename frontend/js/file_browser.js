@@ -71,6 +71,22 @@ const ICONS = {
 };
 
 
+/**
+ * Composite identity for an asset. Plain files are keyed by absolute path;
+ * archive members by `archive_path!inner_path`. This is the app-wide convention
+ * (recent files, deep links `?path=`, agent push) — defined here, at the data
+ * owner, so every consumer shares the exact same key.
+ */
+export function assetKey(asset) {
+    return asset.is_in_archive
+        ? `${asset.archive_path}!${asset.inner_path}`
+        : asset.path;
+}
+
+/** Split an `archive!inner` key: [full, archive_path, inner_path] or null. */
+export const ARCHIVE_KEY_RE = /^(.*?\.(?:zip|rar|unitypackage))!(.+)$/i;
+
+
 export class FileBrowser {
     /**
      * @param {HTMLElement} container - The file list container element
@@ -123,8 +139,60 @@ export class FileBrowser {
     }
 
     /**
+     * Register a navigation listener, called with the resolved path after every
+     * successful browse(). Used by the app to keep the URL in sync (deep links).
+     */
+    setNavigateListener(cb) {
+        this._onNavigate = cb;
+    }
+
+    /**
+     * Find an asset of the CURRENT directory by path or `archive!inner` key.
+     *
+     * Exact key match first. If that fails, fall back to comparing basenames:
+     * the server canonicalizes paths (e.g. /tmp → /private/tmp on macOS,
+     * symlinks, case), so a caller-spelled path can differ from the canonical
+     * asset path even though both name the same file. Within a single browsed
+     * directory the filename identifies the asset exactly, so this fallback is
+     * still a precise match — not a heuristic.
+     */
+    findAsset(pathOrKey) {
+        const exact = this._currentAssets.find((a) => assetKey(a) === pathOrKey);
+        if (exact) return exact;
+
+        const archive = pathOrKey.match(ARCHIVE_KEY_RE);
+        const base = (p) => p.slice(p.lastIndexOf("/") + 1);
+        if (archive) {
+            const [, archivePath, innerPath] = archive;
+            return this._currentAssets.find((a) =>
+                a.is_in_archive &&
+                base(a.archive_path || "") === base(archivePath) &&
+                a.inner_path === innerPath) || null;
+        }
+        return this._currentAssets.find((a) =>
+            !a.is_in_archive && base(a.path) === base(pathOrKey)) || null;
+    }
+
+    /**
+     * Programmatically highlight an asset's row/card (what a click does, minus the
+     * load). Returns false when the asset is not rendered (e.g. filtered out).
+     */
+    highlightAsset(asset) {
+        const key = assetKey(asset);
+        for (const el of this._container.querySelectorAll("[data-key]")) {
+            if (el.dataset.key === key) {
+                this._setSelected(el);
+                el.scrollIntoView({ block: "nearest" });
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Browse to a specific directory.
      * Fetches the directory contents from the API and renders them.
+     * @returns {Promise<boolean>} true on success (errors render in the sidebar).
      */
     async browse(path) {
         try {
@@ -168,6 +236,10 @@ export class FileBrowser {
                 `${folderCount} folder${folderCount !== 1 ? "s" : ""}, ` +
                 `${assetCount} asset${assetCount !== 1 ? "s" : ""}`
             );
+
+            // Notify after a fully successful browse (URL sync for deep links).
+            if (this._onNavigate) this._onNavigate(this._currentPath);
+            return true;
         } catch (err) {
             console.error("Browse error:", err);
             this._onStatusUpdate(`Error: ${err.message}`);
@@ -177,6 +249,7 @@ export class FileBrowser {
                     <p style="font-size: 11px; margin-top: 8px;">${err.message}</p>
                 </div>
             `;
+            return false;
         }
     }
 
@@ -201,14 +274,9 @@ export class FileBrowser {
     /** Navigate to the last visited directory, or home if none saved. */
     async goLastOrHome() {
         const lastDir = localStorage.getItem("meshvault_lastDir");
-        if (lastDir) {
-            try {
-                await this.browse(lastDir);
-                return;
-            } catch {
-                // Saved dir no longer exists — fall back to home
-            }
-        }
+        // browse() reports failure via its return value (it renders the error
+        // in the sidebar instead of throwing) — fall back to home on a stale dir.
+        if (lastDir && await this.browse(lastDir)) return;
         await this.goHome();
     }
 
@@ -422,6 +490,7 @@ export class FileBrowser {
         const item = document.createElement("div");
         item.className = "file-item";
         item.dataset.type = "asset";
+        item.dataset.key = assetKey(asset);
 
         const ext = asset.extension.replace(".", "").toLowerCase();
         const iconClass = `asset-${ext}`;
@@ -485,6 +554,7 @@ export class FileBrowser {
         const card = document.createElement("div");
         card.className = "asset-card";
         card.dataset.type = "asset";
+        card.dataset.key = assetKey(asset);
 
         const ext = asset.extension.replace(".", "").toLowerCase();
         const icon = ICONS[ext] || ICONS.obj;

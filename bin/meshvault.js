@@ -50,9 +50,10 @@ try {
     }
 }
 
-// Launch the server
+// Launch the server, forwarding CLI args (--help/--version/--port are handled by
+// the Python argparse CLI, so `npx meshvault --help` prints help instead of booting).
 const env = { ...process.env, PORT: String(PORT) };
-const server = spawn(python, ["-m", "backend.app"], {
+const server = spawn(python, ["-m", "backend.app", ...process.argv.slice(2)], {
     cwd: __dirname.replace(/\/bin$/, ""),
     env,
     stdio: "inherit",

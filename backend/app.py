@@ -9,24 +9,42 @@ This is the entry point that:
 
 import os
 import sys
+import argparse
+import asyncio
+import atexit
 import subprocess
 import platform
 import mimetypes
+import threading
+import time
 import urllib.parse
 from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    StreamingResponse,
+)
 from pydantic import BaseModel
 
 from backend.file_browser import FileBrowser
 from backend.archive_inspector import ArchiveInspector
 from backend.export_manager import ExportManager
 from backend.fbx_converter import get_fbx_version, convert_fbx_to_obj
+from backend.agent_bridge import (
+    SUPPORTED_MODEL_EXTENSIONS,
+    EventBroadcaster,
+    remove_session_file,
+    sse_format,
+    write_session_file,
+)
 from backend.security import (
     SecurityConfig,
     PathGuard,
@@ -119,6 +137,10 @@ path_guard = PathGuard(
 file_browser = FileBrowser(root_path=str(security_config.allowed_roots[0]))
 export_manager = ExportManager()
 
+# Agent bridge: fan-out of agent events (e.g. "open this model") to connected app
+# tabs over SSE. Lives for the app's lifetime; publishers are /api/agent/* endpoints.
+event_broadcaster = EventBroadcaster()
+
 
 def _build_file_response(file_path: Path) -> FileResponse:
     """
@@ -145,17 +167,21 @@ async def lifespan(app: FastAPI):
     """Manage application lifecycle — clean up temp files on shutdown."""
     yield
     archive_inspector.cleanup()
+    remove_session_file()
 
 
 # --- FastAPI App ---
 
+__version__ = "0.4.0"
+
 app = FastAPI(
     title="MeshVault",
     description="Local-first 3D asset browser & viewer with archive inspection",
-    version="0.1.0",
+    version=__version__,
     lifespan=lifespan,
-    # The interactive docs and schema are unauthenticated reconnaissance surface for a
-    # local single-user tool; disable them. (Re-enable behind auth if ever needed.)
+    # The interactive docs and schema (/docs, /redoc, /openapi.json) are
+    # unauthenticated reconnaissance surface for a local single-user tool; disable
+    # them. docs/api.md is the API reference. (Re-enable behind auth if ever needed.)
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -742,12 +768,180 @@ async def get_default_path():
     return {"path": DEFAULT_ROOT}
 
 
+# --- Agent bridge (shared session between headless agents and the app UI) ---
+
+
+class AgentOpenRequest(BaseModel):
+    """Request body for pushing a model into connected app tabs.
+
+    camera: optional {position:[x,y,z], target:[x,y,z], fov?} — world coordinates,
+    matching the viewer control API's get_camera/set_camera shapes.
+    """
+    path: str
+    camera: Optional[dict] = None
+    source: str = "agent"
+
+
+def _sanitize_camera(camera: Optional[dict]) -> Optional[dict]:
+    """Validate the camera payload at the trust boundary.
+
+    The message is relayed verbatim to app tabs, so enforce the contract here:
+    position/target are [x,y,z] finite numbers, fov a sane degree value. Anything
+    malformed is a 422 — a silent partial apply would leave human and agent looking
+    at different views, which is the exact failure this feature exists to remove.
+    """
+    if camera is None:
+        return None
+    if not isinstance(camera, dict):
+        raise HTTPException(status_code=422, detail="camera must be an object")
+
+    def vec3(name, required=False):
+        value = camera.get(name)
+        if value is None:
+            if required:
+                raise HTTPException(status_code=422, detail=f"camera.{name} is required")
+            return None
+        try:
+            out = [float(v) for v in value]
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail=f"camera.{name} must be [x,y,z]")
+        if len(out) != 3 or not all(v == v and abs(v) != float("inf") for v in out):
+            raise HTTPException(status_code=422, detail=f"camera.{name} must be 3 finite numbers")
+        return out
+
+    clean = {"position": vec3("position", required=True)}
+    target = vec3("target")
+    if target is not None:
+        clean["target"] = target
+    fov = camera.get("fov")
+    if fov is not None:
+        try:
+            fov = float(fov)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="camera.fov must be a number")
+        if not (1 <= fov <= 179):
+            raise HTTPException(status_code=422, detail="camera.fov must be 1..179 degrees")
+        clean["fov"] = fov
+    return clean
+
+
+@app.post("/api/agent/open")
+async def agent_open(body: AgentOpenRequest, request: Request):
+    """
+    Push a model (and optionally a camera pose) into every connected app tab.
+
+    Used by the MCP `open_in_app` tool so a human co-reviewing in the browser sees
+    exactly what the agent sees. The path is confined by the PathGuard like every
+    other filesystem input; delivery is best-effort fan-out over /api/events.
+    """
+    file_path = _guarded_path(body.path, require_file=True)
+    if file_path.suffix.lower() not in SUPPORTED_MODEL_EXTENSIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported model format '{file_path.suffix}'. "
+                   f"Supported: {' '.join(sorted(SUPPORTED_MODEL_EXTENSIONS))}",
+        )
+
+    message = {
+        "type": "open_asset",
+        "path": str(file_path),
+        "camera": _sanitize_camera(body.camera),
+        "source": (body.source or "agent")[:64],
+    }
+    delivered = event_broadcaster.publish(message)
+
+    # The deep link reproduces the push for a tab that wasn't connected yet —
+    # the tool can hand it to the human when clients == 0.
+    deep_link = f"{request.base_url}?path={urllib.parse.quote(str(file_path))}"
+    return {"ok": True, "clients": delivered, "deep_link": deep_link}
+
+
+@app.get("/api/events")
+async def agent_events():
+    """
+    Server-Sent Events stream of agent-bridge messages for app tabs.
+
+    Authenticated like every /api/* route — EventSource cannot set headers, but the
+    browser sends the same-origin session cookie automatically. Heartbeat comments
+    every 15 s keep the connection alive and let dead clients surface as send
+    errors so their queues are cleaned up.
+    """
+    queue = event_broadcaster.subscribe()
+
+    async def stream():
+        try:
+            # Immediately confirm the subscription (also flushes response headers).
+            yield sse_format({"type": "connected"})
+            while True:
+                try:
+                    message = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield sse_format(message)
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+        finally:
+            event_broadcaster.unsubscribe(queue)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _parse_args(argv=None):
+    """CLI for the `meshvault` entry point (`--help` must not start the server)."""
+    parser = argparse.ArgumentParser(
+        prog="meshvault",
+        description="MeshVault — local web-based 3D asset browser & viewer. "
+                    "Starts the server and prints the URL + session token.",
+        epilog=(
+            "environment variables:\n"
+            "  MESHVAULT_ROOT           restrict file access to these root dir(s) "
+            "(os.pathsep-separated; default: whole filesystem, browsing opens at home)\n"
+            "  MESHVAULT_HOST           bind host (default: 127.0.0.1; non-loopback is "
+            "reachable from other machines — the token then guards access)\n"
+            "  MESHVAULT_TOKEN          fixed session token (default: random per launch)\n"
+            "  MESHVAULT_ALLOWED_HOSTS  extra allowed Host header values (comma-separated)\n"
+            "  MESHVAULT_NO_AUTH=1      disable auth (testing only)\n"
+            "  PORT                     listen port (default: 8420; --port wins)\n"
+            "\ndocs: https://github.com/lpalbou/meshvault/tree/main/docs"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--version", action="version", version=f"meshvault {__version__}")
+    parser.add_argument(
+        "--port", type=int, default=int(os.environ.get("PORT", 8420)),
+        help="listen port (default: $PORT or 8420)")
+    return parser.parse_args(argv)
+
+
+def _publish_session_when_started(server: "uvicorn.Server", url: str, token: str) -> None:
+    """Write the discovery session file only once the server has actually bound.
+
+    Writing it earlier (pre-bind) is how a failed launch — port already taken,
+    killed by a supervisor — leaves behind a file that points agents at a port
+    where some OTHER (older) instance answers. Poll `server.started`, which
+    uvicorn sets after the listener is up; if startup never completes, nothing
+    is published and the previous instance's file stays authoritative.
+    """
+    for _ in range(600):  # up to ~30 s; startup is normally < 1 s
+        if server.started:
+            write_session_file(url, token)
+            atexit.register(remove_session_file)
+            print("  🤝 Agent bridge: session published at ~/.meshvault/app_session.json")
+            return
+        if getattr(server, "should_exit", False):
+            return
+        time.sleep(0.05)
+
+
 def main():
     """Entry point for running the server."""
-    port = int(os.environ.get("PORT", 8420))
+    args = _parse_args()
+    port = args.port
     host = security_config.bind_host
 
-    print(f"\n  🎨 MeshVault")
+    print(f"\n  🎨 MeshVault {__version__}")
     if security_config.confined:
         roots = ", ".join(str(r) for r in security_config.allowed_roots)
         print(f"  📁 File access confined to: {roots}")
@@ -766,12 +960,33 @@ def main():
         print(f"     (opening the URL above on this machine authenticates automatically)")
     print()
 
-    uvicorn.run(
-        "backend.app:app",
+    server = uvicorn.Server(uvicorn.Config(
+        app,
         host=host,
         port=port,
-        reload=False,
+        # Long-lived SSE connections (/api/events) never close on their own, and
+        # uvicorn's default graceful shutdown waits for active connections FOREVER —
+        # Ctrl-C would hang while an app tab is open. Bound it: linger briefly, then
+        # force-close stragglers (verified live: TERM with an open tab now exits).
+        timeout_graceful_shutdown=3,
+    ))
+
+    # Publish this instance for local agents (MCP `open_in_app`, scripts): a 0600
+    # session file with URL + token — written only AFTER a successful bind (see
+    # _publish_session_when_started). Removed on clean shutdown (lifespan) and at
+    # interpreter exit; both are pid-checked so a newer instance's file survives
+    # an older instance's exit, and discovery pid-probes against unclean deaths.
+    app_url = (
+        f"http://localhost:{port}" if security_config.is_loopback_bind
+        else f"http://{host}:{port}"
     )
+    token = security_config.token if security_config.require_auth else ""
+    threading.Thread(
+        target=_publish_session_when_started, args=(server, app_url, token),
+        daemon=True,
+    ).start()
+
+    server.run()
 
 
 if __name__ == "__main__":

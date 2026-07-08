@@ -8,7 +8,7 @@ A professional, local web-based tool for rapidly browsing, previewing, and manag
 |---|---|---|
 | **Online, zero install** | [Open the live viewer](https://www.lpalbou.info/MeshVault/) — drag-drop a model or pass `?src=<url>`; nothing is uploaded | Drive `window.mv` on the live page via browser automation — see the site's [`llms.txt`](https://www.lpalbou.info/MeshVault/llms.txt) |
 | **Local app** | `pip install meshvault` → `meshvault` → browse your filesystem at `http://localhost:8420` | Same server also serves the JSON control API docs at `/llms.txt` |
-| **MCP server** | — | `pip install "meshvault[mcp]"` → `meshvault-mcp`: 7 tools (load by path/URL, describe, mesh stats, geometric compare, screenshots) for Claude/Cursor — [docs/mcp.md](docs/mcp.md) |
+| **MCP server** | — | `pip install "meshvault[mcp]"` → `meshvault-mcp`: 8 tools (load by path/URL, describe, mesh stats, geometric compare, reproducible screenshots, push-to-app co-review) for Claude/Cursor — [docs/mcp.md](docs/mcp.md) |
 
 [![CI](https://github.com/lpalbou/meshvault/actions/workflows/ci.yml/badge.svg)](https://github.com/lpalbou/meshvault/actions)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
@@ -32,7 +32,7 @@ Older FBX files (version < 7000) are auto-converted to OBJ by a built-in zero-de
 
 | Category | Features |
 |----------|----------|
-| **Browsing** | Sidebar tree, list/grid view with rendered thumbnails, sort, filter, remember last directory |
+| **Browsing** | Sidebar tree, list/grid view with rendered thumbnails, sort, filter, remember last directory, shareable deep links (`?path=`/`?dir=`) |
 | **Library** | Cross-folder search, tags & collections, recent files (all backed by a local index) |
 | **File Management** | Right-click: rename (inline), duplicate, delete, show in file manager |
 | **3D Viewer** | PBR rendering, SSAO, soft shadows, ACES tone mapping, orbit + FPV drone navigation |
@@ -77,9 +77,12 @@ lightest to most integrated:
    reference served at [`/llms.txt`](frontend/llms.txt) and
    [`/llms-full.txt`](frontend/llms-full.txt).
 2. **MCP server** — `meshvault-mcp` lets Claude Desktop / Claude Code / Cursor drive a
-   headless viewer natively through 6 tools: load a model by **URL or local file path**,
+   headless viewer natively through 8 tools: load a model by **URL or local file path**,
    describe it, run any viewer command, and get PNG screenshots back as image content
-   (`best_view: true` gives a one-call hero shot). Setup: [docs/mcp.md](docs/mcp.md).
+   (`best_view: true` gives a one-call hero shot; `preset: "studio"` pins lighting so
+   renders are comparable across sessions). With the app running, `open_in_app` pushes
+   the agent's model + camera into the human's browser tab for live co-review.
+   Setup: [docs/mcp.md](docs/mcp.md).
 3. **Embeddable standalone viewer** — `meshvault-viewer.js` is a server-less ES-module
    bundle (Three.js included, offline, compressed-glTF decoders bundled) exposing the
    same control API for your own pages or agent harnesses.

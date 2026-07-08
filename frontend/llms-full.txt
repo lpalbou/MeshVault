@@ -25,11 +25,15 @@ instance.
 
 MCP (Model Context Protocol): if you are an MCP-connected agent, you don't need a
 browser at all — the `meshvault-mcp` server hosts this same viewer headlessly and
-exposes 6 tools: `load_model` (http(s) URL or absolute local file path; loads AND
+exposes 8 tools: `load_model` (http(s) URL or absolute local file path; loads AND
 returns a scene description in one call), `describe_scene`, `viewer_execute`
 ({action, params} passthrough to every command in this document),
-`list_viewer_commands`, `get_state`, and `screenshot` (returns real MCP image content;
-`best_view:true` for a one-call hero shot). Install: `pip install "meshvault[mcp]"`,
+`list_viewer_commands`, `get_state`, `compare_models` (geometric 1-vs-N shape
+registration), `screenshot` (returns real MCP image content; `best_view:true` for a
+one-call hero shot; `preset:"studio"|"neutral"|"dark"` pins lighting/background so
+renders are comparable across sessions), and `open_in_app` (push your current model +
+camera into the human's running `meshvault` app for live co-review; the app also
+honors `?path=`/`?dir=` deep links). Install: `pip install "meshvault[mcp]"`,
 `playwright install chromium`, then wire `meshvault-mcp` into your client config.
 Full setup + behavior notes: docs/mcp.md.
 
@@ -201,7 +205,7 @@ const shot = await mv.execute({ action: "screenshot", params: { width: 1024, hei
 
 - `set_view { preset: front|back|left|right|top|bottom|iso, fill?:0.1..1 }` — world-axis preset. `fill` = framing tightness (higher = tighter).
 - `orbit { azimuth:deg, elevation?:deg=15, fill? }` — spherical angle around the model (azimuth 0 = +Z).
-- `set_camera { position:[x,y,z], target?:[x,y,z] }` — explicit camera placement.
+- `set_camera { position:[x,y,z], target?:[x,y,z], fov?:1..179 }` — explicit camera placement; mirrors get_camera so a pose captured in one session reproduces exactly in another.
 - `frame { fill?, keep_direction?=true }` — fit the model; keeps the current view direction by default.
 - `reset_camera` — restore the initial framed view (orbit mode).
 - `set_nav_mode { mode: orbit|fpv }`.

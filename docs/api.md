@@ -1,6 +1,6 @@
 # API Reference
 
-MeshVault exposes a REST API served by FastAPI. When the server is running, interactive Swagger docs are also available at `http://localhost:8420/docs`.
+MeshVault exposes a REST API served by FastAPI.
 
 **Base URL**: `http://localhost:8420`
 
@@ -16,9 +16,10 @@ path outside them returns `403`). All `/api/*` requests require a session token:
 
 - Opening the app in a browser on the same machine authenticates automatically (an
   `HttpOnly`, `SameSite=Strict` cookie is set when the page loads).
-- Programmatic clients pass the token via `Authorization: Bearer <token>`,
-  `X-MeshVault-Token: <token>`, or a `?token=<token>` query parameter. The token is
-  printed in the launch banner.
+- Programmatic clients pass the token via `Authorization: Bearer <token>` or
+  `X-MeshVault-Token: <token>`. The token is printed in the launch banner and published
+  for local agents in `~/.meshvault/app_session.json`. A `?token=` query parameter is
+  deliberately **not** accepted (query strings leak into logs, history, and `Referer`).
 - Requests with a disallowed `Host` header are rejected (DNS-rebinding protection).
 
 Common security responses: `401` (missing/invalid token), `400` (disallowed Host, or an
@@ -31,11 +32,11 @@ default = whole filesystem), `MESHVAULT_HOST` (bind host — non-loopback prints
 
 ---
 
-## Endpoints Overview (16 routes)
+## Endpoints Overview (18 routes)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/` | Serve the main HTML page (issues the session cookie) |
+| `GET` | `/` | Serve the main HTML page (issues the session cookie; honors `?path=`/`?dir=` deep links) |
 | `POST` | `/api/compare` | Register two surface point sets and return a shape-comparison report (pure math; no filesystem) |
 | `GET` | `/api/browse` | Browse a directory for 3D assets and folders |
 | `GET` | `/api/asset/file` | Serve a 3D file (auto-converts old `.fbx`→`.obj`) |
@@ -51,6 +52,8 @@ default = whole filesystem), `MESHVAULT_HOST` (bind host — non-loopback prints
 | `POST` | `/api/duplicate` | Duplicate a file |
 | `POST` | `/api/delete` | Delete a file or folder |
 | `GET` | `/api/default_path` | Get the default browse path (allowed root) |
+| `POST` | `/api/agent/open` | Push a model (+ optional camera pose) into every connected app tab |
+| `GET` | `/api/events` | SSE stream of agent-bridge events for app tabs |
 
 ---
 
@@ -382,9 +385,73 @@ Returns the default browse path (the primary allowed root, typically the user's 
 
 ---
 
+## `POST /api/agent/open`
+
+Push a model — and optionally a camera pose — into every connected app tab (the agent
+bridge behind the MCP `open_in_app` tool). The path is confined by the PathGuard like
+every other filesystem input; malformed camera payloads are rejected with `422` so a
+human co-reviewer can never end up silently looking at a different view than the agent.
+
+At launch, `meshvault` publishes its URL + token to `~/.meshvault/app_session.json`
+(mode 0600, removed on shutdown), so local agent processes can discover a running app
+without configuration.
+
+### Request Body (JSON)
+
+```json
+{
+    "path": "/abs/path/to/model.glb",
+    "camera": { "position": [3.2, 2.1, -2.0], "target": [0, 0, 0], "fov": 45 },
+    "source": "mcp"
+}
+```
+
+`camera` and `source` are optional. `camera.position` is required within `camera`;
+`fov` is degrees (1–179).
+
+### Response `200 OK`
+
+```json
+{
+    "ok": true,
+    "clients": 1,
+    "deep_link": "http://localhost:8420/?path=/abs/path/to/model.glb"
+}
+```
+
+`clients` is the number of tabs that received the push; `deep_link` reproduces the
+open for a tab that was not connected. Errors: `401/403/404` (auth/confinement/missing
+file), `422` (non-model extension, malformed camera).
+
+---
+
+## `GET /api/events`
+
+Server-Sent Events stream (`text/event-stream`) of agent-bridge messages. The app
+subscribes on load via `EventSource` (the same-origin session cookie authenticates it).
+Frames are JSON: a `{"type": "connected"}` frame on subscribe, then one
+`{"type": "open_asset", "path": …, "camera": …, "source": …}` per push; heartbeat
+comments flow every 15 s.
+
+---
+
+## Deep links (`GET /?path=` / `GET /?dir=`)
+
+The app shell honors URL parameters over the remembered last directory:
+
+- `/?dir=/abs/folder` — open the file browser at that folder.
+- `/?path=/abs/folder/model.glb` — open the folder, highlight the asset, load it.
+- `/?path=/abs/pack.zip!inner/model.obj` — same for a model inside an archive
+  (`archive!inner` — the app's composite asset key).
+
+The URL stays in sync while browsing (`replaceState`), so the address bar is always a
+shareable deep link to the current view. Invalid deep links toast an error and fall
+back to the normal start (last directory or home).
+
+---
+
 ## Interactive Docs
 
-When the server is running, FastAPI automatically generates interactive API documentation:
-
-- **Swagger UI**: http://localhost:8420/docs
-- **ReDoc**: http://localhost:8420/redoc
+The FastAPI auto-docs (`/docs`, `/redoc`, `/openapi.json`) are **disabled** on purpose:
+for a local single-user tool the schema is free reconnaissance surface (see
+`backend/app.py`). This document is the API reference.

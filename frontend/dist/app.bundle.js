@@ -61,6 +61,10 @@ var ICONS = {
         <rect x="10" y="9" width="4" height="4" rx="1"/>
     </svg>`
 };
+function assetKey(asset) {
+  return asset.is_in_archive ? `${asset.archive_path}!${asset.inner_path}` : asset.path;
+}
+var ARCHIVE_KEY_RE = /^(.*?\.(?:zip|rar|unitypackage))!(.+)$/i;
 var FileBrowser = class {
   /**
    * @param {HTMLElement} container - The file list container element
@@ -99,8 +103,52 @@ var FileBrowser = class {
     return this._currentPath;
   }
   /**
+   * Register a navigation listener, called with the resolved path after every
+   * successful browse(). Used by the app to keep the URL in sync (deep links).
+   */
+  setNavigateListener(cb) {
+    this._onNavigate = cb;
+  }
+  /**
+   * Find an asset of the CURRENT directory by path or `archive!inner` key.
+   *
+   * Exact key match first. If that fails, fall back to comparing basenames:
+   * the server canonicalizes paths (e.g. /tmp → /private/tmp on macOS,
+   * symlinks, case), so a caller-spelled path can differ from the canonical
+   * asset path even though both name the same file. Within a single browsed
+   * directory the filename identifies the asset exactly, so this fallback is
+   * still a precise match — not a heuristic.
+   */
+  findAsset(pathOrKey) {
+    const exact = this._currentAssets.find((a) => assetKey(a) === pathOrKey);
+    if (exact) return exact;
+    const archive = pathOrKey.match(ARCHIVE_KEY_RE);
+    const base = (p) => p.slice(p.lastIndexOf("/") + 1);
+    if (archive) {
+      const [, archivePath, innerPath] = archive;
+      return this._currentAssets.find((a) => a.is_in_archive && base(a.archive_path || "") === base(archivePath) && a.inner_path === innerPath) || null;
+    }
+    return this._currentAssets.find((a) => !a.is_in_archive && base(a.path) === base(pathOrKey)) || null;
+  }
+  /**
+   * Programmatically highlight an asset's row/card (what a click does, minus the
+   * load). Returns false when the asset is not rendered (e.g. filtered out).
+   */
+  highlightAsset(asset) {
+    const key = assetKey(asset);
+    for (const el of this._container.querySelectorAll("[data-key]")) {
+      if (el.dataset.key === key) {
+        this._setSelected(el);
+        el.scrollIntoView({ block: "nearest" });
+        return true;
+      }
+    }
+    return false;
+  }
+  /**
    * Browse to a specific directory.
    * Fetches the directory contents from the API and renders them.
+   * @returns {Promise<boolean>} true on success (errors render in the sidebar).
    */
   async browse(path) {
     try {
@@ -127,6 +175,8 @@ var FileBrowser = class {
       this._onStatusUpdate(
         `${folderCount} folder${folderCount !== 1 ? "s" : ""}, ${assetCount} asset${assetCount !== 1 ? "s" : ""}`
       );
+      if (this._onNavigate) this._onNavigate(this._currentPath);
+      return true;
     } catch (err2) {
       console.error("Browse error:", err2);
       this._onStatusUpdate(`Error: ${err2.message}`);
@@ -136,6 +186,7 @@ var FileBrowser = class {
                     <p style="font-size: 11px; margin-top: 8px;">${err2.message}</p>
                 </div>
             `;
+      return false;
     }
   }
   /** Navigate to the parent directory */
@@ -157,13 +208,7 @@ var FileBrowser = class {
   /** Navigate to the last visited directory, or home if none saved. */
   async goLastOrHome() {
     const lastDir = localStorage.getItem("meshvault_lastDir");
-    if (lastDir) {
-      try {
-        await this.browse(lastDir);
-        return;
-      } catch {
-      }
-    }
+    if (lastDir && await this.browse(lastDir)) return;
     await this.goHome();
   }
   /** Set the sort mode and re-render. */
@@ -331,6 +376,7 @@ var FileBrowser = class {
     const item = document.createElement("div");
     item.className = "file-item";
     item.dataset.type = "asset";
+    item.dataset.key = assetKey(asset);
     const ext = asset.extension.replace(".", "").toLowerCase();
     const iconClass = `asset-${ext}`;
     const icon = ICONS[ext] || ICONS.obj;
@@ -374,6 +420,7 @@ var FileBrowser = class {
     const card = document.createElement("div");
     card.className = "asset-card";
     card.dataset.type = "asset";
+    card.dataset.key = assetKey(asset);
     const ext = asset.extension.replace(".", "").toLowerCase();
     const icon = ICONS[ext] || ICONS.obj;
     const badgeClass = asset.is_in_archive ? "badge-archive" : `badge-${ext}`;
@@ -42608,10 +42655,14 @@ var Viewer3D = class {
    * @param {number[]} position - [x,y,z]
    * @param {number[]} [target] - [x,y,z]; defaults to current target
    */
-  setCamera(position, target) {
+  setCamera(position, target, fov2) {
     if (this._navMode === "fpv") this.setNavMode("orbit");
     this._camera.position.set(position[0], position[1], position[2]);
     if (target) this._controls.target.set(target[0], target[1], target[2]);
+    if (typeof fov2 === "number" && fov2 >= 1 && fov2 <= 179) {
+      this._camera.fov = fov2;
+      this._camera.updateProjectionMatrix();
+    }
     this._controls.update();
     return true;
   }
@@ -49860,6 +49911,145 @@ function fmt(n2) {
   return (n2 ?? 0).toLocaleString();
 }
 
+// frontend/js/agent_link.js
+var MODEL_EXT_RE = /\.(obj|fbx|gltf|glb|stl|ply|dae|3mf|usdz)$/i;
+var AgentLink = class {
+  /**
+   * @param {object} deps
+   * @param {import("./file_browser.js").FileBrowser} deps.fileBrowser
+   * @param {(asset:object)=>Promise<void>} deps.openAsset - App's asset-load flow
+   * @param {(camera:object)=>void} deps.applyCamera - apply {position,target,fov}
+   * @param {()=>string|null} deps.getLoadedAssetKey - key of the loaded asset
+   * @param {(msg:string, type?:string)=>void} deps.showToast
+   */
+  constructor(deps) {
+    this._fileBrowser = deps.fileBrowser;
+    this._openAsset = deps.openAsset;
+    this._applyCamera = deps.applyCamera;
+    this._getLoadedAssetKey = deps.getLoadedAssetKey;
+    this._toast = deps.showToast;
+    this._eventSource = null;
+  }
+  // ==========================================================
+  // Deep links (?path= / ?dir=)
+  // ==========================================================
+  /**
+   * Handle the URL parameters once at boot. URL wins over the localStorage
+   * default (the whole point of a deep link); on any failure we fall back by
+   * returning false so the caller can run the normal goLastOrHome() start.
+   *
+   * @returns {Promise<boolean>} true if the URL fully determined the start view.
+   */
+  async boot() {
+    const params = new URLSearchParams(window.location.search);
+    const path = params.get("path");
+    const dir = params.get("dir");
+    try {
+      if (path) {
+        await this.openPath(path, null);
+        return true;
+      }
+      if (dir) {
+        if (await this._fileBrowser.browse(dir)) return true;
+        this._toast(`Deep link failed: cannot open ${dir}`, "error");
+      }
+    } catch (err2) {
+      console.error("Deep link failed:", err2);
+      this._toast(`Deep link failed: ${err2.message}`, "error");
+    }
+    return false;
+  }
+  /**
+   * Open an asset by path (or `archive!inner` key): browse its parent directory
+   * (so the sidebar shows the context and the asset entry carries its
+   * related_files), select it, load it, then optionally apply a camera pose.
+   */
+  async openPath(pathOrKey, camera = null) {
+    const archive = pathOrKey.match(ARCHIVE_KEY_RE);
+    if (!archive && !MODEL_EXT_RE.test(pathOrKey)) {
+      if (!await this._fileBrowser.browse(pathOrKey)) {
+        throw new Error(`Cannot open: ${pathOrKey}`);
+      }
+      return;
+    }
+    const containerDir = this._dirname(archive ? archive[1] : pathOrKey);
+    if (!containerDir) throw new Error(`Not an absolute path: ${pathOrKey}`);
+    if (!await this._fileBrowser.browse(containerDir)) {
+      throw new Error(`Cannot open folder: ${containerDir}`);
+    }
+    const asset = this._fileBrowser.findAsset(pathOrKey);
+    if (!asset) throw new Error(`Asset not found: ${pathOrKey}`);
+    this._fileBrowser.highlightAsset(asset);
+    await this._openAsset(asset);
+    if (camera) this._applyCamera(camera);
+  }
+  // ==========================================================
+  // URL sync (keep the address bar shareable as the user navigates)
+  // ==========================================================
+  /** Reflect a loaded asset in the URL (replaceState — no history spam). */
+  syncAsset(asset) {
+    this._replaceQuery(`?path=${encodeURIComponent(assetKey(asset))}`);
+  }
+  /**
+   * Reflect the browsed directory in the URL. Loading an asset browses its parent
+   * first and then syncs `?path=` on success, so "last writer wins" naturally
+   * leaves the most specific state in the address bar.
+   */
+  syncDir(dirPath) {
+    this._replaceQuery(`?dir=${encodeURIComponent(dirPath)}`);
+  }
+  _replaceQuery(query) {
+    try {
+      window.history.replaceState(null, "", window.location.pathname + query);
+    } catch {
+    }
+  }
+  // ==========================================================
+  // Live agent push (SSE)
+  // ==========================================================
+  /** Subscribe to agent events. EventSource reconnects automatically on errors. */
+  connect() {
+    if (this._eventSource) return;
+    try {
+      this._eventSource = new EventSource("/api/events");
+    } catch (err2) {
+      console.warn("Agent events unavailable:", err2);
+      return;
+    }
+    this._eventSource.onmessage = (e) => {
+      let msg;
+      try {
+        msg = JSON.parse(e.data);
+      } catch {
+        return;
+      }
+      if (msg.type === "open_asset") this._handleOpen(msg);
+    };
+  }
+  async _handleOpen(msg) {
+    const name = msg.path.split("/").pop();
+    if (this._getLoadedAssetKey() === msg.path) {
+      if (msg.camera) {
+        this._applyCamera(msg.camera);
+        this._toast(`Agent (${msg.source}) moved the view on ${name}`, "info");
+      }
+      return;
+    }
+    this._toast(`Agent (${msg.source}) is sharing: ${name}`, "info");
+    try {
+      await this.openPath(msg.path, msg.camera);
+    } catch (err2) {
+      console.error("Agent open failed:", err2);
+      this._toast(`Agent open failed: ${err2.message}`, "error");
+    }
+  }
+  /** POSIX dirname ("" for relative/rootless input — callers treat that as invalid). */
+  _dirname(p) {
+    const i = p.lastIndexOf("/");
+    return i > 0 ? p.slice(0, i) : i === 0 ? "/" : "";
+  }
+};
+
 // frontend/js/app.js
 var App = class {
   constructor() {
@@ -49992,7 +50182,30 @@ var App = class {
     this._initMeasurement();
     this._initDragAndDrop();
     this._initRecentFiles();
-    this._fileBrowser.goLastOrHome();
+    this._agentLink = new AgentLink({
+      fileBrowser: this._fileBrowser,
+      openAsset: (asset) => this._onAssetSelected(asset),
+      applyCamera: (cam) => this._applyAgentCamera(cam),
+      getLoadedAssetKey: () => this._lastLoadedAsset ? assetKey(this._lastLoadedAsset) : null,
+      showToast: (m, t2) => this._showToast(m, t2)
+    });
+    this._fileBrowser.setNavigateListener((path) => this._agentLink.syncDir(path));
+    this._agentLink.connect();
+    this._agentLink.boot().then((handled) => {
+      if (!handled) this._fileBrowser.goLastOrHome();
+    });
+  }
+  /**
+   * Apply a camera pose pushed by an agent ({position, target?, fov?} — the same
+   * shape get_camera/set_camera use), so the human sees the agent's exact view.
+   */
+  _applyAgentCamera(cam) {
+    if (!cam || !Array.isArray(cam.position)) return;
+    this._viewer.setCamera(
+      cam.position,
+      Array.isArray(cam.target) ? cam.target : void 0,
+      typeof cam.fov === "number" ? cam.fov : void 0
+    );
   }
   /**
    * Export requested from the file browser context menu.
@@ -50093,6 +50306,7 @@ var App = class {
       this._elements.viewerInfo.style.display = "flex";
       this._resetScaleControl();
       this._pushRecentFile(asset);
+      this._agentLink.syncAsset(asset);
       if (this._resetRenderModeUI) this._resetRenderModeUI();
       this._updateStatus(`Loaded: ${asset.name}${asset.extension}`);
     } catch (err2) {
@@ -51113,7 +51327,7 @@ var App = class {
   }
   _pushRecentFile(asset) {
     try {
-      const key = asset.is_in_archive ? `${asset.archive_path}!${asset.inner_path}` : asset.path;
+      const key = assetKey(asset);
       let recent = JSON.parse(localStorage.getItem(this._recentKey) || "[]");
       recent = recent.filter((r) => r._key !== key);
       recent.unshift({

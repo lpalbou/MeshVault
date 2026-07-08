@@ -21,10 +21,17 @@ gate, and a `PathGuard` that confines every filesystem access to the allowed roo
 
 ---
 
-## Backend (15 API endpoints)
+## Backend (17 API endpoints)
 
 ### `app.py` — Server
-Browse, serve, prepare, export (original + modified + GLB), reveal, rename, duplicate, delete, scan textures. Auto-converts old `.fbx` (version < 7000) → `.obj`. Every filesystem endpoint routes through `security.py`'s `PathGuard`.
+Browse, serve, prepare, export (original + modified + GLB), reveal, rename, duplicate, delete, scan textures, agent bridge (`POST /api/agent/open` + `GET /api/events`). Auto-converts old `.fbx` (version < 7000) → `.obj`. Every filesystem endpoint routes through `security.py`'s `PathGuard`.
+
+### `agent_bridge.py` — Shared session with headless agents
+Both halves of the agent↔app bridge (backlog 043): the app side (session file
+`~/.meshvault/app_session.json` written at launch; `EventBroadcaster` fanning
+`open_asset` messages to app tabs over SSE with bounded queues) and the agent side
+(`discover_app_session()` + `push_open_to_app()`, stdlib-only, used by the MCP
+`open_in_app` tool and any local script).
 
 ### `mesh_compare.py` — Shape registration
 Registers two surface point sets (PCA-initialized trimmed ICP + Kabsch), returns
@@ -46,21 +53,29 @@ ZIP (built-in), RAR (multi-tool fallback), `.unitypackage` (tar.gz with GUID str
 Pure Python FBX binary parser (v5000–6100) → OBJ converter. Zero dependencies.
 
 ### `mcp_server.py` — MCP adapter (optional)
-`meshvault-mcp` exposes the viewer to MCP clients (Claude, Cursor) as 6 tools routed
+`meshvault-mcp` exposes the viewer to MCP clients (Claude, Cursor) as 8 tools routed
 through the control API: `load_model` (URL or local path), `describe_scene`,
-`viewer_execute`, `list_viewer_commands`, `get_state`, `screenshot` (MCP image content).
-Runs the standalone viewer in headless Chromium behind a loopback, path-confined file
-server. Optional deps: `pip install "meshvault[mcp]"`. See [MCP Server](mcp.md).
+`viewer_execute`, `list_viewer_commands`, `get_state`, `compare_models`, `screenshot`
+(MCP image content; render presets for cross-session comparability), `open_in_app`
+(push model + camera into the running app). Runs the standalone viewer in headless
+Chromium behind a loopback, path-confined file server. Optional deps:
+`pip install "meshvault[mcp]"`. See [MCP Server](mcp.md).
 
 ---
 
 ## Frontend
 
 ### `app.js` — Orchestrator
-Wires everything: file browser, viewer, export panel. Toolbar toggles (screenshot, nav, grid, axes, wireframe, normals, textures, materials, lights). Model transforms (reload, reset, center, ground, orient, rotate, simplify, normals). Save As modal, texture folder picker, sort, filter, context menu.
+Wires everything: file browser, viewer, export panel, agent link. Toolbar toggles (screenshot, nav, grid, axes, wireframe, normals, textures, materials, lights). Model transforms (reload, reset, center, ground, orient, rotate, simplify, normals). Save As modal, texture folder picker, sort, filter, context menu.
+
+### `agent_link.js`
+Deep links + live agent push (backlog 043): honors `?path=`/`?dir=` URL params over the
+localStorage default (archive members via the `archive!inner` composite key), keeps the
+URL in sync while browsing (`replaceState`), and subscribes to `/api/events` (SSE) so
+`open_asset` pushes from headless agents load the same file with the agent's camera.
 
 ### `file_browser.js`
-List + grid view, sort (name/size/type), search filter, inline rename, right-click context menu (rename/duplicate/delete/reveal). Color-coded badges. Remember last directory.
+List + grid view, sort (name/size/type), search filter, inline rename, right-click context menu (rename/duplicate/delete/reveal). Color-coded badges. Remember last directory. Programmatic selection (`findAsset`/`highlightAsset`) and the app-wide `assetKey()` convention.
 
 ### `viewer_3d.js`
 - **Rendering**: PBR, 5-light + IBL (procedural environment via PMREM), SSAO, ACES, shadows

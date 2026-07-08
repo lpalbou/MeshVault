@@ -2,11 +2,13 @@
 MeshVault MCP server — a thin Model Context Protocol adapter over the viewer control API
 (backlog 030).
 
-Design: ~6 tools, NOT one-tool-per-command (wide tool surfaces measurably degrade agent
+Design: ~8 tools, NOT one-tool-per-command (wide tool surfaces measurably degrade agent
 performance). Everything routes through the existing self-describing `execute()` registry
 of the standalone viewer, which runs in a headless Chromium page hosted by a tiny
 loopback HTTP server. The page is the single source of truth; this module only marshals
-JSON in/out and images back to the MCP client.
+JSON in/out and images back to the MCP client. `open_in_app` additionally bridges to a
+RUNNING MeshVault app (separate process) via backend/agent_bridge.py, so a human can
+co-view what the agent is inspecting.
 
 Model input: `load_model` accepts EITHER an http(s) URL or a local file path.
 - Local files are registered under an unguessable /models/<token> route on the loopback
@@ -122,6 +124,9 @@ class _Runtime:
         self._tmpdir = tempfile.TemporaryDirectory(prefix="meshvault_mcp_")
         self._lock = None  # created lazily inside the running event loop
         self.base_url = None
+        # Local file behind the currently loaded model (None for direct URL loads).
+        # open_in_app uses it to push "what the agent is looking at" into the app.
+        self.last_local_model: Path | None = None
 
     async def page(self):
         import asyncio
@@ -241,7 +246,10 @@ mcp = FastMCP(
         "MeshVault: a headless 3D model viewer you can drive entirely through JSON. "
         "Typical flow: load_model (URL or local path) → describe_scene (understand WHAT "
         "loaded, no vision needed) → viewer_execute for camera/render/transform commands "
-        "(discover them with list_viewer_commands) → screenshot to SEE the result. "
+        "(discover them with list_viewer_commands) → screenshot to SEE the result "
+        "(pass preset:\"studio\" for renders comparable across sessions). "
+        "When a human is co-reviewing, open_in_app pushes your current model + camera "
+        "into their running MeshVault app so they see what you see. "
         "Supports .obj .fbx .gltf .glb (incl. Draco/KTX2/Meshopt) .stl .ply .dae .3mf .usdz."
     ),
 )
@@ -290,16 +298,21 @@ async def _load_source(source: str, name: str | None = None) -> dict:
     if is_url:
         display = name or source.rstrip("/").rsplit("/", 1)[-1]
         result = await _mv_execute("load", {"url": source, "name": display})
-        if not result.get("ok"):
-            # Browser-side fetch failed — typically CORS. Retry via server-side download.
-            try:
-                local = _runtime.download_to_temp(source)
-            except Exception as e:
-                return {"ok": False, "error": f"Browser load failed ({result.get('error')}); "
-                                              f"server-side download also failed: {e}"}
-            url = _runtime.register_local_file(local)
-            result = await _mv_execute(
-                "load", {"url": url, "extension": local.suffix, "name": display})
+        if result.get("ok"):
+            # Loaded straight from the URL — no local file exists for open_in_app.
+            _runtime.last_local_model = None
+            return result
+        # Browser-side fetch failed — typically CORS. Retry via server-side download.
+        try:
+            local = _runtime.download_to_temp(source)
+        except Exception as e:
+            return {"ok": False, "error": f"Browser load failed ({result.get('error')}); "
+                                          f"server-side download also failed: {e}"}
+        url = _runtime.register_local_file(local)
+        result = await _mv_execute(
+            "load", {"url": url, "extension": local.suffix, "name": display})
+        if result.get("ok"):
+            _runtime.last_local_model = local
         return result
     path = Path(source).expanduser()
     if not path.is_absolute():
@@ -314,8 +327,11 @@ async def _load_source(source: str, name: str | None = None) -> dict:
                                       f"Supported: {' '.join(sorted(SUPPORTED_EXTENSIONS))}"}
     await _runtime.page()  # ensure base_url exists before registering
     url = _runtime.register_local_file(path)
-    return await _mv_execute(
+    result = await _mv_execute(
         "load", {"url": url, "extension": ext, "name": name or path.name})
+    if result.get("ok"):
+        _runtime.last_local_model = path
+    return result
 
 
 @mcp.tool()
@@ -377,6 +393,97 @@ async def get_state() -> dict:
     lighting. Re-read after commands to verify their effect without a screenshot."""
     page = await _runtime.page()
     return await page.evaluate("() => window.mv.getState()")
+
+
+@mcp.tool()
+async def open_in_app(path: str | None = None, camera: bool = True) -> dict:
+    """Push a model into the running MeshVault desktop app so a human can co-view it.
+
+    The headless MCP viewer and the browser app are separate processes; this tool
+    bridges them. It discovers the local app via ~/.meshvault/app_session.json
+    (written when `meshvault` starts; override with MESHVAULT_APP_URL +
+    MESHVAULT_TOKEN) and pushes the model — by default the one currently loaded
+    here — into every open app tab, live. The human instantly sees the same file,
+    framed by the same camera.
+
+    Args:
+        path: absolute local file path to open. Defaults to the model currently
+              loaded in this session (must have been loaded from a local path —
+              URL-loaded models have no local file; download or export them first).
+        camera: also apply this session's current camera pose in the app, so the
+                human sees exactly what you see (only sent when the pushed path IS
+                the currently loaded model). Default true.
+
+    Returns {ok, clients, deep_link, camera_sent}. `clients` is how many app tabs
+    received the push; if 0, give the human the `deep_link` — opening it reproduces
+    the same view (the app honors ?path= deep links).
+    """
+    from backend.agent_bridge import (
+        StaleSessionError, discover_app_session, push_open_to_app)
+
+    # Resolve what to push: explicit path, or what this session is looking at.
+    if path is not None:
+        if path.startswith("http://") or path.startswith("https://"):
+            return {"ok": False, "error": "open_in_app takes a LOCAL file path. For URLs, "
+                                          "give the human the hosted viewer link instead: "
+                                          f"https://www.lpalbou.info/MeshVault/?src={path}"}
+        target = Path(path).expanduser()
+        if not target.is_absolute():
+            return {"ok": False, "error": f"Local path must be absolute: {path}"}
+        if not target.is_file():
+            return {"ok": False, "error": f"File not found: {target}"}
+        if target.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            return {"ok": False, "error": f"Unsupported format '{target.suffix}'. "
+                                          f"Supported: {' '.join(sorted(SUPPORTED_EXTENSIONS))}"}
+    elif _runtime.last_local_model is not None:
+        target = _runtime.last_local_model
+    else:
+        return {"ok": False, "error": "Nothing to push: no `path` given and no local model "
+                                      "is loaded in this session (URL loads have no local "
+                                      "file). Call load_model with a local path first, or "
+                                      "pass `path` explicitly."}
+
+    # Only attach the camera when the app will show the SAME model this session has
+    # loaded — a pose from a different model would frame the wrong thing.
+    camera_payload = None
+    if camera and _runtime._page is not None and _runtime.last_local_model == target:
+        state = await _runtime._page.evaluate("() => window.mv.getState()")
+        if state.get("model", {}).get("loaded"):
+            cam = state.get("camera", {})
+            camera_payload = {"position": cam.get("position"),
+                              "target": cam.get("target"), "fov": cam.get("fov")}
+
+    try:
+        session = discover_app_session()
+    except StaleSessionError as e:
+        # An uncleanly killed app (SIGKILL) can't remove its session file; the
+        # pid probe catches it (and removed the file) instead of letting the push
+        # hit whatever old instance answers that port.
+        return {"ok": False, "error": f"Stale session file: the app that published it "
+                                      f"(pid {e.pid}) is dead — likely an unclean "
+                                      "shutdown. The file has been cleaned up. Ask the "
+                                      "human to start the app (`meshvault`), or set "
+                                      "MESHVAULT_APP_URL/MESHVAULT_TOKEN explicitly."}
+    if session is None:
+        return {"ok": False, "error": "No running MeshVault app found: "
+                                      "~/.meshvault/app_session.json is missing and "
+                                      "MESHVAULT_APP_URL is not set. Ask the human to "
+                                      "start the app with `meshvault`."}
+    import asyncio
+    try:
+        # Sync urllib call — keep it off the event loop (MCP protocol keeps flowing).
+        result = await asyncio.to_thread(
+            push_open_to_app, session, str(target), camera_payload, "mcp")
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+
+    out = {"ok": True, "clients": result.get("clients", 0),
+           "deep_link": result.get("deep_link"),
+           "camera_sent": camera_payload is not None}
+    if out["clients"] == 0:
+        out["hint"] = ("The app is running but no browser tab is connected. Give the "
+                       "human the deep_link — opening it shows the same model.")
+    return out
 
 
 @mcp.tool()
@@ -514,6 +621,47 @@ def _structural_delta(ref_desc: dict, cand_desc: dict) -> dict:
 
 VIEW_PRESETS = {"front", "back", "left", "right", "top", "bottom", "iso"}
 
+# Render presets: named, fully-pinned lighting/background states so screenshots are
+# comparable across sessions, machines, and agents (the FR that motivated this: two
+# agents critiquing the same model must not diverge because one session had tweaked
+# lights). Each preset sets EVERY pixel-affecting lighting/background variable —
+# a partial preset would silently inherit session state and break comparability.
+RENDER_PRESETS: dict[str, list[tuple[str, dict]]] = {
+    # The app's factory look, pinned: balanced key/fill studio + IBL.
+    "studio": [
+        ("set_environment", {"enabled": True, "intensity": 1.0, "asBackground": False}),
+        ("set_lighting", {"azimuth": 45, "elevation": 60, "key_intensity": 1.2,
+                          "fill_intensity": 0.5, "ambient": 0.3, "exposure": 1.2}),
+        ("set_background", {"color": "#33373f"}),
+    ],
+    # Even, low-contrast lighting on mid-gray — for color/texture comparison.
+    "neutral": [
+        ("set_environment", {"enabled": True, "intensity": 1.0, "asBackground": False}),
+        ("set_lighting", {"azimuth": 45, "elevation": 55, "key_intensity": 0.8,
+                          "fill_intensity": 0.6, "ambient": 0.5, "exposure": 1.0}),
+        ("set_background", {"color": "#808080"}),
+    ],
+    # Presentation hero look: stronger key, near-black backdrop.
+    "dark": [
+        ("set_environment", {"enabled": True, "intensity": 1.2, "asBackground": False}),
+        ("set_lighting", {"azimuth": 45, "elevation": 60, "key_intensity": 1.5,
+                          "fill_intensity": 0.4, "ambient": 0.2, "exposure": 1.1}),
+        ("set_background", {"color": "#0d0d1a"}),
+    ],
+}
+
+
+async def _apply_render_preset(name: str) -> None:
+    """Apply a named render preset (raises on unknown name or command failure)."""
+    steps = RENDER_PRESETS.get(name)
+    if steps is None:
+        raise RuntimeError(
+            f"Unknown preset '{name}'. Available: {', '.join(sorted(RENDER_PRESETS))}.")
+    for action, params in steps:
+        r = await _mv_execute(action, params)
+        if not r.get("ok"):
+            raise RuntimeError(f"Preset '{name}' failed at {action}: {r.get('error')}")
+
 
 async def _shot(width, height, transparent, hide_ground) -> Image:
     result = await _mv_execute("screenshot", {
@@ -534,6 +682,7 @@ async def screenshot(
     hide_ground: bool = False,
     best_view: bool = False,
     views: list[str] | None = None,
+    preset: str | None = None,
 ) -> list:
     """Render the model and return PNG image(s), with a JSON metadata text block first.
 
@@ -552,6 +701,12 @@ async def screenshot(
         hide_ground: hide the ground/shadow plane.
         best_view: move to the semantic front first (ignored when `views` is given).
         views: capture several angles in one call.
+        preset: pin the full lighting/background state to a documented, reproducible
+                look BEFORE capturing, so renders are comparable across sessions and
+                agents: "studio" (factory studio look), "neutral" (even light on
+                mid-gray, for color/texture comparison), "dark" (hero shots on
+                near-black). Sets IBL, key/fill/ambient lights, exposure, and
+                background; the preset stays active for the session afterwards.
     """
     page = await _runtime.page()
     loaded = await page.evaluate("() => window.mv.getState().model.loaded")
@@ -561,6 +716,10 @@ async def screenshot(
 
     meta: dict = {"width": width, "height": height}
     contents: list = []
+
+    if preset is not None:
+        await _apply_render_preset(preset)
+        meta["preset"] = preset
 
     if views is not None:
         if len(views) == 0:

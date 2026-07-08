@@ -387,16 +387,17 @@ export class ViewerControlAPI {
                 handler: () => v.getState().camera,
             },
             set_camera: {
-                description: "Set the camera to an explicit position and look-at target (world coords).",
+                description: "Set the camera to an explicit position and look-at target (world coords), optionally with a field of view (degrees). Mirrors get_camera, so a pose can be captured in one session and reproduced in another.",
                 params: {
                     position: { type: "array", required: true },
                     target: { type: "array" },
+                    fov: { type: "number", min: 1, max: 179 },
                 },
                 requiresModel: false,
                 handler: (p) => {
                     if (p.position.length !== 3) throw new Error("position must be [x,y,z]");
                     if (p.target && p.target.length !== 3) throw new Error("target must be [x,y,z]");
-                    return v.setCamera(p.position, p.target);
+                    return v.setCamera(p.position, p.target, p.fov);
                 },
             },
             set_view: {

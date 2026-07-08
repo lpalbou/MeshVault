@@ -30,6 +30,7 @@ web/vendor/
 # Virtual environments
 # ===========================
 .venv/
+.venv-mcp/
 venv/
 env/
 

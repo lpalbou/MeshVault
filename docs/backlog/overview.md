@@ -3,8 +3,8 @@
 Durable planning memory for MeshVault. Records what exists, what is next, what was
 considered, and why priorities are ordered as they are. Treat stale text here as a bug.
 
-Last update: 2026-07-06 (026 compressed-glTF decoders + 027 IBL + 029 describe_scene
-(incl. 031 QA checks) + 030 MCP adapter implemented, each adversarially reviewed).
+Last update: 2026-07-08 (043 shared agent/app session: `open_in_app` MCP tool +
+`?path=`/`?dir=` deep links + `screenshot` render presets — external FR, E2E-verified).
 
 ---
 
@@ -23,15 +23,21 @@ Next free ID: **0025**.
 
 | State | Count | IDs |
 |-------|------:|-----|
-| completed | 25 | 001–005, 009–014, 017–021, 025, 026, 027, 029, 030, 031, 036, 037, 039 |
+| completed | 26 | 001–005, 009–014, 017–021, 025, 026, 027, 029, 030, 031, 036, 037, 039, 043 |
 | planned | 3 | 006, 007, 008 |
 | proposed | 14 | 015, 016, 022, 023, 024, 028, 032, 033, 034, 035, 038 (partial), 040 (parked), 041 (v1 done; v2 proposed), 042 |
 
-Next free ID: **0043**.
+Next free ID: **0044**.
+
+Note: `043` (2026-07-08, external FR) shipped the agent bridge: `open_in_app` MCP tool
+(session-file discovery → `POST /api/agent/open` → SSE fan-out to app tabs, camera
+included), `?path=`/`?dir=` deep links with live URL sync (archive members via
+`archive!inner`), and `screenshot {preset}` reproducible render presets. The MCP now
+exposes 8 tools. Partially overlaps `032` (web-viewer URL state) — see the item file.
 
 Note: `039` completed with `compare_models` (geometric shape comparison / registration —
-`sample_points` + `backend/mesh_compare.py`), 4-agent reviewed; the MCP now exposes 7
-tools. `038` still partial (UV diagnostics / image stats remain).
+`sample_points` + `backend/mesh_compare.py`), 4-agent reviewed. `038` still partial
+(UV diagnostics / image stats remain).
 
 Note: `041` v1 (in-app compare: deviation heatmap + verdict panel over `POST
 /api/compare`) shipped 2026-07-06 after a 3-agent design review; its v2 (co-loaded
