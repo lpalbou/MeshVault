@@ -32,7 +32,7 @@ default = whole filesystem), `MESHVAULT_HOST` (bind host — non-loopback prints
 
 ---
 
-## Endpoints Overview (22 routes)
+## Endpoints Overview (24 routes)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -58,6 +58,8 @@ default = whole filesystem), `MESHVAULT_HOST` (bind host — non-loopback prints
 | `GET` | `/api/agent/state` | Read the latest reported human-session state (reverse bridge) |
 | `GET` | `/api/screenshot` | Headless PNG render of a local model (no browser session needed) |
 | `GET` | `/api/screenshot/harness` | Internal viewer page the headless renderer drives |
+| `POST` | `/api/scene/save` | Persist a composed-scene manifest as `<dir>/<name>.mvscene` |
+| `GET` | `/api/scene/load` | Read a scene manifest (objects re-resolve client-side, guarded) |
 
 ---
 
@@ -509,7 +511,23 @@ curl -H "X-MeshVault-Token: $TOKEN" \
 
 ---
 
-## Deep links (`GET /?path=` / `GET /?dir=`)
+## `POST /api/scene/save` · `GET /api/scene/load`
+
+Persist / read composed-scene manifests (`.mvscene`, version-1 JSON: per-object
+source + placement transform + visibility/opacity, plus scene lighting/environment/
+background — produced by the viewer's `get_scene_manifest` command).
+
+Save takes `{target_dir, name, manifest, overwrite=false}` — the name is sanitized
+and the `.mvscene` suffix is FORCED (never a raw-path write), existing files return
+`409` unless `overwrite=true`, and only `.mvscene` files can ever be overwritten.
+Manifests are capped (128 objects, 2 MB) on both save and load. Load returns the
+manifest; the client re-resolves each object through the guarded `/api/asset/*`
+routes, so an unavailable object degrades per-object without a server-side probe
+loop. Scene files also appear in `/api/browse` listings and load on click in the app.
+
+---
+
+## Deep links (`GET /?path=` / `GET /?dir=` / `GET /?scene=`)
 
 The app shell honors URL parameters over the remembered last directory:
 
@@ -517,6 +535,7 @@ The app shell honors URL parameters over the remembered last directory:
 - `/?path=/abs/folder/model.glb` — open the folder, highlight the asset, load it.
 - `/?path=/abs/pack.zip!inner/model.obj` — same for a model inside an archive
   (`archive!inner` — the app's composite asset key).
+- `/?scene=/abs/composition.mvscene` — rebuild a saved composed scene.
 
 The URL stays in sync while browsing (`replaceState`), so the address bar is always a
 shareable deep link to the current view. Invalid deep links toast an error and fall

@@ -3,8 +3,37 @@
 **Priority**: Medium (rises to High when abstract3d lands)
 **Effort**: Large, staged (~2–3 weeks total; stage 1 shared with 041 v2)
 **Category**: Viewer architecture / app UX / agent workflows
-**Status**: Proposed
+**Status**: Done (2026-07-09) — stages 1–4 shipped in 0.6.0
 **Created**: 2026-07-06
+
+## Completion (2026-07-09)
+
+All four stages shipped in one cycle, designed against TWO adversarial reviews
+(architecture/correctness + product/agent/security) run BEFORE implementation; every
+must-fix item from both reviews is implemented. Highlights beyond the original spec:
+
+- Registry exactly as architected here (wrapper `Group` placement, `get
+  _currentModel()` compat getter) plus the reviews' corrections: scene-generation
+  counter for add-vs-replace races, per-entry animation/reset/scale state,
+  wrapper-LOCAL vertex bakes (placement never bakes into geometry), skinned-model
+  bake refusal, union-box scene rig (lights/shadows/grid/clip/measure/raycast),
+  scoring passes hide non-active objects, texture-janitor registry membership.
+- Persistence hardened per review: safe-write contract (sanitized name, forced
+  `.mvscene` suffix, overwrite protocol, 128-object/2 MB caps), volatile-source
+  exclusion, per-object load degradation, `?scene=` deep links, browser listing.
+- Agent parity: `load_model {add:true}`, `save_scene`/`load_scene` MCP tools,
+   11 new viewer commands, scene-aware `describe_scene`/`get_state`,
+  `compare_models` composed-scene guard.
+- Incidental fixes: reset-after-simplify crash (pre-existing, documented); exports
+  no longer bake clay/ghost viewer materials or viewer opacity into assets.
+- Verified: 96-test fast lane + 14 new scene-API tests; browser E2E (compose →
+  gizmo → save → `?scene=` reload → composed GLB export); MCP E2E (compose with
+  transforms → save → wipe → reload → placements exact → framed preset render).
+
+Deferred per the reviews (with reasons recorded there): OBJ multi-object export
+(index rebasing), per-object render modes, `.mvscene` thumbnails, undo stack
+(repo-rejected; per-object reset-placement shipped instead), 041 v2 registration
+overlay (rides on `set_object_transform`, own cycle), touch gizmo.
 
 ## Summary
 

@@ -21,7 +21,7 @@ gate, and a `PathGuard` that confines every filesystem access to the allowed roo
 
 ---
 
-## Backend (22 API routes)
+## Backend (24 API routes)
 
 ### `app.py` — Server
 Browse, serve, prepare, export (original + modified + GLB), reveal, rename, duplicate, delete, scan textures, agent bridge (`POST /api/agent/open`, `GET /api/events`, `GET/POST /api/agent/state`). Auto-converts old `.fbx` (version < 7000) → `.obj`. Every filesystem endpoint routes through `security.py`'s `PathGuard`.
@@ -68,14 +68,20 @@ ZIP (built-in), RAR (multi-tool fallback), `.unitypackage` (tar.gz with GUID str
 Pure Python FBX binary parser (v5000–6100) → OBJ converter. Zero dependencies.
 
 ### `mcp_server.py` — MCP adapter (optional)
-`meshvault-mcp` exposes the viewer to MCP clients (Claude, Cursor) as 9 tools routed
+`meshvault-mcp` exposes the viewer to MCP clients (Claude, Cursor) as 11 tools routed
 through the control API: `load_model` (URL or local path; multi-file assets load
-textured), `describe_scene`, `viewer_execute`, `list_viewer_commands`, `get_state`,
-`compare_models`, `screenshot` (MCP image content; render presets for cross-session
-comparability), `open_in_app` (push model + camera into the running app), and
-`get_app_state` (read what the human is looking at). Composes the shared
-`headless_viewer.py` runtime. Optional deps: `pip install "meshvault[mcp]"`.
-See [MCP Server](mcp.md).
+textured; `add:true` composes scenes), `describe_scene`, `viewer_execute`,
+`list_viewer_commands`, `get_state`, `compare_models` (refuses to destroy composed
+scenes), `screenshot` (MCP image content; render presets for cross-session
+comparability), `save_scene`/`load_scene` (`.mvscene` manifests), `open_in_app`
+(push model + camera into the running app), and `get_app_state` (read what the human
+is looking at). Composes the shared `headless_viewer.py` runtime. Optional deps:
+`pip install "meshvault[mcp]"`. See [MCP Server](mcp.md).
+
+### `scene_api.py` — Scene persistence
+`POST /api/scene/save` + `GET /api/scene/load` for `.mvscene` manifests: safe-write
+contract (sanitized name, forced suffix, overwrite protocol), 128-object/2 MB caps,
+shared `validate_manifest()` used by the MCP scene tools too.
 
 ---
 
@@ -94,15 +100,25 @@ URL in sync while browsing (`replaceState`), and subscribes to `/api/events` (SS
 List + grid view, sort (name/size/type), search filter, inline rename, right-click context menu (rename/duplicate/delete/reveal). Color-coded badges. Remember last directory. Programmatic selection (`findAsset`/`highlightAsset`) and the app-wide `assetKey()` convention.
 
 ### `viewer_3d.js`
+- **Scene registry (042)**: N objects, each in a placement wrapper `Group`; ACTIVE
+  object drives all single-object commands via the `_currentModel` getter; replace
+  (`loadModel`) vs compose (`addModel`) semantics with a generation counter;
+  per-entry animation/reset/opacity state; union-box scene rig; `.mvscene` manifests
+  via `getSceneManifest()`
 - **Rendering**: PBR, 5-light + IBL (procedural environment via PMREM), SSAO, ACES, shadows
 - **Loaders**: OBJ+MTL, FBX, GLTF/GLB (incl. Draco / KTX2-Basis / Meshopt — decoders vendored locally), STL, PLY, DAE, 3MF, USDZ
 - **Navigation**: Orbit + FPV drone with race condition guard
 - **Scene**: Grid (adaptive), axes (labeled), normals viz, wireframe
-- **Transforms**: Center, ground, PCA orient, rotate ±90°, simplify (merge + edge collapse), smooth normals
+- **Transforms**: Center, ground, PCA orient, rotate ±90°, simplify (merge + edge collapse), smooth normals — wrapper-local bakes, refused for skinned models
 - **Textures**: `applyTextureFolder()` with convention + fuzzy matching
 - **Materials**: `getMaterialsInfo()` with live references
-- **Export**: OBJExporter, screenshot (PNG)
-- **Persistence**: Wireframe, grid, axes, normals, background across loads
+- **Export**: OBJExporter (active object), GLB (all visible objects, authored materials), screenshot (PNG)
+- **Persistence**: Wireframe, grid, axes, normals, render mode, background across loads
+
+### `scene_panel.js`
+Scene composition UI (042): objects panel (select/visibility/opacity/reset/remove),
+TransformControls gizmo on the selected object's wrapper (move/rotate/scale, T/R/S,
+hidden in captures), viewport click-to-select, scene save flow.
 
 ### `export_panel.js`
 Modified → `/api/export_modified` (OBJ). Original → `/api/export`. Auto-refreshes browser.

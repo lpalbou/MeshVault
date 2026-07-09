@@ -185,8 +185,18 @@ _load_lock = None
 
 
 @mcp.tool()
-async def load_model(source: str, name: str | None = None) -> dict:
+async def load_model(
+    source: str,
+    name: str | None = None,
+    add: bool = False,
+    transform: dict | None = None,
+) -> dict:
     """Load a 3D model into the viewer from an http(s) URL or a LOCAL FILE PATH.
+
+    IMPORTANT: by default this REPLACES the entire scene — including a composed
+    multi-object scene built with add:true. Pass add:true to CO-LOAD into the
+    current scene (scene composition); the new object becomes active and its
+    objectId is returned for set_object_transform / remove_object / etc.
 
     Local paths are served to the sandboxed viewer over loopback; URLs are fetched by
     the browser first and, if blocked by CORS, downloaded server-side automatically.
@@ -196,14 +206,21 @@ async def load_model(source: str, name: str | None = None) -> dict:
     Args:
         source: http(s) URL of a model, or an absolute/home-relative local file path.
         name: optional display name (defaults to the file name).
+        add: co-load into the current scene instead of replacing it.
+        transform: optional initial placement when add:true —
+                   {position:[x,y,z], quaternion:[x,y,z,w] or rotation:[x,y,z]
+                   Euler degrees, scale:[x,y,z] or uniform number}.
     """
     async with await _get_load_lock():
-        result = await _load_source(source, name)
+        result = await _load_source(source, name, add=add, transform=transform)
         if not result.get("ok"):
             return _truncate_strings(result)
         description = await _mv_execute("describe_scene", {})
-        return _truncate_strings({"ok": True, "loaded": True,
-                                  "description": description.get("result")})
+        out = {"ok": True, "loaded": True,
+               "description": description.get("result")}
+        if add and isinstance(result.get("result"), dict):
+            out["objectId"] = result["result"].get("objectId")
+        return _truncate_strings(out)
 
 
 async def _get_load_lock():
@@ -214,13 +231,32 @@ async def _get_load_lock():
     return _load_lock
 
 
-async def _load_source(source: str, name: str | None = None) -> dict:
+async def _load_source(source: str, name: str | None = None,
+                       add: bool = False, transform: dict | None = None) -> dict:
     """Shared load path: URL (browser-first, server-download CORS fallback) or local file.
-    Callers must hold the load lock. Returns the raw viewer load result {ok, ...}."""
+    Callers must hold the load lock. Returns the raw viewer load result {ok, ...}.
+
+    add=True composes into the current scene (viewer add_model) instead of
+    replacing it; `transform` optionally places the added object. The viewer entry
+    records the SOURCE identity (local path/URL), which is what save_scene reads —
+    no Python-side correlation table to fall out of sync (adversarial finding)."""
+    action = "add_model" if add else "load"
+
+    def params(url, ext, display, src, related=None):
+        p = {"url": url, "name": display, "source": src}
+        if ext:
+            p["extension"] = ext
+        if related:
+            p["relatedFiles"] = related
+        if add and transform:
+            p["transform"] = transform
+        return p
+
     is_url = source.startswith("http://") or source.startswith("https://")
     if is_url:
         display = name or source.rstrip("/").rsplit("/", 1)[-1]
-        result = await _mv_execute("load", {"url": source, "name": display})
+        result = await _mv_execute(
+            action, params(source, None, display, {"kind": "url", "url": source}))
         if result.get("ok"):
             # Loaded straight from the URL — no local file exists for open_in_app.
             _runtime.last_local_model = None
@@ -233,7 +269,7 @@ async def _load_source(source: str, name: str | None = None) -> dict:
                                           f"server-side download also failed: {e}"}
         url = _runtime.register_local_file(local)
         result = await _mv_execute(
-            "load", {"url": url, "extension": local.suffix, "name": display})
+            action, params(url, local.suffix, display, {"kind": "url", "url": source}))
         if result.get("ok"):
             _runtime.last_local_model = local
         return result
@@ -254,8 +290,8 @@ async def _load_source(source: str, name: str | None = None) -> dict:
     # model's token directory — this is what makes multi-file assets load TEXTURED.
     related = companion_files(path)
     result = await _mv_execute(
-        "load", {"url": url, "extension": ext, "name": name or path.name,
-                 "relatedFiles": related})
+        action, params(url, ext, name or path.name,
+                       {"kind": "file", "path": str(path)}, related))
     if result.get("ok"):
         _runtime.last_local_model = path
     return result
@@ -373,8 +409,8 @@ async def open_in_app(path: str | None = None, camera: bool = True) -> dict:
     # Only attach the camera when the app will show the SAME model this session has
     # loaded — a pose from a different model would frame the wrong thing.
     camera_payload = None
-    if camera and _runtime._page is not None and _runtime.last_local_model == target:
-        state = await _runtime._page.evaluate("() => window.mv.getState()")
+    if camera and _runtime.viewer.page is not None and _runtime.last_local_model == target:
+        state = await _runtime.viewer.page.evaluate("() => window.mv.getState()")
         if state.get("model", {}).get("loaded"):
             cam = state.get("camera", {})
             camera_payload = {"position": cam.get("position"),
@@ -451,6 +487,17 @@ async def compare_models(
         return {"ok": False, "error": "`candidates` is empty — provide 1..8 models."}
     if len(candidates) > 8:
         return {"ok": False, "error": f"Too many candidates ({len(candidates)}); max 8 per call."}
+
+    # A composed scene would be silently DESTROYED by the sequential loads below.
+    # Refuse instead of surprising the agent (save_scene first, or unload).
+    page = await _runtime.page()
+    scene_state = await page.evaluate("() => window.mv.getState().scene")
+    if scene_state and scene_state.get("objectCount", 0) > 1:
+        return {"ok": False,
+                "error": f"A composed scene with {scene_state['objectCount']} objects is "
+                         "loaded, and compare_models replaces the whole scene while "
+                         "loading candidates. save_scene first (then load_scene to "
+                         "restore), or viewer_execute unload to discard it."}
 
     async def _snapshot(source: str, extra_seed: bool = False) -> dict:
         r = await _load_source(source)
@@ -638,6 +685,143 @@ async def screenshot(
         contents.append(await _shot(width, height, transparent, hide_ground))
 
     return [json.dumps(meta), *contents]
+
+
+@mcp.tool()
+async def save_scene(path: str, overwrite: bool = False) -> dict:
+    """Save the CURRENT composed scene as a .mvscene manifest file.
+
+    The manifest records each object's SOURCE (original local path or URL), its
+    placement transform, visibility and opacity, plus scene lighting/environment/
+    background — load_scene rebuilds the exact composition. Objects loaded from
+    volatile sources cannot be persisted and are reported in skipped_volatile.
+
+    Args:
+        path: absolute destination path (.mvscene appended if missing).
+        overwrite: replace an existing scene file (only ever overwrites .mvscene).
+    """
+    import json as _json
+
+    from backend.scene_api import SCENE_EXTENSION
+
+    target = Path(path).expanduser()
+    if not target.is_absolute():
+        return {"ok": False, "error": f"Path must be absolute: {path}"}
+    if not target.name or target.name in {".", ".."}:
+        return {"ok": False, "error": "Path has no file name"}
+    if not target.name.lower().endswith(SCENE_EXTENSION):
+        target = target.with_name(target.name + SCENE_EXTENSION)
+    if target.exists():
+        if not overwrite:
+            return {"ok": False, "error": f"Already exists: {target} "
+                                          "(pass overwrite=true to replace)"}
+        if not (target.is_file() and target.suffix.lower() == SCENE_EXTENSION):
+            return {"ok": False, "error": "Refusing to overwrite a non-scene file"}
+
+    result = await _mv_execute("get_scene_manifest", {})
+    if not result.get("ok"):
+        return {"ok": False, "error": result.get("error", "no scene to save")}
+    manifest = result["result"]
+    if not manifest.get("objects"):
+        return {"ok": False, "error": "Nothing persistable in the scene "
+                                      f"(volatile-only: {manifest.get('skippedVolatile')})"}
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(_json.dumps(manifest, indent=2), encoding="utf-8")
+    return {"ok": True, "path": str(target), "objects": len(manifest["objects"]),
+            "skipped_volatile": manifest.get("skippedVolatile", [])}
+
+
+@mcp.tool()
+async def load_scene(path: str) -> dict:
+    """Rebuild a composed scene from a .mvscene manifest file.
+
+    REPLACES the current scene, then adds every object with its saved placement,
+    visibility and opacity, and restores lighting/environment/background. Objects
+    whose source no longer resolves are reported per-object; the rest still load.
+    Archive-member sources are app-only and reported as unsupported here.
+
+    Args:
+        path: absolute path of the .mvscene file.
+    """
+    import json as _json
+
+    from backend.scene_api import (
+        MAX_MANIFEST_BYTES, SCENE_EXTENSION, validate_manifest)
+
+    file_path = Path(path).expanduser()
+    if not file_path.is_absolute():
+        return {"ok": False, "error": f"Path must be absolute: {path}"}
+    if not file_path.is_file():
+        return {"ok": False, "error": f"File not found: {file_path}"}
+    if file_path.suffix.lower() != SCENE_EXTENSION:
+        return {"ok": False, "error": f"Not a scene file (expected {SCENE_EXTENSION})"}
+    if file_path.stat().st_size > MAX_MANIFEST_BYTES:
+        return {"ok": False, "error": "Scene file too large"}
+    try:
+        manifest = _json.loads(file_path.read_text(encoding="utf-8"))
+        validate_manifest(manifest)  # raises HTTPException-like on bad structure
+    except Exception as e:
+        detail = getattr(e, "detail", None)
+        return {"ok": False, "error": f"Invalid scene file: {detail or e}"}
+
+    async with await _get_load_lock():
+        await _mv_execute("unload", {})
+        loaded, failed = [], []
+        for obj in manifest["objects"]:
+            src = obj.get("source", {})
+            if src.get("kind") == "file":
+                origin = src.get("path", "")
+            elif src.get("kind") == "url":
+                origin = src.get("url", "")
+            else:
+                failed.append({"name": obj.get("name"),
+                               "error": "archive-member sources are app-only"})
+                continue
+            result = await _load_source(origin, obj.get("name"), add=True,
+                                        transform=obj.get("transform"))
+            if not result.get("ok"):
+                failed.append({"name": obj.get("name"), "error": result.get("error")})
+                continue
+            object_id = (result.get("result") or {}).get("objectId")
+            if object_id is not None:
+                if obj.get("visible") is False:
+                    await _mv_execute("set_object_visible",
+                                      {"id": object_id, "visible": False})
+                opacity = obj.get("opacity")
+                if isinstance(opacity, (int, float)) and opacity < 1:
+                    await _mv_execute("set_object_opacity",
+                                      {"id": object_id, "opacity": opacity})
+            loaded.append(obj.get("name"))
+
+        # Scene-level looks: lighting, IBL, background.
+        lighting = manifest.get("lighting")
+        if isinstance(lighting, dict):
+            await _mv_execute("set_lighting", {
+                "azimuth": lighting.get("keyAzimuth"),
+                "elevation": lighting.get("keyElevation"),
+                "key_intensity": lighting.get("keyIntensity"),
+                "fill_intensity": lighting.get("fillIntensity"),
+                "ambient": lighting.get("ambientIntensity"),
+                "exposure": lighting.get("exposure"),
+            })
+        environment = manifest.get("environment")
+        if isinstance(environment, dict):
+            await _mv_execute("set_environment", {
+                "enabled": environment.get("enabled"),
+                "intensity": environment.get("intensity"),
+                "asBackground": environment.get("asBackground"),
+            })
+        if isinstance(manifest.get("background"), str):
+            await _mv_execute("set_background", {"color": manifest["background"]})
+        await _mv_execute("frame_all", {})
+
+    return _truncate_strings({
+        "ok": len(loaded) > 0,
+        "loaded": loaded,
+        "failed": failed,
+        "objectCount": len(loaded),
+    })
 
 
 @mcp.tool()

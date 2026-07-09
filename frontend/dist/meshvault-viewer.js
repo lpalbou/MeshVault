@@ -40912,13 +40912,14 @@ var Viewer3D = class {
     this._onInfoUpdate = onInfoUpdate || (() => {
     });
     this._animationId = null;
-    this._currentModel = null;
-    this._mixers = [];
+    this._objects = [];
+    this._activeObjectId = null;
+    this._nextObjectId = 1;
+    this._sceneGeneration = 0;
     this._clock = new Clock();
     this._resolveResource = options.resolveResource || ((ref) => `/api/asset/related?path=${encodeURIComponent(ref)}`);
     this._assetBaseUrl = options.assetBaseUrl != null ? options.assetBaseUrl : "/static/";
     this._background = "#0d0d1a";
-    this._modelScale = 1;
     this._lastModelName = null;
     this._lastStats = { vertices: 0, faces: 0, width: 0, height: 0, depth: 0 };
     this._trackedListeners = [];
@@ -40947,6 +40948,79 @@ var Viewer3D = class {
     this._resizeObserver = new ResizeObserver(() => this._onResize());
     this._resizeObserver.observe(this._container);
   }
+  // ==========================================================
+  // Object registry — scene composition core (backlog 042)
+  // ==========================================================
+  /**
+   * The ACTIVE object's model — a derived view over the registry.
+   *
+   * This getter is the backward-compatibility seam: every pre-registry
+   * single-object code path (and the describe_scene/mesh_stats/sample_points/
+   * heatmap helpers) reads `viewer._currentModel` and now transparently
+   * operates on the active entry. There is deliberately NO setter — the
+   * registry is the single source of truth and all mutations go through
+   * loadModel/addModel/removeObject/_clearAllObjects.
+   */
+  get _currentModel() {
+    const entry = this._activeEntry();
+    return entry ? entry.model : null;
+  }
+  /** Active entry's uniform scale (compat view for getState/legacy readers). */
+  get _modelScale() {
+    const entry = this._activeEntry();
+    return entry ? entry.modelScale : 1;
+  }
+  /** Active entry's modified flag (compat view; bake/mesh ops set it per entry). */
+  get _modelModified() {
+    const entry = this._activeEntry();
+    return entry ? entry.modified : false;
+  }
+  set _modelModified(value) {
+    const entry = this._activeEntry();
+    if (entry) entry.modified = !!value;
+  }
+  _activeEntry() {
+    if (this._activeObjectId == null) return null;
+    return this._objects.find((e) => e.id === this._activeObjectId) || null;
+  }
+  _entryById(id) {
+    return this._objects.find((e) => e.id === id) || null;
+  }
+  _visibleEntries() {
+    return this._objects.filter((e) => e.visible);
+  }
+  /** Union world-space box of all VISIBLE objects (null when empty/none visible). */
+  _visibleUnionBox() {
+    let union = null;
+    for (const entry of this._visibleEntries()) {
+      entry.wrapper.updateMatrixWorld(true);
+      const box = new Box3().setFromObject(entry.wrapper);
+      if (box.isEmpty()) continue;
+      union = union ? union.union(box) : box;
+    }
+    return union;
+  }
+  /** All meshes of all visible objects (raycast targets: pivot pick, measure, select). */
+  _visibleMeshes() {
+    const meshes = [];
+    for (const entry of this._visibleEntries()) {
+      entry.model.traverse((child) => {
+        if (child.isMesh) meshes.push(child);
+      });
+    }
+    return meshes;
+  }
+  /** The registry entry owning a mesh/object node, or null. */
+  _entryForNode(node) {
+    for (const entry of this._objects) {
+      let found = false;
+      entry.model.traverse((child) => {
+        if (child === node) found = true;
+      });
+      if (found) return entry;
+    }
+    return null;
+  }
   /**
    * Load a 3D model from a URL.
    *
@@ -40960,79 +41034,153 @@ var Viewer3D = class {
    */
   async loadModel(url, extension, options = {}) {
     const thisLoadId = ++this._loadId;
-    const ext = extension.toLowerCase();
-    this._modelBaseUrl = this._computeModelBaseUrl(url);
-    let object;
-    try {
-      if (ext === ".obj") {
-        object = await this._loadOBJ(url, options);
-      } else if (ext === ".fbx") {
-        object = await this._loadFBX(url, options);
-      } else if (ext === ".gltf" || ext === ".glb") {
-        object = await this._loadGLTF(url, options);
-      } else if (ext === ".stl") {
-        object = await this._loadSTL(url);
-      } else if (ext === ".ply") {
-        object = await this._loadPLY(url);
-      } else if (ext === ".dae") {
-        object = await this._loadCollada(url);
-      } else if (ext === ".3mf") {
-        object = await this._load3MF(url);
-      } else if (ext === ".usdz") {
-        object = await this._loadUSDZ(url);
-      } else {
-        throw new Error(`Unsupported format: ${ext}`);
-      }
-    } catch (loadErr) {
-      console.error(`Failed to load ${ext} model:`, loadErr);
-      throw loadErr;
-    }
+    const object = await this._parseModel(url, extension, options);
     if (thisLoadId !== this._loadId) {
       this._disposeObject(object);
       return { vertices: 0, faces: 0 };
     }
-    this._clearModel();
+    this._clearAllObjects();
     this._resetViewerState();
+    const entry = this._insertEntry(object, url, extension, options);
+    this._frameModel(object);
+    return entry.stats;
+  }
+  /**
+   * Co-load a model into the CURRENT scene (composition — does not clear).
+   * The new object becomes active. Returns stats + the new objectId.
+   *
+   * Concurrency: captures the scene generation; if a replace/unload happens
+   * while parsing, the add discards itself (never resurrects a cleared scene).
+   * Concurrent adds never invalidate each other.
+   */
+  async addModel(url, extension, options = {}) {
+    const generation = this._sceneGeneration;
+    const object = await this._parseModel(url, extension, options);
+    if (generation !== this._sceneGeneration) {
+      this._disposeObject(object);
+      return { vertices: 0, faces: 0, discarded: true };
+    }
+    const entry = this._insertEntry(object, url, extension, options);
+    if (options.transform) {
+      this.setObjectTransform(entry.id, options.transform);
+    }
+    if (options.frame !== false) this.frameAll();
+    else this._updateSceneRig(this._visibleUnionBox());
+    return { ...entry.stats, objectId: entry.id };
+  }
+  /** Fetch + parse a model WITHOUT touching the scene (shared by load/add). */
+  async _parseModel(url, extension, options = {}) {
+    const ext = extension.toLowerCase();
+    this._modelBaseUrl = this._computeModelBaseUrl(url);
+    try {
+      if (ext === ".obj") {
+        return await this._loadOBJ(url, options);
+      } else if (ext === ".fbx") {
+        return await this._loadFBX(url, options);
+      } else if (ext === ".gltf" || ext === ".glb") {
+        return await this._loadGLTF(url, options);
+      } else if (ext === ".stl") {
+        return await this._loadSTL(url);
+      } else if (ext === ".ply") {
+        return await this._loadPLY(url);
+      } else if (ext === ".dae") {
+        return await this._loadCollada(url);
+      } else if (ext === ".3mf") {
+        return await this._load3MF(url);
+      } else if (ext === ".usdz") {
+        return await this._loadUSDZ(url);
+      }
+      throw new Error(`Unsupported format: ${ext}`);
+    } catch (loadErr) {
+      console.error(`Failed to load ${ext} model:`, loadErr);
+      throw loadErr;
+    }
+  }
+  /**
+   * Register a parsed model as a scene object: wrap it in a placement Group,
+   * make it active, and run the full per-object setup (materials, animations,
+   * snapshots, persistent display settings, texture janitor, stats).
+   */
+  _insertEntry(object, url, extension, options = {}) {
     this._enhanceModel(object);
-    this._scene.add(object);
-    this._currentModel = object;
+    const id = this._nextObjectId++;
+    const wrapper = new Group();
+    wrapper.name = `mv_object_${id}`;
+    wrapper.add(object);
+    this._scene.add(wrapper);
+    const nameSource = options.name || options.sourcePath || url || "";
+    const name = String(nameSource).split(/[/\\]/).pop().split("?")[0] || `object_${id}`;
+    const source = options.source || (options.sourcePath ? { kind: "file", path: options.sourcePath } : { kind: "volatile" });
+    let skinned = false;
+    object.traverse((child) => {
+      if (child.isSkinnedMesh) skinned = true;
+    });
+    const entry = {
+      id,
+      name,
+      wrapper,
+      model: object,
+      source,
+      visible: true,
+      opacity: 1,
+      modelScale: 1,
+      modified: false,
+      skinned,
+      originalState: null,
+      animation: null,
+      stats: null
+    };
+    this._objects.push(entry);
+    this._activeObjectId = id;
     setTimeout(() => {
-      if (this._currentModel === object) this._sanitizeObjectTextures(object);
+      if (this._objects.some((e) => e.model === object)) {
+        this._sanitizeObjectTextures(object);
+      }
     }, 8e3);
-    this._setupAnimations(object);
-    this._saveOriginalGeometry();
+    this._setupAnimationsForEntry(entry);
+    this._saveOriginalGeometryForEntry(entry);
     this._applySceneSettings();
     this._applyEnvironment();
-    this._frameModel(object);
-    const stats = this._computeStats(object);
-    this._lastStats = stats;
-    const nameSource = options.name || options.sourcePath || url || "";
-    this._lastModelName = String(nameSource).split(/[/\\]/).pop().split("?")[0] || "model";
-    this._onInfoUpdate(stats);
-    return stats;
+    entry.stats = this._computeStats(object);
+    this._lastStats = entry.stats;
+    this._lastModelName = name;
+    this._onInfoUpdate(entry.stats);
+    this._container.dispatchEvent(new CustomEvent("objectschange", {
+      detail: { objects: this.listObjects(), activeId: this._activeObjectId }
+    }));
+    return entry;
   }
-  /** Remove the current model from the scene */
-  _clearModel() {
-    if (this._currentModel) {
-      this._currentModel.traverse((child) => {
-        if (child.isMesh && child._mvOriginalMaterial) {
-          const override = child.material;
-          child.material = child._mvOriginalMaterial;
-          delete child._mvOriginalMaterial;
-          if (override && override !== child.material) {
-            (Array.isArray(override) ? override : [override]).forEach((m) => m && m.dispose && m.dispose());
-          }
+  /**
+   * Dispose ONE registry entry: restore original materials first (render-mode
+   * overrides / heatmaps stash them on _mvOriginalMaterial — disposing the
+   * override alone would leak the originals' GPU textures), then dispose the
+   * model and remove its wrapper. Per-entry snapshots/animations are dropped
+   * so removed objects never pin geometry copies in memory.
+   */
+  _disposeEntry(entry) {
+    entry.model.traverse((child) => {
+      if (child.isMesh && child._mvOriginalMaterial) {
+        const override = child.material;
+        child.material = child._mvOriginalMaterial;
+        delete child._mvOriginalMaterial;
+        if (override && override !== child.material) {
+          (Array.isArray(override) ? override : [override]).forEach((m) => m && m.dispose && m.dispose());
         }
-      });
-      this._scene.remove(this._currentModel);
-      this._disposeObject(this._currentModel);
-      this._currentModel = null;
+      }
+    });
+    this._scene.remove(entry.wrapper);
+    this._disposeObject(entry.model);
+    entry.originalState = null;
+    entry.animation = null;
+  }
+  /** Remove every object and reset scene-wide display state (replace/unload). */
+  _clearAllObjects() {
+    for (const entry of this._objects) {
+      this._disposeEntry(entry);
     }
-    this._mixers = [];
-    this._animationMixer = null;
-    this._animationActions = [];
-    this._animationClips = [];
-    this._activeAction = null;
+    this._objects = [];
+    this._activeObjectId = null;
+    this._sceneGeneration++;
     this._clearNormalsHelpers();
     if (this._measureGroup) this._clearMeasurement();
     if (this._renderer) {
@@ -41043,31 +41191,242 @@ var Viewer3D = class {
     this._renderMode = "textured";
     this._wireframeEnabled = false;
   }
+  /** Backward-compat alias (a handful of internal callers say "clear model"). */
+  _clearModel() {
+    this._clearAllObjects();
+  }
+  // ---- registry public surface (control API + app UI) ----------------------
+  /** Summaries of every object (id, name, active, visibility, opacity, source). */
+  listObjects() {
+    return this._objects.map((e) => ({
+      id: e.id,
+      name: e.name,
+      active: e.id === this._activeObjectId,
+      visible: e.visible,
+      opacity: e.opacity,
+      skinned: e.skinned,
+      source: e.source,
+      vertices: e.stats ? e.stats.vertices : 0,
+      faces: e.stats ? e.stats.faces : 0,
+      transform: this._transformOf(e)
+    }));
+  }
+  /** Make an object active (single-object commands target it). */
+  setActiveObject(id) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    this._activeObjectId = id;
+    this._lastStats = entry.stats || this._lastStats;
+    this._lastModelName = entry.name;
+    this._dispatchAnimationsEvent(entry);
+    this._container.dispatchEvent(new CustomEvent("objectschange", {
+      detail: { objects: this.listObjects(), activeId: this._activeObjectId }
+    }));
+    return true;
+  }
+  /**
+   * Remove ONE object. If it was active, the most recently added remaining
+   * object becomes active (invariant: non-empty registry ⇒ active entry).
+   */
+  removeObject(id) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    this._disposeEntry(entry);
+    this._objects = this._objects.filter((e) => e.id !== id);
+    if (this._activeObjectId === id) {
+      const next = this._objects[this._objects.length - 1] || null;
+      this._activeObjectId = next ? next.id : null;
+      if (next) {
+        this._lastStats = next.stats || this._lastStats;
+        this._lastModelName = next.name;
+        this._dispatchAnimationsEvent(next);
+      } else {
+        this._lastStats = { vertices: 0, faces: 0, width: 0, height: 0, depth: 0 };
+        this._lastModelName = null;
+        this._dispatchAnimationsEvent(null);
+      }
+    }
+    this._updateSceneRig(this._visibleUnionBox());
+    this._container.dispatchEvent(new CustomEvent("objectschange", {
+      detail: { objects: this.listObjects(), activeId: this._activeObjectId }
+    }));
+    return true;
+  }
+  setObjectVisible(id, visible) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    entry.visible = !!visible;
+    entry.wrapper.visible = entry.visible;
+    this._updateSceneRig(this._visibleUnionBox());
+    return true;
+  }
+  /**
+   * Per-object opacity (1 = opaque). Declarative: stored on the entry and
+   * re-applied after every material swap (render modes, heatmap), so it
+   * survives mode changes. Exports ignore it (viewer state, not asset data).
+   */
+  setObjectOpacity(id, opacity) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    entry.opacity = Math.max(0, Math.min(1, opacity));
+    this._applyEntryOpacity(entry);
+    return true;
+  }
+  _applyEntryOpacity(entry) {
+    const ghost = entry.opacity < 1;
+    entry.model.traverse((child) => {
+      if (!child.isMesh || !child.material) return;
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      for (const m of mats) {
+        if (ghost) {
+          if (m.userData._mvViewerOpacityBackup === void 0) {
+            m.userData._mvViewerOpacityBackup = {
+              opacity: m.opacity,
+              transparent: m.transparent,
+              depthWrite: m.depthWrite
+            };
+          }
+          m.opacity = entry.opacity;
+          m.transparent = true;
+          m.depthWrite = false;
+        } else if (m.userData._mvViewerOpacityBackup !== void 0) {
+          const b = m.userData._mvViewerOpacityBackup;
+          m.opacity = b.opacity;
+          m.transparent = b.transparent;
+          m.depthWrite = b.depthWrite;
+          delete m.userData._mvViewerOpacityBackup;
+        }
+        m.needsUpdate = true;
+      }
+    });
+  }
+  /** Re-apply every entry's declarative opacity (call after material swaps). */
+  _reapplyAllOpacities() {
+    for (const entry of this._objects) {
+      if (entry.opacity < 1) this._applyEntryOpacity(entry);
+    }
+  }
+  /** Placement transform of an object's wrapper (TRS, world = scene space). */
+  _transformOf(entry) {
+    const w = entry.wrapper;
+    const r32 = (v) => Math.round(v * 1e4) / 1e4;
+    return {
+      position: [r32(w.position.x), r32(w.position.y), r32(w.position.z)],
+      quaternion: [
+        r32(w.quaternion.x),
+        r32(w.quaternion.y),
+        r32(w.quaternion.z),
+        r32(w.quaternion.w)
+      ],
+      scale: [r32(w.scale.x), r32(w.scale.y), r32(w.scale.z)]
+    };
+  }
+  getObjectTransform(id) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    return this._transformOf(entry);
+  }
+  /**
+   * Set an object's PLACEMENT (wrapper transform — never baked into vertices).
+   * Accepts position [x,y,z], quaternion [x,y,z,w] OR rotation (Euler degrees
+   * [x,y,z]), scale [x,y,z] or a uniform number. Omitted parts are unchanged.
+   */
+  setObjectTransform(id, { position, quaternion, rotation, scale } = {}) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    const w = entry.wrapper;
+    if (position) w.position.set(position[0], position[1], position[2]);
+    if (quaternion) {
+      w.quaternion.set(quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
+    } else if (rotation) {
+      const d2r = Math.PI / 180;
+      w.rotation.set(rotation[0] * d2r, rotation[1] * d2r, rotation[2] * d2r);
+    }
+    if (scale !== void 0) {
+      if (typeof scale === "number") w.scale.setScalar(scale);
+      else if (scale) w.scale.set(scale[0], scale[1], scale[2]);
+    }
+    w.updateMatrixWorld(true);
+    this._updateSceneRig(this._visibleUnionBox());
+    return this._transformOf(entry);
+  }
+  /** Reset an object's placement to identity (the non-destructive "undo"). */
+  resetObjectTransform(id) {
+    return this.setObjectTransform(id, {
+      position: [0, 0, 0],
+      quaternion: [0, 0, 0, 1],
+      scale: [1, 1, 1]
+    });
+  }
+  /** Frame the union of all visible objects (the whole composed scene). */
+  frameAll() {
+    const box = this._visibleUnionBox();
+    if (!box) return false;
+    this._frameToBox(box);
+    return true;
+  }
+  /**
+   * Serializable scene manifest (version 1). Objects with volatile sources
+   * (drag-drops, revoked object URLs) are EXCLUDED and reported so callers can
+   * warn — persisting a reference that cannot be re-resolved would rot the file.
+   */
+  getSceneManifest() {
+    const objects = [];
+    const skipped = [];
+    for (const e of this._objects) {
+      if (!e.source || e.source.kind === "volatile") {
+        skipped.push(e.name);
+        continue;
+      }
+      objects.push({
+        source: e.source,
+        name: e.name,
+        transform: this._transformOf(e),
+        visible: e.visible,
+        opacity: e.opacity
+      });
+    }
+    return {
+      version: 1,
+      objects,
+      skippedVolatile: skipped,
+      lighting: this.getLightSettings(),
+      environment: this.getEnvironment(),
+      background: this._background
+    };
+  }
   // ==========================================================
   // Animation playback (017) — single source of truth for clips
   // ==========================================================
   /**
-   * Set up the animation mixer for a freshly loaded object and notify the UI.
+   * Set up the animation state for a freshly registered entry and notify the UI.
    *
-   * Only one mixer is active at a time (the current model's). Clips are exposed by
-   * name so the UI can offer a clip selector; the first clip auto-plays to preserve
-   * prior behavior, but the user can pause/scrub/switch. Emits an "animations" event
-   * on the container with the clip list and duration (empty list ⇒ hide controls).
+   * Animation state is PER ENTRY ({mixer, actions, clips, activeAction, playing})
+   * so co-loaded objects keep independent playback. Only the ACTIVE entry's mixer
+   * advances in the render loop — deactivated objects FREEZE mid-pose and resume
+   * where they were when re-activated (no reset). The "animations" event carries
+   * the active entry's clip list (empty list ⇒ hide controls).
    */
-  _setupAnimations(object) {
-    const clips = object && object.animations ? object.animations : [];
-    this._mixers = [];
-    this._animationMixer = null;
-    this._animationActions = [];
-    this._animationClips = clips;
-    this._activeAction = null;
+  _setupAnimationsForEntry(entry) {
+    const clips = entry.model && entry.model.animations ? entry.model.animations : [];
+    entry.animation = null;
     if (clips.length > 0) {
-      const mixer = new AnimationMixer(object);
-      this._animationMixer = mixer;
-      this._mixers.push(mixer);
-      this._animationActions = clips.map((c) => mixer.clipAction(c));
+      const mixer = new AnimationMixer(entry.model);
+      const actions = clips.map((c) => mixer.clipAction(c));
+      entry.animation = {
+        mixer,
+        actions,
+        clips,
+        activeAction: null,
+        playing: false
+      };
       this.playAnimation(0);
     }
+    this._dispatchAnimationsEvent(entry);
+  }
+  /** Emit the animation UI event for an entry (or a null/empty entry). */
+  _dispatchAnimationsEvent(entry) {
+    const clips = entry && entry.animation ? entry.animation.clips : [];
     this._container.dispatchEvent(new CustomEvent("animations", {
       detail: {
         clips: clips.map((c, i) => ({
@@ -41078,53 +41437,66 @@ var Viewer3D = class {
       }
     }));
   }
-  /** True if the current model has at least one animation clip. */
-  hasAnimations() {
-    return this._animationClips && this._animationClips.length > 0;
+  /** The ACTIVE entry's animation state (or null). */
+  get _activeAnimation() {
+    const entry = this._activeEntry();
+    return entry ? entry.animation : null;
   }
-  /** Play the clip at `index` (stops any other), resetting to its start. */
+  /** True if the active object has at least one animation clip. */
+  hasAnimations() {
+    const anim = this._activeAnimation;
+    return !!(anim && anim.clips.length > 0);
+  }
+  /** Play the clip at `index` on the ACTIVE object (stops its other clips). */
   playAnimation(index) {
-    if (!this._animationMixer || !this._animationActions[index]) return;
-    for (const a of this._animationActions) a.stop();
-    const action = this._animationActions[index];
+    const anim = this._activeAnimation;
+    if (!anim || !anim.actions[index]) return;
+    for (const a of anim.actions) a.stop();
+    const action = anim.actions[index];
     action.reset();
     action.paused = false;
     action.play();
-    this._activeAction = action;
-    this._animationPlaying = true;
+    anim.activeAction = action;
+    anim.playing = true;
   }
-  /** Pause or resume the active clip. Returns the new playing state. */
+  /** Pause or resume the active object's clip. Returns the new playing state. */
   toggleAnimationPlay() {
-    if (!this._activeAction) return false;
-    this._activeAction.paused = !this._activeAction.paused;
-    this._animationPlaying = !this._activeAction.paused;
-    return this._animationPlaying;
+    const anim = this._activeAnimation;
+    if (!anim || !anim.activeAction) return false;
+    anim.activeAction.paused = !anim.activeAction.paused;
+    anim.playing = !anim.activeAction.paused;
+    return anim.playing;
   }
   setAnimationPlaying(playing) {
-    if (!this._activeAction) return;
-    this._activeAction.paused = !playing;
-    this._animationPlaying = playing;
+    const anim = this._activeAnimation;
+    if (!anim || !anim.activeAction) return;
+    anim.activeAction.paused = !playing;
+    anim.playing = playing;
   }
-  /** Playback speed multiplier for the active mixer (1 = normal). */
+  /** Playback speed multiplier for the active object's mixer (1 = normal). */
   setAnimationSpeed(multiplier) {
-    if (this._animationMixer) this._animationMixer.timeScale = multiplier;
+    const anim = this._activeAnimation;
+    if (anim && anim.mixer) anim.mixer.timeScale = multiplier;
   }
   /** Current active clip duration in seconds (0 if none). */
   getAnimationDuration() {
-    if (!this._activeAction) return 0;
-    return this._activeAction.getClip().duration;
+    const anim = this._activeAnimation;
+    if (!anim || !anim.activeAction) return 0;
+    return anim.activeAction.getClip().duration;
   }
   /** Current playback time in seconds. */
   getAnimationTime() {
-    return this._activeAction ? this._activeAction.time : 0;
+    const anim = this._activeAnimation;
+    return anim && anim.activeAction ? anim.activeAction.time : 0;
   }
   /** Seek the active clip to `seconds` (pauses so the frame holds). */
   setAnimationTime(seconds) {
-    if (!this._activeAction || !this._animationMixer) return;
-    this._activeAction.paused = true;
-    this._animationPlaying = false;
-    this._activeAction.time = Math.max(0, Math.min(seconds, this.getAnimationDuration()));
-    this._animationMixer.update(0);
+    const anim = this._activeAnimation;
+    if (!anim || !anim.activeAction || !anim.mixer) return;
+    anim.activeAction.paused = true;
+    anim.playing = false;
+    anim.activeAction.time = Math.max(0, Math.min(seconds, this.getAnimationDuration()));
+    anim.mixer.update(0);
   }
   /**
    * Reset all viewer state when loading a new model.
@@ -41142,8 +41514,6 @@ var Viewer3D = class {
     this._keysPressed.clear();
     this._fpvYaw = 0;
     this._fpvPitch = 0;
-    this._modelModified = false;
-    this._modelScale = 1;
     this._lastModelName = null;
     this._lastStats = { vertices: 0, faces: 0, width: 0, height: 0, depth: 0 };
     this._camera.position.set(3, 2.5, 4);
@@ -41160,6 +41530,9 @@ var Viewer3D = class {
     }
     if (this._normalsVisible) {
       this.setNormalsVisible(true);
+    }
+    if (this._renderMode && this._renderMode !== "textured") {
+      this.setRenderMode(this._renderMode);
     }
   }
   /** Dispose of an object and its children recursively */
@@ -41454,11 +41827,7 @@ var Viewer3D = class {
       mouse.x = (e.clientX - rect.left) / rect.width * 2 - 1;
       mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(mouse, this._camera);
-      const meshes = [];
-      this._currentModel.traverse((child) => {
-        if (child.isMesh) meshes.push(child);
-      });
-      const hits = raycaster.intersectObjects(meshes, false);
+      const hits = raycaster.intersectObjects(this._visibleMeshes(), false);
       if (hits.length > 0) {
         const point = hits[0].point;
         this._controls.target.copy(point);
@@ -41500,11 +41869,7 @@ var Viewer3D = class {
       mouse.x = (e.clientX - rect.left) / rect.width * 2 - 1;
       mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(mouse, this._camera);
-      const meshes = [];
-      this._currentModel.traverse((c) => {
-        if (c.isMesh) meshes.push(c);
-      });
-      const hits = raycaster.intersectObjects(meshes, false);
+      const hits = raycaster.intersectObjects(this._visibleMeshes(), false);
       if (hits.length === 0) return;
       this._addMeasurePoint(hits[0].point.clone());
     });
@@ -41552,8 +41917,8 @@ var Viewer3D = class {
     }
   }
   _measureMarkerRadius() {
-    if (!this._currentModel) return 0.02;
-    const box = new Box3().setFromObject(this._currentModel);
+    const box = this._visibleUnionBox();
+    if (!box) return 0.02;
     const size = box.getSize(new Vector3()).length();
     return Math.max(size * 8e-3, 1e-4);
   }
@@ -41827,12 +42192,15 @@ var Viewer3D = class {
     this._controls.update();
     return true;
   }
-  /** Remove the current model and reset viewer state (no model loaded afterwards). */
+  /** Remove EVERY object and reset viewer state (empty scene afterwards). */
   unload() {
-    this._clearModel();
+    this._clearAllObjects();
     this._lastModelName = null;
     this._lastStats = { vertices: 0, faces: 0, width: 0, height: 0, depth: 0 };
-    this._modelScale = 1;
+    this._dispatchAnimationsEvent(null);
+    this._container.dispatchEvent(new CustomEvent("objectschange", {
+      detail: { objects: [], activeId: null }
+    }));
     return true;
   }
   // ==========================================================
@@ -42043,6 +42411,13 @@ var Viewer3D = class {
     const rt = new WebGLRenderTarget(size, size);
     const buf = new Uint8Array(size * size * 4);
     let bestUp = prevUp.clone(), bestScore = -Infinity;
+    const hiddenWrappers = [];
+    for (const e of this._objects) {
+      if (e.id !== this._activeObjectId && e.wrapper.visible) {
+        e.wrapper.visible = false;
+        hiddenWrappers.push(e.wrapper);
+      }
+    }
     try {
       this._currentModel.traverse((c) => {
         if (c.isMesh) {
@@ -42076,6 +42451,7 @@ var Viewer3D = class {
       }
     } finally {
       for (const [c, m] of savedMats) c.material = m;
+      for (const w of hiddenWrappers) w.visible = true;
       scoreMat.dispose();
       rt.dispose();
       r.setRenderTarget(null);
@@ -42224,6 +42600,13 @@ var Viewer3D = class {
         side: DoubleSide
       })]);
     });
+    const hiddenWrappers = [];
+    for (const e of this._objects) {
+      if (e.id !== this._activeObjectId && e.wrapper.visible) {
+        e.wrapper.visible = false;
+        hiddenWrappers.push(e.wrapper);
+      }
+    }
     const raw = [];
     try {
       this.setGridVisible(false);
@@ -42260,6 +42643,7 @@ var Viewer3D = class {
       }
     } finally {
       for (const [child, mat] of savedMats) child.material = mat;
+      for (const w of hiddenWrappers) w.visible = true;
       normalMat.dispose();
       for (const [, m] of albedoMats) m.dispose();
       rt.dispose();
@@ -42363,7 +42747,7 @@ var Viewer3D = class {
    * Original materials are preserved and restored when returning to 'shaded'.
    */
   setRenderMode(mode) {
-    if (!this._currentModel) return false;
+    if (this._objects.length === 0) return false;
     const alias = {
       textured: "textured",
       shaded: "textured",
@@ -42374,43 +42758,44 @@ var Viewer3D = class {
     };
     const m = alias[mode];
     if (!m) return false;
-    this._currentModel.traverse((child) => {
-      if (child.isMesh && child._mvOriginalMaterial) {
-        if (child.material && child.material !== child._mvOriginalMaterial) {
-          (Array.isArray(child.material) ? child.material : [child.material]).forEach((mat) => mat && mat.dispose && mat.dispose());
+    for (const entry of this._objects) {
+      entry.model.traverse((child) => {
+        if (child.isMesh && child._mvOriginalMaterial) {
+          if (child.material && child.material !== child._mvOriginalMaterial) {
+            (Array.isArray(child.material) ? child.material : [child.material]).forEach((mat) => mat && mat.dispose && mat.dispose());
+          }
+          child.material = child._mvOriginalMaterial;
+          delete child._mvOriginalMaterial;
         }
-        child.material = child._mvOriginalMaterial;
-        delete child._mvOriginalMaterial;
-      }
-    });
+      });
+    }
     this.setWireframe(false);
-    if (m === "textured") {
-      this._renderMode = "textured";
+    if (m === "textured" || m === "wireframe") {
+      if (m === "wireframe") this.setWireframe(true);
+      this._renderMode = m;
       this._applyEnvironment();
+      this._reapplyAllOpacities();
       return true;
     }
-    if (m === "wireframe") {
-      this.setWireframe(true);
-      this._renderMode = "wireframe";
-      this._applyEnvironment();
-      return true;
+    for (const entry of this._objects) {
+      entry.model.traverse((child) => {
+        if (!child.isMesh) return;
+        child._mvOriginalMaterial = child.material;
+        if (m === "normals") {
+          child.material = new MeshNormalMaterial({ flatShading: false });
+        } else {
+          child.material = new MeshStandardMaterial({
+            color: 13619926,
+            roughness: 0.85,
+            metalness: 0,
+            side: DoubleSide
+          });
+        }
+      });
     }
-    this._currentModel.traverse((child) => {
-      if (!child.isMesh) return;
-      child._mvOriginalMaterial = child.material;
-      if (m === "normals") {
-        child.material = new MeshNormalMaterial({ flatShading: false });
-      } else {
-        child.material = new MeshStandardMaterial({
-          color: 13619926,
-          roughness: 0.85,
-          metalness: 0,
-          side: DoubleSide
-        });
-      }
-    });
     this._renderMode = m;
     this._applyEnvironment();
+    this._reapplyAllOpacities();
     return true;
   }
   getRenderMode() {
@@ -42445,23 +42830,25 @@ var Viewer3D = class {
       this._clip = null;
       return true;
     }
-    if (!this._currentModel) return false;
+    if (this._objects.length === 0) return false;
     const axis = opts.axis || "camera";
     const t2 = opts.position !== void 0 ? Math.max(0, Math.min(1, opts.position)) : 0.5;
     const flip = !!opts.flip;
-    const box = new Box3().setFromObject(this._currentModel);
-    const center = box.getCenter(new Vector3());
-    const size = box.getSize(new Vector3());
     this._clip = { axis, t: t2, flip };
     r.localClippingEnabled = true;
     r.clippingPlanes = [this._computeClipPlane()];
     return true;
   }
-  /** Build the current clipping plane (called on set and, for 'camera', each frame). */
+  /** Build the current clipping plane (called on set and, for 'camera', each frame).
+   *  Geometry derives from the VISIBLE-SCENE union: the renderer's clipping plane
+   *  cuts every object, so `position: 0.5` must mean "middle of the scene", not
+   *  "middle of whichever object happens to be active" (which would slice
+   *  neighbors at unpredictable places). */
   _computeClipPlane() {
-    if (!this._clip || !this._currentModel) return null;
+    if (!this._clip) return null;
+    const box = this._visibleUnionBox();
+    if (!box) return null;
     const { axis, t: t2, flip } = this._clip;
-    const box = new Box3().setFromObject(this._currentModel);
     const center = box.getCenter(new Vector3());
     const size = box.getSize(new Vector3());
     const sign2 = flip ? -1 : 1;
@@ -42529,7 +42916,10 @@ var Viewer3D = class {
     const round = (v) => Math.round(v * 1e3) / 1e3;
     const pos = this._camera.position;
     const tgt = this._controls.target;
+    const activeAnim = this._activeAnimation;
+    const unionBox = this._visibleUnionBox();
     return {
+      // `model` describes the ACTIVE object (single-object commands target it).
       model: {
         loaded: !!this._currentModel,
         name: this._lastModelName,
@@ -42543,6 +42933,16 @@ var Viewer3D = class {
         bounds: this.getBounds(),
         scale: this._modelScale,
         modified: !!this._modelModified
+      },
+      // Scene composition: every loaded object + which one is active.
+      scene: {
+        objectCount: this._objects.length,
+        activeObjectId: this._activeObjectId,
+        objects: this.listObjects(),
+        bounds: unionBox && !unionBox.isEmpty() ? {
+          min: [round(unionBox.min.x), round(unionBox.min.y), round(unionBox.min.z)],
+          max: [round(unionBox.max.x), round(unionBox.max.y), round(unionBox.max.z)]
+        } : null
       },
       camera: {
         mode: this._navMode,
@@ -42564,8 +42964,8 @@ var Viewer3D = class {
       },
       animation: {
         hasAnimations: this.hasAnimations(),
-        clips: (this._animationClips || []).map((c, i) => c.name || `Clip ${i + 1}`),
-        playing: !!this._animationPlaying,
+        clips: (activeAnim ? activeAnim.clips : []).map((c, i) => c.name || `Clip ${i + 1}`),
+        playing: !!(activeAnim && activeAnim.playing),
         time: round(this.getAnimationTime()),
         duration: round(this.getAnimationDuration())
       },
@@ -43638,20 +44038,21 @@ var Viewer3D = class {
    * Auto-frame the camera to fit the model in view.
    */
   _frameModel(object) {
-    this._preFocusClip = null;
     const box = new Box3().setFromObject(object);
+    this._frameToBox(box);
+  }
+  /**
+   * Frame an arbitrary world-space box: size the scene rig to it and move the
+   * camera to the classic 3/4 view. `frame_all` passes the visible-scene union;
+   * single-object loads pass the object's own box (unchanged behavior).
+   */
+  _frameToBox(box) {
+    if (!box || box.isEmpty()) return;
+    this._preFocusClip = null;
+    this._updateSceneRig(box);
     const size = box.getSize(new Vector3());
     const center = box.getCenter(new Vector3());
-    this._modelCenter.copy(center);
     const maxDim = Math.max(size.x, size.y, size.z);
-    this._keyLightRadius = maxDim * 3;
-    const axisSize = maxDim * 0.5;
-    this._buildAxisHelper(axisSize);
-    this._axisGroup.position.copy(center);
-    this._axisGroup.position.y = box.min.y;
-    const minY = box.min.y;
-    this._ground.position.y = minY;
-    this._rebuildGrid(maxDim, minY);
     const fov2 = this._camera.fov * (Math.PI / 180);
     let distance = maxDim / (2 * Math.tan(fov2 / 2));
     distance *= 1.8;
@@ -43661,20 +44062,45 @@ var Viewer3D = class {
     );
     this._controls.target.copy(center);
     this._controls.update();
-    const shadowPad = maxDim * 2;
-    this._keyLight.shadow.camera.left = -shadowPad;
-    this._keyLight.shadow.camera.right = shadowPad;
-    this._keyLight.shadow.camera.top = shadowPad;
-    this._keyLight.shadow.camera.bottom = -shadowPad;
-    this._keyLight.shadow.camera.far = distance * 4;
-    this._keyLight.shadow.camera.updateProjectionMatrix();
-    this._updateKeyLightPosition();
-    if (this._scene.fog) this._scene.fog.density = 0.5 / maxDim;
     this._camera.near = distance * 1e-3;
     this._camera.far = distance * 10;
     this._camera.updateProjectionMatrix();
     this._initialCameraPos.copy(this._camera.position);
     this._initialTarget.copy(this._controls.target);
+  }
+  /**
+   * Size the NON-CAMERA scene rig (lights, shadows, ground, grid, axes, fog,
+   * nav speed) to a world-space box, without touching the user's camera.
+   * Called by framing AND whenever composition changes (add/remove/transform/
+   * visibility) so shadows/lights never go stale as objects move around
+   * (a placed object outside the last-framed footprint would silently lose
+   * its shadow otherwise).
+   */
+  _updateSceneRig(box) {
+    if (!box || box.isEmpty()) return;
+    const size = box.getSize(new Vector3());
+    const center = box.getCenter(new Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    this._modelCenter.copy(center);
+    this._keyLightRadius = maxDim * 3;
+    const axisSize = maxDim * 0.5;
+    this._buildAxisHelper(axisSize);
+    this._axisGroup.position.copy(center);
+    this._axisGroup.position.y = box.min.y;
+    const minY = box.min.y;
+    this._ground.position.y = minY;
+    this._rebuildGrid(maxDim, minY);
+    const fov2 = this._camera.fov * (Math.PI / 180);
+    const frameDistance = maxDim / (2 * Math.tan(fov2 / 2)) * 1.8;
+    const shadowPad = maxDim * 2;
+    this._keyLight.shadow.camera.left = -shadowPad;
+    this._keyLight.shadow.camera.right = shadowPad;
+    this._keyLight.shadow.camera.top = shadowPad;
+    this._keyLight.shadow.camera.bottom = -shadowPad;
+    this._keyLight.shadow.camera.far = frameDistance * 4;
+    this._keyLight.shadow.camera.updateProjectionMatrix();
+    this._updateKeyLightPosition();
+    if (this._scene.fog) this._scene.fog.density = 0.5 / maxDim;
     this._moveSpeed = maxDim * 1.5;
   }
   // ==========================================
@@ -43733,10 +44159,11 @@ var Viewer3D = class {
    * @param {number} scale - Scale factor (e.g., 0.25, 0.5, 1.0, 2.0)
    */
   setModelScale(scale) {
-    if (this._currentModel) {
-      this._currentModel.scale.setScalar(scale);
+    const entry = this._activeEntry();
+    if (entry) {
+      entry.model.scale.setScalar(scale);
+      entry.modelScale = scale;
     }
-    this._modelScale = scale;
   }
   getModelScale() {
     return this._modelScale;
@@ -43746,8 +44173,8 @@ var Viewer3D = class {
    * @param {boolean} enabled - Whether to show wireframe
    */
   setWireframe(enabled) {
-    if (this._currentModel) {
-      this._currentModel.traverse((child) => {
+    for (const entry of this._objects) {
+      entry.model.traverse((child) => {
         if (child.isMesh && child.material) {
           const mats = Array.isArray(child.material) ? child.material : [child.material];
           mats.forEach((m) => {
@@ -43771,19 +44198,21 @@ var Viewer3D = class {
    */
   setNormalsVisible(enabled) {
     this._clearNormalsHelpers();
-    if (enabled && this._currentModel) {
+    if (enabled && this._objects.length > 0) {
       this._normalsHelpers = [];
-      const box = new Box3().setFromObject(this._currentModel);
-      const size = box.getSize(new Vector3());
-      const maxDim = Math.max(size.x, size.y, size.z);
-      const normalLength = maxDim * 0.02;
-      this._currentModel.traverse((child) => {
-        if (child.isMesh && child.geometry) {
-          const helper = new VertexNormalsHelper(child, normalLength, 4513279);
-          this._scene.add(helper);
-          this._normalsHelpers.push(helper);
-        }
-      });
+      for (const entry of this._visibleEntries()) {
+        const box = new Box3().setFromObject(entry.wrapper);
+        const size = box.getSize(new Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z) || 1;
+        const normalLength = maxDim * 0.02;
+        entry.model.traverse((child) => {
+          if (child.isMesh && child.geometry) {
+            const helper = new VertexNormalsHelper(child, normalLength, 4513279);
+            this._scene.add(helper);
+            this._normalsHelpers.push(helper);
+          }
+        });
+      }
     }
     this._normalsVisible = enabled;
   }
@@ -43820,8 +44249,9 @@ var Viewer3D = class {
    * Rebuilds the grid with the current model dimensions and new colors.
    */
   _updateGridColors() {
-    if (!this._grid || !this._currentModel) return;
-    const box = new Box3().setFromObject(this._currentModel);
+    if (!this._grid) return;
+    const box = this._visibleUnionBox();
+    if (!box) return;
     const size = box.getSize(new Vector3());
     const maxDim = Math.max(size.x, size.y, size.z);
     this._rebuildGrid(maxDim, box.min.y);
@@ -43857,35 +44287,48 @@ var Viewer3D = class {
    * Save a snapshot of all geometry positions + mesh transforms
    * so we can restore them on Reset.
    */
-  _saveOriginalGeometry() {
-    this._originalState = [];
-    if (!this._currentModel) return;
-    this._currentModel.updateMatrixWorld(true);
-    this._currentModel.traverse((child) => {
+  /** Per-entry geometry snapshot (Reset support). See _insertEntry. */
+  _saveOriginalGeometryForEntry(entry) {
+    const items = [];
+    entry.model.updateMatrixWorld(true);
+    entry.model.traverse((child) => {
       if (child.isMesh && child.geometry) {
         const posAttr = child.geometry.attributes.position;
-        this._originalState.push({
+        items.push({
           mesh: child,
+          geometry: child.geometry,
           positions: new Float32Array(posAttr.array),
-          // Save mesh local transform
           position: child.position.clone(),
           rotation: child.rotation.clone(),
           scale: child.scale.clone()
         });
       }
     });
-    this._originalRootPos = this._currentModel.position.clone();
-    this._originalRootRot = this._currentModel.rotation.clone();
-    this._originalRootScale = this._currentModel.scale.clone();
+    entry.originalState = {
+      items,
+      rootPos: entry.model.position.clone(),
+      rootRot: entry.model.rotation.clone(),
+      rootScale: entry.model.scale.clone()
+    };
   }
   /**
-   * Reset model to its original state (undo all recenter/orient/scale).
-   * Does NOT touch the camera.
+   * Reset the ACTIVE object's geometry to its last snapshot (undo transform
+   * bakes: center/ground/rotate/orient/scale). Does NOT touch the camera or
+   * the object's PLACEMENT (wrapper) — use reset_object_transform for that.
+   *
+   * The snapshot is RETAKEN after geometry-replacing ops (simplify, recompute
+   * normals): restoring a positions array into a differently-sized geometry is
+   * exactly the long-standing "offset is out of bounds" crash, so Reset honestly
+   * undoes bakes since the last geometry-modifying operation instead.
    */
   resetModel() {
-    if (!this._currentModel || !this._originalState) return;
-    for (const saved of this._originalState) {
+    const entry = this._activeEntry();
+    if (!entry || !entry.originalState) return;
+    const snap = entry.originalState;
+    for (const saved of snap.items) {
+      if (saved.mesh.geometry !== saved.geometry) continue;
       const posAttr = saved.mesh.geometry.attributes.position;
+      if (!posAttr || posAttr.array.length !== saved.positions.length) continue;
       posAttr.array.set(saved.positions);
       posAttr.needsUpdate = true;
       saved.mesh.position.copy(saved.position);
@@ -43896,29 +44339,47 @@ var Viewer3D = class {
       saved.mesh.geometry.computeBoundingBox();
       saved.mesh.geometry.computeBoundingSphere();
     }
-    this._currentModel.position.copy(this._originalRootPos);
-    this._currentModel.rotation.copy(this._originalRootRot);
-    this._currentModel.scale.copy(this._originalRootScale);
-    this._modelModified = false;
+    entry.model.position.copy(snap.rootPos);
+    entry.model.rotation.copy(snap.rootRot);
+    entry.model.scale.copy(snap.rootScale);
+    entry.modified = false;
   }
   /**
-   * Bake all world transforms into geometry vertex positions.
-   * After this, all mesh and root transforms are identity,
-   * and vertices contain actual world-space coordinates.
+   * Bake the active object's transforms into vertex positions, RELATIVE TO ITS
+   * WRAPPER. After this, all transforms inside the model subtree are identity
+   * and vertices are wrapper-local coordinates.
+   *
+   * The wrapper (scene placement, backlog 042) is deliberately excluded: baking
+   * matrixWorld outright would fold the user's scene placement into the asset's
+   * geometry — exports and manifests would then double-apply it.
+   *
+   * Refuses skinned models: zeroing bone-carrying nodes corrupts the bind pose
+   * (documented pre-existing failure — now blocked instead of inherited).
    */
   _bakeWorldTransforms() {
-    this._currentModel.updateMatrixWorld(true);
-    this._currentModel.traverse((child) => {
+    const entry = this._activeEntry();
+    if (!entry) return;
+    if (entry.skinned) {
+      throw new Error(
+        "Transform baking (center/ground/rotate/orient/simplify) is not supported for skinned/animated models \u2014 it corrupts the bind pose. Use set_object_transform to place the object instead."
+      );
+    }
+    const model = entry.model;
+    entry.wrapper.updateMatrixWorld(true);
+    const wrapperInv = new Matrix4().copy(entry.wrapper.matrixWorld).invert();
+    const local = new Matrix4();
+    model.traverse((child) => {
       if (child.isMesh && child.geometry) {
         this._dequantizeVectorAttributes(child.geometry);
-        child.geometry.applyMatrix4(child.matrixWorld);
+        local.multiplyMatrices(wrapperInv, child.matrixWorld);
+        child.geometry.applyMatrix4(local);
         child.position.set(0, 0, 0);
         child.rotation.set(0, 0, 0);
         child.scale.set(1, 1, 1);
         child.updateMatrix();
       }
     });
-    this._currentModel.traverse((node) => {
+    model.traverse((node) => {
       if (!node.isMesh) {
         node.position.set(0, 0, 0);
         node.rotation.set(0, 0, 0);
@@ -43926,6 +44387,27 @@ var Viewer3D = class {
         node.updateMatrix();
       }
     });
+    model.updateMatrixWorld(true);
+  }
+  /**
+   * Wrapper-LOCAL bounding box of the active object AFTER a bake (all subtree
+   * transforms identity ⇒ geometry coordinates ARE wrapper-local). Box math for
+   * bake ops must use this, never Box3.setFromObject (which is world space and
+   * would fold the wrapper placement back into the offsets — under a rotated
+   * wrapper, ground would shift along the wrong axes).
+   */
+  _localBakedBox() {
+    const entry = this._activeEntry();
+    const box = new Box3();
+    if (!entry) return box;
+    entry.model.traverse((child) => {
+      if (!child.isMesh || !child.geometry) return;
+      child.geometry.computeBoundingBox();
+      if (child.geometry.boundingBox && !child.geometry.boundingBox.isEmpty()) {
+        box.union(child.geometry.boundingBox);
+      }
+    });
+    return box;
   }
   /**
    * Replace integer/normalized vector attributes (position/normal/tangent) with plain
@@ -43956,7 +44438,7 @@ var Viewer3D = class {
   recenterModel() {
     if (!this._currentModel) return;
     this._bakeWorldTransforms();
-    const box = new Box3().setFromObject(this._currentModel);
+    const box = this._localBakedBox();
     const center = box.getCenter(new Vector3());
     this._currentModel.traverse((child) => {
       if (child.isMesh && child.geometry) {
@@ -43981,7 +44463,7 @@ var Viewer3D = class {
   groundModel() {
     if (!this._currentModel) return;
     this._bakeWorldTransforms();
-    const box = new Box3().setFromObject(this._currentModel);
+    const box = this._localBakedBox();
     const center = box.getCenter(new Vector3());
     const offsetX = -center.x;
     const offsetZ = -center.z;
@@ -44038,9 +44520,13 @@ var Viewer3D = class {
     });
     this._modelModified = true;
     if (hadNormals) this.setNormalsVisible(true);
-    const stats = this._computeStats(this._currentModel);
-    this._lastStats = stats;
-    this._onInfoUpdate(stats);
+    const entry = this._activeEntry();
+    if (entry) {
+      this._saveOriginalGeometryForEntry(entry);
+      entry.stats = this._computeStats(entry.model);
+      this._lastStats = entry.stats;
+      this._onInfoUpdate(entry.stats);
+    }
   }
   /**
    * Return a geometry safe to feed to mergeVertices/SimplifyModifier: a clone with
@@ -44065,7 +44551,7 @@ var Viewer3D = class {
     if (axis === "x") rotMatrix.makeRotationX(angleRad);
     else if (axis === "y") rotMatrix.makeRotationY(angleRad);
     else if (axis === "z") rotMatrix.makeRotationZ(angleRad);
-    const box = new Box3().setFromObject(this._currentModel);
+    const box = this._localBakedBox();
     const center = box.getCenter(new Vector3());
     this._currentModel.traverse((child) => {
       if (child.isMesh && child.geometry) {
@@ -44331,6 +44817,14 @@ var Viewer3D = class {
     }
     this._modelModified = true;
     if (hadNormals) this.setNormalsVisible(true);
+    const entry = this._activeEntry();
+    if (entry) {
+      this._saveOriginalGeometryForEntry(entry);
+      entry.stats = this._computeStats(entry.model);
+      this._lastStats = entry.stats;
+      this._onInfoUpdate(entry.stats);
+      return { before: totalBefore, after: totalAfter };
+    }
     const stats = this._computeStats(this._currentModel);
     this._onInfoUpdate(stats);
     return { before: totalBefore, after: totalAfter };
@@ -44489,10 +44983,17 @@ var Viewer3D = class {
       this._scene.background = null;
       r.setClearColor(0, 0);
     }
+    const hiddenHelpers = (this._captureHidden || []).filter((o) => o.visible);
+    hiddenHelpers.forEach((o) => {
+      o.visible = false;
+    });
     this._refreshCameraClip();
     if (useComposer) this._composer.render();
     else r.render(this._scene, cam);
     const dataUrl = r.domElement.toDataURL("image/png");
+    hiddenHelpers.forEach((o) => {
+      o.visible = true;
+    });
     this._scene.background = prevBg;
     this._scene.fog = prevFog;
     r.setClearColor(prevClear, prevClearAlpha);
@@ -44534,11 +45035,29 @@ var Viewer3D = class {
    * writes pixel data without implicit flips.
    */
   async exportAsGLB() {
-    if (!this._currentModel) return null;
+    if (this._objects.length === 0) return null;
     const exportScene = new Scene();
     exportScene.name = "MeshVault";
-    this._currentModel.updateMatrixWorld(true);
-    this._currentModel.traverse((child) => {
+    for (const entry of this._visibleEntries()) {
+      entry.wrapper.updateMatrixWorld(true);
+      entry.model.traverse((child) => {
+        this._appendExportMesh(exportScene, child);
+      });
+    }
+    if (exportScene.children.length === 0) return null;
+    const exporter = new GLTFExporter();
+    return new Promise((resolve, reject) => {
+      exporter.parse(
+        exportScene,
+        (result) => resolve(result),
+        (error) => reject(error),
+        { binary: true, maxTextureSize: 4096 }
+      );
+    });
+  }
+  /** Clone one mesh into the export scene with glTF-safe geometry + material. */
+  _appendExportMesh(exportScene, child) {
+    {
       if (!child.isMesh || !child.geometry) return;
       const srcGeo = child.geometry;
       const geo = new BufferGeometry();
@@ -44563,7 +45082,8 @@ var Viewer3D = class {
         geo.setAttribute("tangent", new BufferAttribute(tanArr, 4));
       }
       if (srcGeo.index) geo.setIndex(srcGeo.index.clone());
-      const srcMat = Array.isArray(child.material) ? child.material[0] : child.material;
+      const stash = child._mvOriginalMaterial || child.material;
+      const srcMat = Array.isArray(stash) ? stash[0] : stash;
       const matParams = {
         roughness: srcMat.roughness !== void 0 ? srcMat.roughness : 0.5,
         metalness: srcMat.metalness !== void 0 ? srcMat.metalness : 0,
@@ -44592,8 +45112,11 @@ var Viewer3D = class {
           geo.setAttribute("uv2", new BufferAttribute(uv2Arr, 2));
         }
       }
-      if (srcMat.opacity !== void 0 && srcMat.opacity < 1) {
-        matParams.opacity = srcMat.opacity;
+      const backup = srcMat.userData && srcMat.userData._mvViewerOpacityBackup;
+      const authoredOpacity = backup ? backup.opacity : srcMat.opacity;
+      const authoredTransparent = backup ? backup.transparent : srcMat.transparent;
+      if (authoredOpacity !== void 0 && authoredOpacity < 1 && authoredTransparent) {
+        matParams.opacity = authoredOpacity;
         matParams.transparent = true;
       }
       const mesh = new Mesh(geo, new MeshStandardMaterial(matParams));
@@ -44601,17 +45124,7 @@ var Viewer3D = class {
       mesh.matrixAutoUpdate = false;
       mesh.matrix.copy(child.matrixWorld);
       exportScene.add(mesh);
-    });
-    if (exportScene.children.length === 0) return null;
-    const exporter = new GLTFExporter();
-    return new Promise((resolve, reject) => {
-      exporter.parse(
-        exportScene,
-        (result) => resolve(result),
-        (error) => reject(error),
-        { binary: true, maxTextureSize: 4096 }
-      );
-    });
+    }
   }
   /**
    * Prepare a texture for GLB export.
@@ -44687,8 +45200,9 @@ var Viewer3D = class {
       if (this._controls.enabled) {
         this._controls.update();
       }
-      for (const mixer of this._mixers) {
-        mixer.update(delta);
+      const activeAnim = this._activeAnimation;
+      if (activeAnim && activeAnim.mixer) {
+        activeAnim.mixer.update(delta);
       }
       if (this._clip && this._clip.axis === "camera") {
         const plane = this._computeClipPlane();
@@ -44812,6 +45326,30 @@ function describeScene(viewer, opts = {}) {
       grid: state.display.grid
     }
   };
+  if (state.scene && state.scene.objectCount > 1) {
+    const objs = state.scene.objects || [];
+    report.scene = {
+      objectCount: state.scene.objectCount,
+      activeObjectId: state.scene.activeObjectId,
+      // Scene-wide totals come from the per-entry loader stats (cheap); the
+      // ACTIVE object's numbers above are live-recomputed as before.
+      totalVertices: objs.reduce((s, o) => s + (o.vertices || 0), 0),
+      totalFaces: objs.reduce((s, o) => s + (o.faces || 0), 0),
+      bounds: state.scene.bounds,
+      objects: objs.slice(0, maxItems).map((o) => ({
+        id: o.id,
+        name: o.name,
+        active: o.active,
+        visible: o.visible,
+        opacity: o.opacity,
+        vertices: o.vertices,
+        faces: o.faces,
+        position: o.transform ? o.transform.position : null
+      })),
+      truncated: Math.max(0, objs.length - maxItems),
+      note: "model/meshes/materials/issues above describe the ACTIVE object only. Use set_active_object to inspect another; frame_all to view the whole scene."
+    };
+  }
   if (opts.views) {
     try {
       const ranked = viewer.scoreViews({ size: 96 });
@@ -45139,6 +45677,11 @@ function buildSummary(r) {
   const m = r.model;
   const d = m.dimensions;
   const parts = [];
+  if (r.scene && r.scene.objectCount > 1) {
+    parts.push(
+      `Composed scene: ${r.scene.objectCount} objects, ${r.scene.totalFaces.toLocaleString()} faces total. ACTIVE object described below (others summarized in \`scene.objects\`).`
+    );
+  }
   parts.push(
     `"${m.name}": ${m.meshCount} mesh${m.meshCount === 1 ? "" : "es"}, ${m.materialCount} material${m.materialCount === 1 ? "" : "s"}${m.textureCount ? ` (${m.textureCount} texture${m.textureCount === 1 ? "" : "s"})` : " (untextured)"}, ${m.triangles.toLocaleString()} triangles, ${d.width}\xD7${d.height}\xD7${d.depth} units (${m.sizeHint}).`
   );
@@ -45613,6 +46156,10 @@ var ViewerControlAPI = class {
         else return { error: `Param '${key}' must be a boolean (got ${JSON.stringify(v)})` };
       } else if (spec.type === "array") {
         if (!Array.isArray(v)) return { error: `Param '${key}' must be an array` };
+      } else if (spec.type === "object") {
+        if (typeof v !== "object" || v === null || Array.isArray(v)) {
+          return { error: `Param '${key}' must be an object` };
+        }
       } else if (spec.type === "string") {
         v = String(v);
       }
@@ -45810,26 +46357,139 @@ var ViewerControlAPI = class {
       },
       // --- loading ---
       load: {
-        description: "Load a 3D model from a URL. Extension is inferred if omitted. relatedFiles lists companion files (MTL, textures) for multi-file formats \u2014 entries may be relative to the model's URL directory (e.g. ['model.mtl', 'textures/diffuse.png']) or absolute refs the host's resolver understands.",
+        description: "Load a 3D model from a URL \u2014 REPLACES the entire scene, including a composed multi-object scene (use add_model to compose without clearing). Extension is inferred if omitted. relatedFiles lists companion files (MTL, textures) for multi-file formats \u2014 entries may be relative to the model's URL directory (e.g. ['model.mtl', 'textures/diffuse.png']) or absolute refs the host's resolver understands.",
         params: {
           url: { type: "string", required: true },
           extension: { type: "string" },
           name: { type: "string" },
-          relatedFiles: { type: "array" }
+          relatedFiles: { type: "array" },
+          source: { type: "object" }
         },
         handler: async (p) => {
           const ext = p.extension || "." + p.url.split(".").pop().split("?")[0].toLowerCase();
           const stats = await v.loadModel(p.url, ext, {
             name: p.name,
-            relatedFiles: p.relatedFiles || []
+            relatedFiles: p.relatedFiles || [],
+            source: p.source
           });
           this._emit("loaded", { name: v.getState().model.name, stats });
           return { stats, state: v.getState() };
         }
       },
       unload: {
-        description: "Remove the current model and reset the viewer to an empty scene.",
+        description: "Remove EVERY object and reset the viewer to an empty scene. To remove one object of a composed scene, use remove_object.",
         handler: () => v.unload()
+      },
+      // --- scene composition (backlog 042) ---
+      add_model: {
+        description: "Co-load a model into the CURRENT scene without clearing it (composition). `load` REPLACES the whole scene; add_model ADDS. The new object becomes ACTIVE (single-object commands target it). Optional transform places it immediately: {position:[x,y,z], quaternion:[x,y,z,w] OR rotation:[x,y,z] Euler degrees, scale:[x,y,z] or uniform number}. frame:false keeps the current camera instead of framing the whole scene.",
+        params: {
+          url: { type: "string", required: true },
+          extension: { type: "string" },
+          name: { type: "string" },
+          relatedFiles: { type: "array" },
+          source: { type: "object" },
+          transform: { type: "object" },
+          frame: { type: "boolean", default: true }
+        },
+        handler: async (p) => {
+          const ext = p.extension || "." + p.url.split(".").pop().split("?")[0].toLowerCase();
+          const result = await v.addModel(p.url, ext, {
+            name: p.name,
+            relatedFiles: p.relatedFiles || [],
+            source: p.source,
+            transform: p.transform,
+            frame: p.frame
+          });
+          this._emit("object_added", { objectId: result.objectId, name: v.getState().model.name });
+          return { stats: result, objectId: result.objectId, scene: v.getState().scene };
+        }
+      },
+      list_objects: {
+        description: "List every object in the scene: id, name, active flag, visibility, opacity, per-object placement transform, source. Object ids are the handles for all set_object_*/remove_object commands.",
+        handler: () => ({ objects: v.listObjects(), activeObjectId: v._activeObjectId })
+      },
+      set_active_object: {
+        description: "Make an object ACTIVE: all single-object commands (describe_scene, get_mesh_stats, transforms, focus, animation) target the active object. The scene keeps rendering all visible objects.",
+        params: { id: { type: "number", required: true } },
+        requiresModel: true,
+        handler: (p) => {
+          v.setActiveObject(p.id);
+          return { activeObjectId: p.id, state: v.getState().scene };
+        }
+      },
+      remove_object: {
+        description: "Remove ONE object from the scene (disposes its GPU resources). If it was active, the most recently added remaining object becomes active.",
+        params: { id: { type: "number", required: true } },
+        requiresModel: true,
+        handler: (p) => {
+          v.removeObject(p.id);
+          return { removed: p.id, scene: v.getState().scene };
+        }
+      },
+      set_object_visible: {
+        description: "Show/hide one object (it stays in the scene and in manifests).",
+        params: {
+          id: { type: "number", required: true },
+          visible: { type: "boolean", required: true }
+        },
+        requiresModel: true,
+        handler: (p) => {
+          v.setObjectVisible(p.id, p.visible);
+          return true;
+        }
+      },
+      set_object_opacity: {
+        description: "Per-object opacity (0..1; 1 = opaque). Viewer display state only \u2014 ghosting for overlays/comparisons; exports keep the authored materials.",
+        params: {
+          id: { type: "number", required: true },
+          opacity: { type: "number", required: true, min: 0, max: 1 }
+        },
+        requiresModel: true,
+        handler: (p) => {
+          v.setObjectOpacity(p.id, p.opacity);
+          return true;
+        }
+      },
+      set_object_transform: {
+        description: "Place an object in the scene: set its wrapper transform (NEVER baked into vertices \u2014 placement lives in the scene/manifest, not the asset). position [x,y,z]; quaternion [x,y,z,w] OR rotation [x,y,z] Euler degrees; scale [x,y,z] or uniform number. Omitted parts are unchanged. Returns the resulting transform.",
+        params: {
+          id: { type: "number", required: true },
+          position: { type: "array" },
+          quaternion: { type: "array" },
+          rotation: { type: "array" },
+          scale: { type: "number" },
+          scale_xyz: { type: "array" }
+        },
+        requiresModel: true,
+        handler: (p) => v.setObjectTransform(p.id, {
+          position: p.position,
+          quaternion: p.quaternion,
+          rotation: p.rotation,
+          scale: p.scale_xyz !== void 0 ? p.scale_xyz : p.scale
+        })
+      },
+      get_object_transform: {
+        description: "Read an object's placement transform {position, quaternion, scale}.",
+        params: { id: { type: "number", required: true } },
+        requiresModel: true,
+        handler: (p) => v.getObjectTransform(p.id)
+      },
+      reset_object_transform: {
+        description: "Reset an object's placement to identity (undo scene positioning; the asset's geometry is untouched).",
+        params: { id: { type: "number", required: true } },
+        requiresModel: true,
+        handler: (p) => v.resetObjectTransform(p.id)
+      },
+      frame_all: {
+        description: "Frame the WHOLE composed scene (union of all visible objects). Camera presets/orbit/frame target the ACTIVE object; use this before scene-wide screenshots.",
+        requiresModel: true,
+        handler: () => v.frameAll()
+      },
+      get_scene_manifest: {
+        description: "Serializable scene manifest (version 1): per-object source + placement transform + visibility/opacity, plus scene lighting/environment/background. Objects with volatile sources (drag-drops) are excluded and listed in skippedVolatile. Save it as a .mvscene file; rebuild with load + add_model or the app/MCP scene loaders.",
+        requiresModel: true,
+        handler: () => v.getSceneManifest()
       },
       // --- camera ---
       get_camera: {

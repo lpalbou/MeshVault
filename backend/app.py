@@ -179,7 +179,7 @@ async def lifespan(app: FastAPI):
 
 # --- FastAPI App ---
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 app = FastAPI(
     title="MeshVault",
@@ -211,6 +211,15 @@ screenshot_router, screenshot_service = _create_screenshot_router(
     token_supplier=lambda: security_config.token if security_config.require_auth else "",
 )
 app.include_router(screenshot_router)
+
+# Scene manifest persistence (POST /api/scene/save, GET /api/scene/load) — same
+# dependency-injection pattern; contract per the 042 adversarial review (sanitized
+# name + forced .mvscene suffix + overwrite protection + size/object caps).
+from backend.scene_api import create_router as _create_scene_router
+app.include_router(_create_scene_router(
+    guarded_path=lambda path, **kw: _guarded_path(path, **kw),
+    sanitize_component=PathGuard.sanitize_component,
+))
 
 # Serve frontend static files
 # Works both in development (project root) and when installed via pip

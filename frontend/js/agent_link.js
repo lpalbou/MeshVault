@@ -36,6 +36,7 @@ export class AgentLink {
     constructor(deps) {
         this._fileBrowser = deps.fileBrowser;
         this._openAsset = deps.openAsset;
+        this._openScene = deps.openScene || null;
         this._applyCamera = deps.applyCamera;
         this._getLoadedAssetKey = deps.getLoadedAssetKey;
         this._toast = deps.showToast;
@@ -55,10 +56,15 @@ export class AgentLink {
      */
     async boot() {
         const params = new URLSearchParams(window.location.search);
+        const scene = params.get("scene");
         const path = params.get("path");
         const dir = params.get("dir");
 
         try {
+            if (scene && this._openScene) {
+                await this._openScene(scene);
+                return true;
+            }
             if (path) {
                 await this.openPath(path, null);
                 return true;
@@ -82,6 +88,12 @@ export class AgentLink {
      * related_files), select it, load it, then optionally apply a camera pose.
      */
     async openPath(pathOrKey, camera = null) {
+        // Scene manifests get their own loader (they rebuild a whole composition).
+        if (/\.mvscene$/i.test(pathOrKey) && this._openScene) {
+            await this._openScene(pathOrKey);
+            return;
+        }
+
         const archive = pathOrKey.match(ARCHIVE_KEY_RE);
 
         // A path that is neither an archive member nor a model file is treated as
@@ -124,6 +136,11 @@ export class AgentLink {
      */
     syncDir(dirPath) {
         this._replaceQuery(`?dir=${encodeURIComponent(dirPath)}`);
+    }
+
+    /** Reflect a loaded/saved scene file in the URL (deep-linkable composition). */
+    syncScene(scenePath) {
+        this._replaceQuery(`?scene=${encodeURIComponent(scenePath)}`);
     }
 
     _replaceQuery(query) {

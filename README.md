@@ -38,6 +38,7 @@ Older FBX files (version < 7000) are auto-converted to OBJ by a built-in zero-de
 | **3D Viewer** | PBR rendering, SSAO, soft shadows, ACES tone mapping, orbit + FPV drone navigation |
 | **Toolbar** | Screenshot, grid, axes (XYZ), wireframe, normals viz, texture folder picker, material inspector, lights, measure |
 | **Animation** | Play/pause, scrub, speed, clip selector for animated GLB/FBX/Collada |
+| **Scene composition** | Co-load multiple objects, place them with a gizmo (move/rotate/scale), objects panel, save/load `.mvscene` scenes, export the composition as one GLB |
 | **Transforms** | Reload, reset, center, ground, auto-orient (PCA), rotate ±90° per axis |
 | **Mesh Ops** | Simplify (edge collapse LOD, UV-preserving), recompute smooth normals (UV-preserving) |
 | **Textures** | Folder picker with smart matching (convention + fuzzy name) for separated texture packs |
@@ -77,10 +78,12 @@ lightest to most integrated:
    reference served at [`/llms.txt`](frontend/llms.txt) and
    [`/llms-full.txt`](frontend/llms-full.txt).
 2. **MCP server** — `meshvault-mcp` lets Claude Desktop / Claude Code / Cursor drive a
-   headless viewer natively through 9 tools: load a model by **URL or local file path**
-   (multi-file OBJ/FBX assets load textured), describe it, run any viewer command, and
-   get PNG screenshots back as image content (`best_view: true` gives a one-call hero
-   shot; `preset: "studio"` pins lighting so renders are comparable across sessions).
+   headless viewer natively through 11 tools: load a model by **URL or local file path**
+   (multi-file OBJ/FBX assets load textured), compose multi-object scenes
+   (`add: true` + placement commands, persisted as `.mvscene` via
+   `save_scene`/`load_scene`), describe it, run any viewer command, and get PNG
+   screenshots back as image content (`best_view: true` gives a one-call hero shot;
+   `preset: "studio"` pins lighting so renders are comparable across sessions).
    With the app running, co-review works both ways: `open_in_app` pushes the agent's
    model + camera into the human's browser tab, and `get_app_state` reads back what
    the human is looking at. Setup: [docs/mcp.md](docs/mcp.md).

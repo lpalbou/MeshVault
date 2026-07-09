@@ -95,7 +95,7 @@ export class FileBrowser {
      * @param {Function} onStatusUpdate - Callback to update status text
      * @param {Function} [onExportRequest] - Callback when user requests export from context menu
      */
-    constructor(container, pathDisplay, onAssetSelect, onStatusUpdate, onExportRequest = null, thumbnailer = null, onCompareRequest = null) {
+    constructor(container, pathDisplay, onAssetSelect, onStatusUpdate, onExportRequest = null, thumbnailer = null, onCompareRequest = null, onAddToScene = null) {
         this._container = container;
         this._pathDisplay = pathDisplay;
         this._onAssetSelect = onAssetSelect;
@@ -103,6 +103,8 @@ export class FileBrowser {
         this._onExportRequest = onExportRequest;
         // Optional: "Compare to loaded model" context action (backlog 041).
         this._onCompareRequest = onCompareRequest;
+        // Optional: "Add to scene" context action (composition, backlog 042).
+        this._onAddToScene = onAddToScene;
         // Optional lazy thumbnail renderer for grid view (backlog 014).
         this._thumbnailer = thumbnailer;
         this._thumbObserver = null;
@@ -694,8 +696,18 @@ export class FileBrowser {
             });
         }
 
+        // Scene manifests are not geometry: no compose/compare actions for them.
+        const isScene = asset && String(asset.extension).toLowerCase() === ".mvscene";
+
+        // --- Add to the current scene (composition, backlog 042) ---
+        if (asset && !isScene && typeof this._onAddToScene === "function") {
+            this._addContextMenuItem(menu, "Add to scene", () => {
+                this._onAddToScene(asset);
+            });
+        }
+
         // --- Compare to the currently loaded model (backlog 041) ---
-        if (asset && typeof this._onCompareRequest === "function") {
+        if (asset && !isScene && typeof this._onCompareRequest === "function") {
             this._addContextMenuItem(menu, "Compare to loaded model…", () => {
                 this._onCompareRequest(asset);
             });

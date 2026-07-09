@@ -4,6 +4,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · [Semantic Ve
 
 ---
 
+## [0.6.0] — 2026-07-09
+
+### Added
+- **Scene composition — multi-object scenes (backlog 042, stages 1–4)**. MeshVault grows from "one model at a time" into a scene workbench, designed against two adversarial reviews (architecture + product/security) whose must-fix lists are all implemented:
+  - **Object registry (viewer core)**: N objects, each wrapped in a placement `Group`; the `_currentModel` getter keeps all ~90 single-object code paths and helper modules working unchanged against the ACTIVE object (invariant: a non-empty scene always has one). Replace-vs-add load semantics with a scene-generation counter (in-flight adds can never resurrect a replaced scene, adds never cancel each other); per-entry animation (deactivated objects freeze and resume without reset), reset snapshots (retaken after simplify/recompute — fixes the long-standing "reset after simplify" crash), scale/modified flags, and texture-janitor membership checks (co-loaded objects keep their janitor pass).
+  - **Placement vs geometry, kept honest**: `set_object_transform`/gizmo edits live ONLY on the wrapper (never baked, saved in manifests); vertex bakes (center/ground/rotate/auto-orient/simplify) operate wrapper-LOCALLY so a placed object's geometry never absorbs its scene position, and are refused for skinned models (they corrupt bind poses). The scene rig (lights, shadows, grid, fog, nav speed) re-sizes from the visible-union box on every composition change, so placed objects never lose shadows; clipping planes and measurement raycasts/markers are scene-wide; best-view/upright scoring hides non-active objects.
+  - **App UX**: right-click → "Add to scene"; objects panel (select / show-hide / opacity / reset placement / remove) that auto-surfaces on composition; TransformControls gizmo (move/rotate/scale, T/R/S keys, screen-constant size, hidden in all captures); click-to-select in the viewport; dirty-scene confirm before any replace (sidebar click, drag-drop, scene open); scene save via `.mvscene` with overwrite protocol.
+  - **Persistence**: version-1 `.mvscene` manifests (per-object source descriptor file/archive/url + TRS transform + visibility/opacity + scene lighting/environment/background). `POST /api/scene/save` follows the repo's safe-write contract (sanitized name, FORCED suffix, 409 without `overwrite`, only-scene-files overwritten, 128-object/2 MB caps); `GET /api/scene/load` validates and returns the manifest, objects re-resolve client-side through the guarded asset routes (per-object degradation, no server-side probe loop). Scene files list in the browser, load on click, and deep-link via `?scene=`. Volatile sources (drag-drops) are excluded from manifests and reported.
+  - **Agent/MCP parity**: `load_model {add:true, transform}` composes headless; new `save_scene`/`load_scene` tools (11 total); new viewer commands `add_model`, `list_objects`, `set_active_object`, `set_object_transform/visible/opacity`, `get_object_transform`, `reset_object_transform`, `remove_object`, `frame_all`, `get_scene_manifest`; `describe_scene`/`get_state` gain additive `scene` sections with explicit active-object framing so agents never mistake one object's counts for the scene; `compare_models` refuses to destroy a composed scene (save first). GLB export includes every visible object with placements applied, reading AUTHORED materials (never clay/ghost viewer overrides).
+  - E2E-verified in both front-ends: browser (compose → place → gizmo → save → `?scene=` reload → 2.6 MB composed GLB export) and MCP (compose with transforms → save → wipe → `load_scene` → placements exact to 4 decimals → framed scene render under a pinned preset).
+
+### Fixed
+- **Reset-after-simplify crash** ("offset is out of bounds", documented since 2026-07-06): reset snapshots are per-object and retaken after geometry-replacing operations; Reset now honestly undoes transform bakes since the last geometry-modifying op.
+- **Exports no longer bake viewer display state into assets**: GLB export reads the stashed original materials (a clay-mode export previously shipped clay materials) and authored opacity (a ghosted object no longer exports as transparent).
+
 ## [0.5.0] — 2026-07-09
 
 ### Fixed

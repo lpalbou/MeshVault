@@ -271,3 +271,45 @@ images (FBX embedded textures) — the general rule was hiding in that special c
   target. `_pid_alive()` therefore probes only when `os.name == "posix"` and trusts
   the file elsewhere (worst case: the connection error surfaces the problem, as
   before). `PermissionError` from the probe means "exists, other user" → alive.
+
+---
+
+## Scene composition: the registry invariants that keep 90 single-object paths alive
+
+Backlog 042 turned the single-model viewer into an N-object registry without touching
+~90 existing `_currentModel` references. The load-bearing rules (each one broke in
+design review before it could break in production):
+
+- **`_currentModel` is a DERIVED getter over the registry** (active entry's model);
+  there is deliberately no setter — every mutation goes through
+  load/add/remove/clear. The one write site everyone forgets is the CONSTRUCTOR
+  (`this._currentModel = null` throws on a getter-only accessor in strict mode).
+  Identity checks change meaning under a getter: the texture janitor's
+  `_currentModel === object` became a registry-membership test, or co-loaded
+  objects lose their texture cleanup.
+- **Placement lives on a wrapper `Group` OUTSIDE the model subtree; vertex bakes are
+  wrapper-RELATIVE** (`wrapperInv × child.matrixWorld`) and all their box/pivot math
+  must be wrapper-LOCAL (post-bake, subtree transforms are identity ⇒ geometry
+  bounding boxes ARE local coords). `Box3.setFromObject` is world-space and folds
+  the wrapper back in — under a rotated/scaled wrapper, ground/center would shift
+  along wrong axes by wrong amounts. Bakes REFUSE skinned models (zeroing bone
+  nodes corrupts the bind pose — pre-existing documented corruption, now blocked).
+- **One monotonic load id cannot express add-vs-replace.** Replaces race replaces
+  (newest wins, `_loadId`); adds race the SCENE (generation counter bumped only by
+  clear-all: an in-flight add discards itself if the scene was replaced, and adds
+  never cancel each other).
+- **Per-entry state or stale-state bugs multiply by N**: animation ({mixer, actions,
+  clips} per entry; only the ACTIVE entry's mixer advances → others freeze and
+  resume without reset), reset snapshots (retaken after geometry-REPLACING ops —
+  restoring an old positions array into a new differently-sized geometry was the
+  "offset is out of bounds" crash), modelScale/modified as derived getters.
+- **Exports read the material STASH, never the live material** (`_mvOriginalMaterial
+  || material`) and authored opacity (per-object ghosting records a backup in
+  `userData._mvViewerOpacityBackup`): a clay-render export was shipping clay
+  materials into GLB assets — viewer display state must never enter asset data.
+- **Everything sized "to the model" must size to the visible-UNION box** (lights,
+  shadow camera, grid, fog, nav speed, clip planes, measure markers/raycasts), and
+  it must refresh on composition changes (add/remove/transform/visibility), not just
+  on framing — or placed objects silently lose shadows. Offscreen SCORING passes
+  (best view, auto-upright) must hide non-active wrappers or neighbors contaminate
+  the edge-energy scores.

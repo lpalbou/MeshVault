@@ -73,13 +73,14 @@ var FileBrowser = class {
    * @param {Function} onStatusUpdate - Callback to update status text
    * @param {Function} [onExportRequest] - Callback when user requests export from context menu
    */
-  constructor(container, pathDisplay, onAssetSelect, onStatusUpdate, onExportRequest = null, thumbnailer = null, onCompareRequest = null) {
+  constructor(container, pathDisplay, onAssetSelect, onStatusUpdate, onExportRequest = null, thumbnailer = null, onCompareRequest = null, onAddToScene = null) {
     this._container = container;
     this._pathDisplay = pathDisplay;
     this._onAssetSelect = onAssetSelect;
     this._onStatusUpdate = onStatusUpdate;
     this._onExportRequest = onExportRequest;
     this._onCompareRequest = onCompareRequest;
+    this._onAddToScene = onAddToScene;
     this._thumbnailer = thumbnailer;
     this._thumbObserver = null;
     this._currentPath = null;
@@ -535,7 +536,13 @@ ${inner}`;
         this._onExportRequest(asset);
       });
     }
-    if (asset && typeof this._onCompareRequest === "function") {
+    const isScene = asset && String(asset.extension).toLowerCase() === ".mvscene";
+    if (asset && !isScene && typeof this._onAddToScene === "function") {
+      this._addContextMenuItem(menu, "Add to scene", () => {
+        this._onAddToScene(asset);
+      });
+    }
+    if (asset && !isScene && typeof this._onCompareRequest === "function") {
       this._addContextMenuItem(menu, "Compare to loaded model\u2026", () => {
         this._onCompareRequest(asset);
       });
@@ -20545,6 +20552,295 @@ var Curve = class {
     return this;
   }
 };
+var CylinderGeometry = class _CylinderGeometry extends BufferGeometry {
+  constructor(radiusTop = 1, radiusBottom = 1, height = 1, radialSegments = 32, heightSegments = 1, openEnded = false, thetaStart = 0, thetaLength = Math.PI * 2) {
+    super();
+    this.type = "CylinderGeometry";
+    this.parameters = {
+      radiusTop,
+      radiusBottom,
+      height,
+      radialSegments,
+      heightSegments,
+      openEnded,
+      thetaStart,
+      thetaLength
+    };
+    const scope = this;
+    radialSegments = Math.floor(radialSegments);
+    heightSegments = Math.floor(heightSegments);
+    const indices = [];
+    const vertices = [];
+    const normals = [];
+    const uvs = [];
+    let index = 0;
+    const indexArray = [];
+    const halfHeight = height / 2;
+    let groupStart = 0;
+    generateTorso();
+    if (openEnded === false) {
+      if (radiusTop > 0) generateCap(true);
+      if (radiusBottom > 0) generateCap(false);
+    }
+    this.setIndex(indices);
+    this.setAttribute("position", new Float32BufferAttribute(vertices, 3));
+    this.setAttribute("normal", new Float32BufferAttribute(normals, 3));
+    this.setAttribute("uv", new Float32BufferAttribute(uvs, 2));
+    function generateTorso() {
+      const normal = new Vector3();
+      const vertex2 = new Vector3();
+      let groupCount = 0;
+      const slope = (radiusBottom - radiusTop) / height;
+      for (let y = 0; y <= heightSegments; y++) {
+        const indexRow = [];
+        const v = y / heightSegments;
+        const radius = v * (radiusBottom - radiusTop) + radiusTop;
+        for (let x = 0; x <= radialSegments; x++) {
+          const u2 = x / radialSegments;
+          const theta = u2 * thetaLength + thetaStart;
+          const sinTheta = Math.sin(theta);
+          const cosTheta = Math.cos(theta);
+          vertex2.x = radius * sinTheta;
+          vertex2.y = -v * height + halfHeight;
+          vertex2.z = radius * cosTheta;
+          vertices.push(vertex2.x, vertex2.y, vertex2.z);
+          normal.set(sinTheta, slope, cosTheta).normalize();
+          normals.push(normal.x, normal.y, normal.z);
+          uvs.push(u2, 1 - v);
+          indexRow.push(index++);
+        }
+        indexArray.push(indexRow);
+      }
+      for (let x = 0; x < radialSegments; x++) {
+        for (let y = 0; y < heightSegments; y++) {
+          const a = indexArray[y][x];
+          const b = indexArray[y + 1][x];
+          const c = indexArray[y + 1][x + 1];
+          const d = indexArray[y][x + 1];
+          if (radiusTop > 0 || y !== 0) {
+            indices.push(a, b, d);
+            groupCount += 3;
+          }
+          if (radiusBottom > 0 || y !== heightSegments - 1) {
+            indices.push(b, c, d);
+            groupCount += 3;
+          }
+        }
+      }
+      scope.addGroup(groupStart, groupCount, 0);
+      groupStart += groupCount;
+    }
+    function generateCap(top) {
+      const centerIndexStart = index;
+      const uv = new Vector2();
+      const vertex2 = new Vector3();
+      let groupCount = 0;
+      const radius = top === true ? radiusTop : radiusBottom;
+      const sign2 = top === true ? 1 : -1;
+      for (let x = 1; x <= radialSegments; x++) {
+        vertices.push(0, halfHeight * sign2, 0);
+        normals.push(0, sign2, 0);
+        uvs.push(0.5, 0.5);
+        index++;
+      }
+      const centerIndexEnd = index;
+      for (let x = 0; x <= radialSegments; x++) {
+        const u2 = x / radialSegments;
+        const theta = u2 * thetaLength + thetaStart;
+        const cosTheta = Math.cos(theta);
+        const sinTheta = Math.sin(theta);
+        vertex2.x = radius * sinTheta;
+        vertex2.y = halfHeight * sign2;
+        vertex2.z = radius * cosTheta;
+        vertices.push(vertex2.x, vertex2.y, vertex2.z);
+        normals.push(0, sign2, 0);
+        uv.x = cosTheta * 0.5 + 0.5;
+        uv.y = sinTheta * 0.5 * sign2 + 0.5;
+        uvs.push(uv.x, uv.y);
+        index++;
+      }
+      for (let x = 0; x < radialSegments; x++) {
+        const c = centerIndexStart + x;
+        const i = centerIndexEnd + x;
+        if (top === true) {
+          indices.push(i, i + 1, c);
+        } else {
+          indices.push(i + 1, i, c);
+        }
+        groupCount += 3;
+      }
+      scope.addGroup(groupStart, groupCount, top === true ? 1 : 2);
+      groupStart += groupCount;
+    }
+  }
+  copy(source) {
+    super.copy(source);
+    this.parameters = Object.assign({}, source.parameters);
+    return this;
+  }
+  static fromJSON(data) {
+    return new _CylinderGeometry(data.radiusTop, data.radiusBottom, data.height, data.radialSegments, data.heightSegments, data.openEnded, data.thetaStart, data.thetaLength);
+  }
+};
+var PolyhedronGeometry = class _PolyhedronGeometry extends BufferGeometry {
+  constructor(vertices = [], indices = [], radius = 1, detail = 0) {
+    super();
+    this.type = "PolyhedronGeometry";
+    this.parameters = {
+      vertices,
+      indices,
+      radius,
+      detail
+    };
+    const vertexBuffer = [];
+    const uvBuffer = [];
+    subdivide(detail);
+    applyRadius(radius);
+    generateUVs();
+    this.setAttribute("position", new Float32BufferAttribute(vertexBuffer, 3));
+    this.setAttribute("normal", new Float32BufferAttribute(vertexBuffer.slice(), 3));
+    this.setAttribute("uv", new Float32BufferAttribute(uvBuffer, 2));
+    if (detail === 0) {
+      this.computeVertexNormals();
+    } else {
+      this.normalizeNormals();
+    }
+    function subdivide(detail2) {
+      const a = new Vector3();
+      const b = new Vector3();
+      const c = new Vector3();
+      for (let i = 0; i < indices.length; i += 3) {
+        getVertexByIndex(indices[i + 0], a);
+        getVertexByIndex(indices[i + 1], b);
+        getVertexByIndex(indices[i + 2], c);
+        subdivideFace(a, b, c, detail2);
+      }
+    }
+    function subdivideFace(a, b, c, detail2) {
+      const cols = detail2 + 1;
+      const v = [];
+      for (let i = 0; i <= cols; i++) {
+        v[i] = [];
+        const aj = a.clone().lerp(c, i / cols);
+        const bj = b.clone().lerp(c, i / cols);
+        const rows = cols - i;
+        for (let j = 0; j <= rows; j++) {
+          if (j === 0 && i === cols) {
+            v[i][j] = aj;
+          } else {
+            v[i][j] = aj.clone().lerp(bj, j / rows);
+          }
+        }
+      }
+      for (let i = 0; i < cols; i++) {
+        for (let j = 0; j < 2 * (cols - i) - 1; j++) {
+          const k = Math.floor(j / 2);
+          if (j % 2 === 0) {
+            pushVertex(v[i][k + 1]);
+            pushVertex(v[i + 1][k]);
+            pushVertex(v[i][k]);
+          } else {
+            pushVertex(v[i][k + 1]);
+            pushVertex(v[i + 1][k + 1]);
+            pushVertex(v[i + 1][k]);
+          }
+        }
+      }
+    }
+    function applyRadius(radius2) {
+      const vertex2 = new Vector3();
+      for (let i = 0; i < vertexBuffer.length; i += 3) {
+        vertex2.x = vertexBuffer[i + 0];
+        vertex2.y = vertexBuffer[i + 1];
+        vertex2.z = vertexBuffer[i + 2];
+        vertex2.normalize().multiplyScalar(radius2);
+        vertexBuffer[i + 0] = vertex2.x;
+        vertexBuffer[i + 1] = vertex2.y;
+        vertexBuffer[i + 2] = vertex2.z;
+      }
+    }
+    function generateUVs() {
+      const vertex2 = new Vector3();
+      for (let i = 0; i < vertexBuffer.length; i += 3) {
+        vertex2.x = vertexBuffer[i + 0];
+        vertex2.y = vertexBuffer[i + 1];
+        vertex2.z = vertexBuffer[i + 2];
+        const u2 = azimuth(vertex2) / 2 / Math.PI + 0.5;
+        const v = inclination(vertex2) / Math.PI + 0.5;
+        uvBuffer.push(u2, 1 - v);
+      }
+      correctUVs();
+      correctSeam();
+    }
+    function correctSeam() {
+      for (let i = 0; i < uvBuffer.length; i += 6) {
+        const x0 = uvBuffer[i + 0];
+        const x1 = uvBuffer[i + 2];
+        const x2 = uvBuffer[i + 4];
+        const max2 = Math.max(x0, x1, x2);
+        const min = Math.min(x0, x1, x2);
+        if (max2 > 0.9 && min < 0.1) {
+          if (x0 < 0.2) uvBuffer[i + 0] += 1;
+          if (x1 < 0.2) uvBuffer[i + 2] += 1;
+          if (x2 < 0.2) uvBuffer[i + 4] += 1;
+        }
+      }
+    }
+    function pushVertex(vertex2) {
+      vertexBuffer.push(vertex2.x, vertex2.y, vertex2.z);
+    }
+    function getVertexByIndex(index, vertex2) {
+      const stride = index * 3;
+      vertex2.x = vertices[stride + 0];
+      vertex2.y = vertices[stride + 1];
+      vertex2.z = vertices[stride + 2];
+    }
+    function correctUVs() {
+      const a = new Vector3();
+      const b = new Vector3();
+      const c = new Vector3();
+      const centroid = new Vector3();
+      const uvA = new Vector2();
+      const uvB = new Vector2();
+      const uvC = new Vector2();
+      for (let i = 0, j = 0; i < vertexBuffer.length; i += 9, j += 6) {
+        a.set(vertexBuffer[i + 0], vertexBuffer[i + 1], vertexBuffer[i + 2]);
+        b.set(vertexBuffer[i + 3], vertexBuffer[i + 4], vertexBuffer[i + 5]);
+        c.set(vertexBuffer[i + 6], vertexBuffer[i + 7], vertexBuffer[i + 8]);
+        uvA.set(uvBuffer[j + 0], uvBuffer[j + 1]);
+        uvB.set(uvBuffer[j + 2], uvBuffer[j + 3]);
+        uvC.set(uvBuffer[j + 4], uvBuffer[j + 5]);
+        centroid.copy(a).add(b).add(c).divideScalar(3);
+        const azi = azimuth(centroid);
+        correctUV(uvA, j + 0, a, azi);
+        correctUV(uvB, j + 2, b, azi);
+        correctUV(uvC, j + 4, c, azi);
+      }
+    }
+    function correctUV(uv, stride, vector, azimuth2) {
+      if (azimuth2 < 0 && uv.x === 1) {
+        uvBuffer[stride] = uv.x - 1;
+      }
+      if (vector.x === 0 && vector.z === 0) {
+        uvBuffer[stride] = azimuth2 / 2 / Math.PI + 0.5;
+      }
+    }
+    function azimuth(vector) {
+      return Math.atan2(vector.z, -vector.x);
+    }
+    function inclination(vector) {
+      return Math.atan2(-vector.y, Math.sqrt(vector.x * vector.x + vector.z * vector.z));
+    }
+  }
+  copy(source) {
+    super.copy(source);
+    this.parameters = Object.assign({}, source.parameters);
+    return this;
+  }
+  static fromJSON(data) {
+    return new _PolyhedronGeometry(data.vertices, data.indices, data.radius, data.details);
+  }
+};
 var Earcut = {
   triangulate: function(data, holeIndices, dim = 2) {
     const hasHoles = holeIndices && holeIndices.length;
@@ -20983,6 +21279,65 @@ function addContour(vertices, contour) {
     vertices.push(contour[i].y);
   }
 }
+var OctahedronGeometry = class _OctahedronGeometry extends PolyhedronGeometry {
+  constructor(radius = 1, detail = 0) {
+    const vertices = [
+      1,
+      0,
+      0,
+      -1,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      -1,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      -1
+    ];
+    const indices = [
+      0,
+      2,
+      4,
+      0,
+      4,
+      3,
+      0,
+      3,
+      5,
+      0,
+      5,
+      2,
+      1,
+      2,
+      5,
+      1,
+      5,
+      3,
+      1,
+      3,
+      4,
+      1,
+      4,
+      2
+    ];
+    super(vertices, indices, radius, detail);
+    this.type = "OctahedronGeometry";
+    this.parameters = {
+      radius,
+      detail
+    };
+  }
+  static fromJSON(data) {
+    return new _OctahedronGeometry(data.radius, data.detail);
+  }
+};
 var SphereGeometry = class _SphereGeometry extends BufferGeometry {
   constructor(radius = 1, widthSegments = 32, heightSegments = 16, phiStart = 0, phiLength = Math.PI * 2, thetaStart = 0, thetaLength = Math.PI) {
     super();
@@ -21051,6 +21406,66 @@ var SphereGeometry = class _SphereGeometry extends BufferGeometry {
   }
   static fromJSON(data) {
     return new _SphereGeometry(data.radius, data.widthSegments, data.heightSegments, data.phiStart, data.phiLength, data.thetaStart, data.thetaLength);
+  }
+};
+var TorusGeometry = class _TorusGeometry extends BufferGeometry {
+  constructor(radius = 1, tube = 0.4, radialSegments = 12, tubularSegments = 48, arc = Math.PI * 2) {
+    super();
+    this.type = "TorusGeometry";
+    this.parameters = {
+      radius,
+      tube,
+      radialSegments,
+      tubularSegments,
+      arc
+    };
+    radialSegments = Math.floor(radialSegments);
+    tubularSegments = Math.floor(tubularSegments);
+    const indices = [];
+    const vertices = [];
+    const normals = [];
+    const uvs = [];
+    const center = new Vector3();
+    const vertex2 = new Vector3();
+    const normal = new Vector3();
+    for (let j = 0; j <= radialSegments; j++) {
+      for (let i = 0; i <= tubularSegments; i++) {
+        const u2 = i / tubularSegments * arc;
+        const v = j / radialSegments * Math.PI * 2;
+        vertex2.x = (radius + tube * Math.cos(v)) * Math.cos(u2);
+        vertex2.y = (radius + tube * Math.cos(v)) * Math.sin(u2);
+        vertex2.z = tube * Math.sin(v);
+        vertices.push(vertex2.x, vertex2.y, vertex2.z);
+        center.x = radius * Math.cos(u2);
+        center.y = radius * Math.sin(u2);
+        normal.subVectors(vertex2, center).normalize();
+        normals.push(normal.x, normal.y, normal.z);
+        uvs.push(i / tubularSegments);
+        uvs.push(j / radialSegments);
+      }
+    }
+    for (let j = 1; j <= radialSegments; j++) {
+      for (let i = 1; i <= tubularSegments; i++) {
+        const a = (tubularSegments + 1) * j + i - 1;
+        const b = (tubularSegments + 1) * (j - 1) + i - 1;
+        const c = (tubularSegments + 1) * (j - 1) + i;
+        const d = (tubularSegments + 1) * j + i;
+        indices.push(a, b, d);
+        indices.push(b, c, d);
+      }
+    }
+    this.setIndex(indices);
+    this.setAttribute("position", new Float32BufferAttribute(vertices, 3));
+    this.setAttribute("normal", new Float32BufferAttribute(normals, 3));
+    this.setAttribute("uv", new Float32BufferAttribute(uvs, 2));
+  }
+  copy(source) {
+    super.copy(source);
+    this.parameters = Object.assign({}, source.parameters);
+    return this;
+  }
+  static fromJSON(data) {
+    return new _TorusGeometry(data.radius, data.tube, data.radialSegments, data.tubularSegments, data.arc);
   }
 };
 var ShadowMaterial = class extends Material {
@@ -41755,13 +42170,14 @@ var Viewer3D = class {
     this._onInfoUpdate = onInfoUpdate || (() => {
     });
     this._animationId = null;
-    this._currentModel = null;
-    this._mixers = [];
+    this._objects = [];
+    this._activeObjectId = null;
+    this._nextObjectId = 1;
+    this._sceneGeneration = 0;
     this._clock = new Clock();
     this._resolveResource = options.resolveResource || ((ref) => `/api/asset/related?path=${encodeURIComponent(ref)}`);
     this._assetBaseUrl = options.assetBaseUrl != null ? options.assetBaseUrl : "/static/";
     this._background = "#0d0d1a";
-    this._modelScale = 1;
     this._lastModelName = null;
     this._lastStats = { vertices: 0, faces: 0, width: 0, height: 0, depth: 0 };
     this._trackedListeners = [];
@@ -41790,6 +42206,79 @@ var Viewer3D = class {
     this._resizeObserver = new ResizeObserver(() => this._onResize());
     this._resizeObserver.observe(this._container);
   }
+  // ==========================================================
+  // Object registry — scene composition core (backlog 042)
+  // ==========================================================
+  /**
+   * The ACTIVE object's model — a derived view over the registry.
+   *
+   * This getter is the backward-compatibility seam: every pre-registry
+   * single-object code path (and the describe_scene/mesh_stats/sample_points/
+   * heatmap helpers) reads `viewer._currentModel` and now transparently
+   * operates on the active entry. There is deliberately NO setter — the
+   * registry is the single source of truth and all mutations go through
+   * loadModel/addModel/removeObject/_clearAllObjects.
+   */
+  get _currentModel() {
+    const entry = this._activeEntry();
+    return entry ? entry.model : null;
+  }
+  /** Active entry's uniform scale (compat view for getState/legacy readers). */
+  get _modelScale() {
+    const entry = this._activeEntry();
+    return entry ? entry.modelScale : 1;
+  }
+  /** Active entry's modified flag (compat view; bake/mesh ops set it per entry). */
+  get _modelModified() {
+    const entry = this._activeEntry();
+    return entry ? entry.modified : false;
+  }
+  set _modelModified(value) {
+    const entry = this._activeEntry();
+    if (entry) entry.modified = !!value;
+  }
+  _activeEntry() {
+    if (this._activeObjectId == null) return null;
+    return this._objects.find((e) => e.id === this._activeObjectId) || null;
+  }
+  _entryById(id) {
+    return this._objects.find((e) => e.id === id) || null;
+  }
+  _visibleEntries() {
+    return this._objects.filter((e) => e.visible);
+  }
+  /** Union world-space box of all VISIBLE objects (null when empty/none visible). */
+  _visibleUnionBox() {
+    let union = null;
+    for (const entry of this._visibleEntries()) {
+      entry.wrapper.updateMatrixWorld(true);
+      const box = new Box3().setFromObject(entry.wrapper);
+      if (box.isEmpty()) continue;
+      union = union ? union.union(box) : box;
+    }
+    return union;
+  }
+  /** All meshes of all visible objects (raycast targets: pivot pick, measure, select). */
+  _visibleMeshes() {
+    const meshes = [];
+    for (const entry of this._visibleEntries()) {
+      entry.model.traverse((child) => {
+        if (child.isMesh) meshes.push(child);
+      });
+    }
+    return meshes;
+  }
+  /** The registry entry owning a mesh/object node, or null. */
+  _entryForNode(node) {
+    for (const entry of this._objects) {
+      let found = false;
+      entry.model.traverse((child) => {
+        if (child === node) found = true;
+      });
+      if (found) return entry;
+    }
+    return null;
+  }
   /**
    * Load a 3D model from a URL.
    *
@@ -41803,79 +42292,153 @@ var Viewer3D = class {
    */
   async loadModel(url, extension, options = {}) {
     const thisLoadId = ++this._loadId;
-    const ext = extension.toLowerCase();
-    this._modelBaseUrl = this._computeModelBaseUrl(url);
-    let object;
-    try {
-      if (ext === ".obj") {
-        object = await this._loadOBJ(url, options);
-      } else if (ext === ".fbx") {
-        object = await this._loadFBX(url, options);
-      } else if (ext === ".gltf" || ext === ".glb") {
-        object = await this._loadGLTF(url, options);
-      } else if (ext === ".stl") {
-        object = await this._loadSTL(url);
-      } else if (ext === ".ply") {
-        object = await this._loadPLY(url);
-      } else if (ext === ".dae") {
-        object = await this._loadCollada(url);
-      } else if (ext === ".3mf") {
-        object = await this._load3MF(url);
-      } else if (ext === ".usdz") {
-        object = await this._loadUSDZ(url);
-      } else {
-        throw new Error(`Unsupported format: ${ext}`);
-      }
-    } catch (loadErr) {
-      console.error(`Failed to load ${ext} model:`, loadErr);
-      throw loadErr;
-    }
+    const object = await this._parseModel(url, extension, options);
     if (thisLoadId !== this._loadId) {
       this._disposeObject(object);
       return { vertices: 0, faces: 0 };
     }
-    this._clearModel();
+    this._clearAllObjects();
     this._resetViewerState();
+    const entry = this._insertEntry(object, url, extension, options);
+    this._frameModel(object);
+    return entry.stats;
+  }
+  /**
+   * Co-load a model into the CURRENT scene (composition — does not clear).
+   * The new object becomes active. Returns stats + the new objectId.
+   *
+   * Concurrency: captures the scene generation; if a replace/unload happens
+   * while parsing, the add discards itself (never resurrects a cleared scene).
+   * Concurrent adds never invalidate each other.
+   */
+  async addModel(url, extension, options = {}) {
+    const generation = this._sceneGeneration;
+    const object = await this._parseModel(url, extension, options);
+    if (generation !== this._sceneGeneration) {
+      this._disposeObject(object);
+      return { vertices: 0, faces: 0, discarded: true };
+    }
+    const entry = this._insertEntry(object, url, extension, options);
+    if (options.transform) {
+      this.setObjectTransform(entry.id, options.transform);
+    }
+    if (options.frame !== false) this.frameAll();
+    else this._updateSceneRig(this._visibleUnionBox());
+    return { ...entry.stats, objectId: entry.id };
+  }
+  /** Fetch + parse a model WITHOUT touching the scene (shared by load/add). */
+  async _parseModel(url, extension, options = {}) {
+    const ext = extension.toLowerCase();
+    this._modelBaseUrl = this._computeModelBaseUrl(url);
+    try {
+      if (ext === ".obj") {
+        return await this._loadOBJ(url, options);
+      } else if (ext === ".fbx") {
+        return await this._loadFBX(url, options);
+      } else if (ext === ".gltf" || ext === ".glb") {
+        return await this._loadGLTF(url, options);
+      } else if (ext === ".stl") {
+        return await this._loadSTL(url);
+      } else if (ext === ".ply") {
+        return await this._loadPLY(url);
+      } else if (ext === ".dae") {
+        return await this._loadCollada(url);
+      } else if (ext === ".3mf") {
+        return await this._load3MF(url);
+      } else if (ext === ".usdz") {
+        return await this._loadUSDZ(url);
+      }
+      throw new Error(`Unsupported format: ${ext}`);
+    } catch (loadErr) {
+      console.error(`Failed to load ${ext} model:`, loadErr);
+      throw loadErr;
+    }
+  }
+  /**
+   * Register a parsed model as a scene object: wrap it in a placement Group,
+   * make it active, and run the full per-object setup (materials, animations,
+   * snapshots, persistent display settings, texture janitor, stats).
+   */
+  _insertEntry(object, url, extension, options = {}) {
     this._enhanceModel(object);
-    this._scene.add(object);
-    this._currentModel = object;
+    const id = this._nextObjectId++;
+    const wrapper = new Group();
+    wrapper.name = `mv_object_${id}`;
+    wrapper.add(object);
+    this._scene.add(wrapper);
+    const nameSource = options.name || options.sourcePath || url || "";
+    const name = String(nameSource).split(/[/\\]/).pop().split("?")[0] || `object_${id}`;
+    const source = options.source || (options.sourcePath ? { kind: "file", path: options.sourcePath } : { kind: "volatile" });
+    let skinned = false;
+    object.traverse((child) => {
+      if (child.isSkinnedMesh) skinned = true;
+    });
+    const entry = {
+      id,
+      name,
+      wrapper,
+      model: object,
+      source,
+      visible: true,
+      opacity: 1,
+      modelScale: 1,
+      modified: false,
+      skinned,
+      originalState: null,
+      animation: null,
+      stats: null
+    };
+    this._objects.push(entry);
+    this._activeObjectId = id;
     setTimeout(() => {
-      if (this._currentModel === object) this._sanitizeObjectTextures(object);
+      if (this._objects.some((e) => e.model === object)) {
+        this._sanitizeObjectTextures(object);
+      }
     }, 8e3);
-    this._setupAnimations(object);
-    this._saveOriginalGeometry();
+    this._setupAnimationsForEntry(entry);
+    this._saveOriginalGeometryForEntry(entry);
     this._applySceneSettings();
     this._applyEnvironment();
-    this._frameModel(object);
-    const stats = this._computeStats(object);
-    this._lastStats = stats;
-    const nameSource = options.name || options.sourcePath || url || "";
-    this._lastModelName = String(nameSource).split(/[/\\]/).pop().split("?")[0] || "model";
-    this._onInfoUpdate(stats);
-    return stats;
+    entry.stats = this._computeStats(object);
+    this._lastStats = entry.stats;
+    this._lastModelName = name;
+    this._onInfoUpdate(entry.stats);
+    this._container.dispatchEvent(new CustomEvent("objectschange", {
+      detail: { objects: this.listObjects(), activeId: this._activeObjectId }
+    }));
+    return entry;
   }
-  /** Remove the current model from the scene */
-  _clearModel() {
-    if (this._currentModel) {
-      this._currentModel.traverse((child) => {
-        if (child.isMesh && child._mvOriginalMaterial) {
-          const override = child.material;
-          child.material = child._mvOriginalMaterial;
-          delete child._mvOriginalMaterial;
-          if (override && override !== child.material) {
-            (Array.isArray(override) ? override : [override]).forEach((m) => m && m.dispose && m.dispose());
-          }
+  /**
+   * Dispose ONE registry entry: restore original materials first (render-mode
+   * overrides / heatmaps stash them on _mvOriginalMaterial — disposing the
+   * override alone would leak the originals' GPU textures), then dispose the
+   * model and remove its wrapper. Per-entry snapshots/animations are dropped
+   * so removed objects never pin geometry copies in memory.
+   */
+  _disposeEntry(entry) {
+    entry.model.traverse((child) => {
+      if (child.isMesh && child._mvOriginalMaterial) {
+        const override = child.material;
+        child.material = child._mvOriginalMaterial;
+        delete child._mvOriginalMaterial;
+        if (override && override !== child.material) {
+          (Array.isArray(override) ? override : [override]).forEach((m) => m && m.dispose && m.dispose());
         }
-      });
-      this._scene.remove(this._currentModel);
-      this._disposeObject(this._currentModel);
-      this._currentModel = null;
+      }
+    });
+    this._scene.remove(entry.wrapper);
+    this._disposeObject(entry.model);
+    entry.originalState = null;
+    entry.animation = null;
+  }
+  /** Remove every object and reset scene-wide display state (replace/unload). */
+  _clearAllObjects() {
+    for (const entry of this._objects) {
+      this._disposeEntry(entry);
     }
-    this._mixers = [];
-    this._animationMixer = null;
-    this._animationActions = [];
-    this._animationClips = [];
-    this._activeAction = null;
+    this._objects = [];
+    this._activeObjectId = null;
+    this._sceneGeneration++;
     this._clearNormalsHelpers();
     if (this._measureGroup) this._clearMeasurement();
     if (this._renderer) {
@@ -41886,31 +42449,242 @@ var Viewer3D = class {
     this._renderMode = "textured";
     this._wireframeEnabled = false;
   }
+  /** Backward-compat alias (a handful of internal callers say "clear model"). */
+  _clearModel() {
+    this._clearAllObjects();
+  }
+  // ---- registry public surface (control API + app UI) ----------------------
+  /** Summaries of every object (id, name, active, visibility, opacity, source). */
+  listObjects() {
+    return this._objects.map((e) => ({
+      id: e.id,
+      name: e.name,
+      active: e.id === this._activeObjectId,
+      visible: e.visible,
+      opacity: e.opacity,
+      skinned: e.skinned,
+      source: e.source,
+      vertices: e.stats ? e.stats.vertices : 0,
+      faces: e.stats ? e.stats.faces : 0,
+      transform: this._transformOf(e)
+    }));
+  }
+  /** Make an object active (single-object commands target it). */
+  setActiveObject(id) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    this._activeObjectId = id;
+    this._lastStats = entry.stats || this._lastStats;
+    this._lastModelName = entry.name;
+    this._dispatchAnimationsEvent(entry);
+    this._container.dispatchEvent(new CustomEvent("objectschange", {
+      detail: { objects: this.listObjects(), activeId: this._activeObjectId }
+    }));
+    return true;
+  }
+  /**
+   * Remove ONE object. If it was active, the most recently added remaining
+   * object becomes active (invariant: non-empty registry ⇒ active entry).
+   */
+  removeObject(id) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    this._disposeEntry(entry);
+    this._objects = this._objects.filter((e) => e.id !== id);
+    if (this._activeObjectId === id) {
+      const next = this._objects[this._objects.length - 1] || null;
+      this._activeObjectId = next ? next.id : null;
+      if (next) {
+        this._lastStats = next.stats || this._lastStats;
+        this._lastModelName = next.name;
+        this._dispatchAnimationsEvent(next);
+      } else {
+        this._lastStats = { vertices: 0, faces: 0, width: 0, height: 0, depth: 0 };
+        this._lastModelName = null;
+        this._dispatchAnimationsEvent(null);
+      }
+    }
+    this._updateSceneRig(this._visibleUnionBox());
+    this._container.dispatchEvent(new CustomEvent("objectschange", {
+      detail: { objects: this.listObjects(), activeId: this._activeObjectId }
+    }));
+    return true;
+  }
+  setObjectVisible(id, visible) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    entry.visible = !!visible;
+    entry.wrapper.visible = entry.visible;
+    this._updateSceneRig(this._visibleUnionBox());
+    return true;
+  }
+  /**
+   * Per-object opacity (1 = opaque). Declarative: stored on the entry and
+   * re-applied after every material swap (render modes, heatmap), so it
+   * survives mode changes. Exports ignore it (viewer state, not asset data).
+   */
+  setObjectOpacity(id, opacity) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    entry.opacity = Math.max(0, Math.min(1, opacity));
+    this._applyEntryOpacity(entry);
+    return true;
+  }
+  _applyEntryOpacity(entry) {
+    const ghost = entry.opacity < 1;
+    entry.model.traverse((child) => {
+      if (!child.isMesh || !child.material) return;
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      for (const m of mats) {
+        if (ghost) {
+          if (m.userData._mvViewerOpacityBackup === void 0) {
+            m.userData._mvViewerOpacityBackup = {
+              opacity: m.opacity,
+              transparent: m.transparent,
+              depthWrite: m.depthWrite
+            };
+          }
+          m.opacity = entry.opacity;
+          m.transparent = true;
+          m.depthWrite = false;
+        } else if (m.userData._mvViewerOpacityBackup !== void 0) {
+          const b = m.userData._mvViewerOpacityBackup;
+          m.opacity = b.opacity;
+          m.transparent = b.transparent;
+          m.depthWrite = b.depthWrite;
+          delete m.userData._mvViewerOpacityBackup;
+        }
+        m.needsUpdate = true;
+      }
+    });
+  }
+  /** Re-apply every entry's declarative opacity (call after material swaps). */
+  _reapplyAllOpacities() {
+    for (const entry of this._objects) {
+      if (entry.opacity < 1) this._applyEntryOpacity(entry);
+    }
+  }
+  /** Placement transform of an object's wrapper (TRS, world = scene space). */
+  _transformOf(entry) {
+    const w = entry.wrapper;
+    const r3 = (v) => Math.round(v * 1e4) / 1e4;
+    return {
+      position: [r3(w.position.x), r3(w.position.y), r3(w.position.z)],
+      quaternion: [
+        r3(w.quaternion.x),
+        r3(w.quaternion.y),
+        r3(w.quaternion.z),
+        r3(w.quaternion.w)
+      ],
+      scale: [r3(w.scale.x), r3(w.scale.y), r3(w.scale.z)]
+    };
+  }
+  getObjectTransform(id) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    return this._transformOf(entry);
+  }
+  /**
+   * Set an object's PLACEMENT (wrapper transform — never baked into vertices).
+   * Accepts position [x,y,z], quaternion [x,y,z,w] OR rotation (Euler degrees
+   * [x,y,z]), scale [x,y,z] or a uniform number. Omitted parts are unchanged.
+   */
+  setObjectTransform(id, { position, quaternion, rotation, scale } = {}) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    const w = entry.wrapper;
+    if (position) w.position.set(position[0], position[1], position[2]);
+    if (quaternion) {
+      w.quaternion.set(quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
+    } else if (rotation) {
+      const d2r = Math.PI / 180;
+      w.rotation.set(rotation[0] * d2r, rotation[1] * d2r, rotation[2] * d2r);
+    }
+    if (scale !== void 0) {
+      if (typeof scale === "number") w.scale.setScalar(scale);
+      else if (scale) w.scale.set(scale[0], scale[1], scale[2]);
+    }
+    w.updateMatrixWorld(true);
+    this._updateSceneRig(this._visibleUnionBox());
+    return this._transformOf(entry);
+  }
+  /** Reset an object's placement to identity (the non-destructive "undo"). */
+  resetObjectTransform(id) {
+    return this.setObjectTransform(id, {
+      position: [0, 0, 0],
+      quaternion: [0, 0, 0, 1],
+      scale: [1, 1, 1]
+    });
+  }
+  /** Frame the union of all visible objects (the whole composed scene). */
+  frameAll() {
+    const box = this._visibleUnionBox();
+    if (!box) return false;
+    this._frameToBox(box);
+    return true;
+  }
+  /**
+   * Serializable scene manifest (version 1). Objects with volatile sources
+   * (drag-drops, revoked object URLs) are EXCLUDED and reported so callers can
+   * warn — persisting a reference that cannot be re-resolved would rot the file.
+   */
+  getSceneManifest() {
+    const objects = [];
+    const skipped = [];
+    for (const e of this._objects) {
+      if (!e.source || e.source.kind === "volatile") {
+        skipped.push(e.name);
+        continue;
+      }
+      objects.push({
+        source: e.source,
+        name: e.name,
+        transform: this._transformOf(e),
+        visible: e.visible,
+        opacity: e.opacity
+      });
+    }
+    return {
+      version: 1,
+      objects,
+      skippedVolatile: skipped,
+      lighting: this.getLightSettings(),
+      environment: this.getEnvironment(),
+      background: this._background
+    };
+  }
   // ==========================================================
   // Animation playback (017) — single source of truth for clips
   // ==========================================================
   /**
-   * Set up the animation mixer for a freshly loaded object and notify the UI.
+   * Set up the animation state for a freshly registered entry and notify the UI.
    *
-   * Only one mixer is active at a time (the current model's). Clips are exposed by
-   * name so the UI can offer a clip selector; the first clip auto-plays to preserve
-   * prior behavior, but the user can pause/scrub/switch. Emits an "animations" event
-   * on the container with the clip list and duration (empty list ⇒ hide controls).
+   * Animation state is PER ENTRY ({mixer, actions, clips, activeAction, playing})
+   * so co-loaded objects keep independent playback. Only the ACTIVE entry's mixer
+   * advances in the render loop — deactivated objects FREEZE mid-pose and resume
+   * where they were when re-activated (no reset). The "animations" event carries
+   * the active entry's clip list (empty list ⇒ hide controls).
    */
-  _setupAnimations(object) {
-    const clips = object && object.animations ? object.animations : [];
-    this._mixers = [];
-    this._animationMixer = null;
-    this._animationActions = [];
-    this._animationClips = clips;
-    this._activeAction = null;
+  _setupAnimationsForEntry(entry) {
+    const clips = entry.model && entry.model.animations ? entry.model.animations : [];
+    entry.animation = null;
     if (clips.length > 0) {
-      const mixer = new AnimationMixer(object);
-      this._animationMixer = mixer;
-      this._mixers.push(mixer);
-      this._animationActions = clips.map((c) => mixer.clipAction(c));
+      const mixer = new AnimationMixer(entry.model);
+      const actions = clips.map((c) => mixer.clipAction(c));
+      entry.animation = {
+        mixer,
+        actions,
+        clips,
+        activeAction: null,
+        playing: false
+      };
       this.playAnimation(0);
     }
+    this._dispatchAnimationsEvent(entry);
+  }
+  /** Emit the animation UI event for an entry (or a null/empty entry). */
+  _dispatchAnimationsEvent(entry) {
+    const clips = entry && entry.animation ? entry.animation.clips : [];
     this._container.dispatchEvent(new CustomEvent("animations", {
       detail: {
         clips: clips.map((c, i) => ({
@@ -41921,53 +42695,66 @@ var Viewer3D = class {
       }
     }));
   }
-  /** True if the current model has at least one animation clip. */
-  hasAnimations() {
-    return this._animationClips && this._animationClips.length > 0;
+  /** The ACTIVE entry's animation state (or null). */
+  get _activeAnimation() {
+    const entry = this._activeEntry();
+    return entry ? entry.animation : null;
   }
-  /** Play the clip at `index` (stops any other), resetting to its start. */
+  /** True if the active object has at least one animation clip. */
+  hasAnimations() {
+    const anim = this._activeAnimation;
+    return !!(anim && anim.clips.length > 0);
+  }
+  /** Play the clip at `index` on the ACTIVE object (stops its other clips). */
   playAnimation(index) {
-    if (!this._animationMixer || !this._animationActions[index]) return;
-    for (const a of this._animationActions) a.stop();
-    const action = this._animationActions[index];
+    const anim = this._activeAnimation;
+    if (!anim || !anim.actions[index]) return;
+    for (const a of anim.actions) a.stop();
+    const action = anim.actions[index];
     action.reset();
     action.paused = false;
     action.play();
-    this._activeAction = action;
-    this._animationPlaying = true;
+    anim.activeAction = action;
+    anim.playing = true;
   }
-  /** Pause or resume the active clip. Returns the new playing state. */
+  /** Pause or resume the active object's clip. Returns the new playing state. */
   toggleAnimationPlay() {
-    if (!this._activeAction) return false;
-    this._activeAction.paused = !this._activeAction.paused;
-    this._animationPlaying = !this._activeAction.paused;
-    return this._animationPlaying;
+    const anim = this._activeAnimation;
+    if (!anim || !anim.activeAction) return false;
+    anim.activeAction.paused = !anim.activeAction.paused;
+    anim.playing = !anim.activeAction.paused;
+    return anim.playing;
   }
   setAnimationPlaying(playing) {
-    if (!this._activeAction) return;
-    this._activeAction.paused = !playing;
-    this._animationPlaying = playing;
+    const anim = this._activeAnimation;
+    if (!anim || !anim.activeAction) return;
+    anim.activeAction.paused = !playing;
+    anim.playing = playing;
   }
-  /** Playback speed multiplier for the active mixer (1 = normal). */
+  /** Playback speed multiplier for the active object's mixer (1 = normal). */
   setAnimationSpeed(multiplier) {
-    if (this._animationMixer) this._animationMixer.timeScale = multiplier;
+    const anim = this._activeAnimation;
+    if (anim && anim.mixer) anim.mixer.timeScale = multiplier;
   }
   /** Current active clip duration in seconds (0 if none). */
   getAnimationDuration() {
-    if (!this._activeAction) return 0;
-    return this._activeAction.getClip().duration;
+    const anim = this._activeAnimation;
+    if (!anim || !anim.activeAction) return 0;
+    return anim.activeAction.getClip().duration;
   }
   /** Current playback time in seconds. */
   getAnimationTime() {
-    return this._activeAction ? this._activeAction.time : 0;
+    const anim = this._activeAnimation;
+    return anim && anim.activeAction ? anim.activeAction.time : 0;
   }
   /** Seek the active clip to `seconds` (pauses so the frame holds). */
   setAnimationTime(seconds) {
-    if (!this._activeAction || !this._animationMixer) return;
-    this._activeAction.paused = true;
-    this._animationPlaying = false;
-    this._activeAction.time = Math.max(0, Math.min(seconds, this.getAnimationDuration()));
-    this._animationMixer.update(0);
+    const anim = this._activeAnimation;
+    if (!anim || !anim.activeAction || !anim.mixer) return;
+    anim.activeAction.paused = true;
+    anim.playing = false;
+    anim.activeAction.time = Math.max(0, Math.min(seconds, this.getAnimationDuration()));
+    anim.mixer.update(0);
   }
   /**
    * Reset all viewer state when loading a new model.
@@ -41985,8 +42772,6 @@ var Viewer3D = class {
     this._keysPressed.clear();
     this._fpvYaw = 0;
     this._fpvPitch = 0;
-    this._modelModified = false;
-    this._modelScale = 1;
     this._lastModelName = null;
     this._lastStats = { vertices: 0, faces: 0, width: 0, height: 0, depth: 0 };
     this._camera.position.set(3, 2.5, 4);
@@ -42003,6 +42788,9 @@ var Viewer3D = class {
     }
     if (this._normalsVisible) {
       this.setNormalsVisible(true);
+    }
+    if (this._renderMode && this._renderMode !== "textured") {
+      this.setRenderMode(this._renderMode);
     }
   }
   /** Dispose of an object and its children recursively */
@@ -42297,11 +43085,7 @@ var Viewer3D = class {
       mouse.x = (e.clientX - rect.left) / rect.width * 2 - 1;
       mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(mouse, this._camera);
-      const meshes = [];
-      this._currentModel.traverse((child) => {
-        if (child.isMesh) meshes.push(child);
-      });
-      const hits = raycaster.intersectObjects(meshes, false);
+      const hits = raycaster.intersectObjects(this._visibleMeshes(), false);
       if (hits.length > 0) {
         const point = hits[0].point;
         this._controls.target.copy(point);
@@ -42343,11 +43127,7 @@ var Viewer3D = class {
       mouse.x = (e.clientX - rect.left) / rect.width * 2 - 1;
       mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(mouse, this._camera);
-      const meshes = [];
-      this._currentModel.traverse((c) => {
-        if (c.isMesh) meshes.push(c);
-      });
-      const hits = raycaster.intersectObjects(meshes, false);
+      const hits = raycaster.intersectObjects(this._visibleMeshes(), false);
       if (hits.length === 0) return;
       this._addMeasurePoint(hits[0].point.clone());
     });
@@ -42395,8 +43175,8 @@ var Viewer3D = class {
     }
   }
   _measureMarkerRadius() {
-    if (!this._currentModel) return 0.02;
-    const box = new Box3().setFromObject(this._currentModel);
+    const box = this._visibleUnionBox();
+    if (!box) return 0.02;
     const size = box.getSize(new Vector3()).length();
     return Math.max(size * 8e-3, 1e-4);
   }
@@ -42670,12 +43450,15 @@ var Viewer3D = class {
     this._controls.update();
     return true;
   }
-  /** Remove the current model and reset viewer state (no model loaded afterwards). */
+  /** Remove EVERY object and reset viewer state (empty scene afterwards). */
   unload() {
-    this._clearModel();
+    this._clearAllObjects();
     this._lastModelName = null;
     this._lastStats = { vertices: 0, faces: 0, width: 0, height: 0, depth: 0 };
-    this._modelScale = 1;
+    this._dispatchAnimationsEvent(null);
+    this._container.dispatchEvent(new CustomEvent("objectschange", {
+      detail: { objects: [], activeId: null }
+    }));
     return true;
   }
   // ==========================================================
@@ -42886,6 +43669,13 @@ var Viewer3D = class {
     const rt = new WebGLRenderTarget(size, size);
     const buf = new Uint8Array(size * size * 4);
     let bestUp = prevUp.clone(), bestScore = -Infinity;
+    const hiddenWrappers = [];
+    for (const e of this._objects) {
+      if (e.id !== this._activeObjectId && e.wrapper.visible) {
+        e.wrapper.visible = false;
+        hiddenWrappers.push(e.wrapper);
+      }
+    }
     try {
       this._currentModel.traverse((c) => {
         if (c.isMesh) {
@@ -42919,6 +43709,7 @@ var Viewer3D = class {
       }
     } finally {
       for (const [c, m] of savedMats) c.material = m;
+      for (const w of hiddenWrappers) w.visible = true;
       scoreMat.dispose();
       rt.dispose();
       r.setRenderTarget(null);
@@ -43067,6 +43858,13 @@ var Viewer3D = class {
         side: DoubleSide
       })]);
     });
+    const hiddenWrappers = [];
+    for (const e of this._objects) {
+      if (e.id !== this._activeObjectId && e.wrapper.visible) {
+        e.wrapper.visible = false;
+        hiddenWrappers.push(e.wrapper);
+      }
+    }
     const raw = [];
     try {
       this.setGridVisible(false);
@@ -43103,6 +43901,7 @@ var Viewer3D = class {
       }
     } finally {
       for (const [child, mat] of savedMats) child.material = mat;
+      for (const w of hiddenWrappers) w.visible = true;
       normalMat.dispose();
       for (const [, m] of albedoMats) m.dispose();
       rt.dispose();
@@ -43206,7 +44005,7 @@ var Viewer3D = class {
    * Original materials are preserved and restored when returning to 'shaded'.
    */
   setRenderMode(mode) {
-    if (!this._currentModel) return false;
+    if (this._objects.length === 0) return false;
     const alias = {
       textured: "textured",
       shaded: "textured",
@@ -43217,43 +44016,44 @@ var Viewer3D = class {
     };
     const m = alias[mode];
     if (!m) return false;
-    this._currentModel.traverse((child) => {
-      if (child.isMesh && child._mvOriginalMaterial) {
-        if (child.material && child.material !== child._mvOriginalMaterial) {
-          (Array.isArray(child.material) ? child.material : [child.material]).forEach((mat) => mat && mat.dispose && mat.dispose());
+    for (const entry of this._objects) {
+      entry.model.traverse((child) => {
+        if (child.isMesh && child._mvOriginalMaterial) {
+          if (child.material && child.material !== child._mvOriginalMaterial) {
+            (Array.isArray(child.material) ? child.material : [child.material]).forEach((mat) => mat && mat.dispose && mat.dispose());
+          }
+          child.material = child._mvOriginalMaterial;
+          delete child._mvOriginalMaterial;
         }
-        child.material = child._mvOriginalMaterial;
-        delete child._mvOriginalMaterial;
-      }
-    });
+      });
+    }
     this.setWireframe(false);
-    if (m === "textured") {
-      this._renderMode = "textured";
+    if (m === "textured" || m === "wireframe") {
+      if (m === "wireframe") this.setWireframe(true);
+      this._renderMode = m;
       this._applyEnvironment();
+      this._reapplyAllOpacities();
       return true;
     }
-    if (m === "wireframe") {
-      this.setWireframe(true);
-      this._renderMode = "wireframe";
-      this._applyEnvironment();
-      return true;
+    for (const entry of this._objects) {
+      entry.model.traverse((child) => {
+        if (!child.isMesh) return;
+        child._mvOriginalMaterial = child.material;
+        if (m === "normals") {
+          child.material = new MeshNormalMaterial({ flatShading: false });
+        } else {
+          child.material = new MeshStandardMaterial({
+            color: 13619926,
+            roughness: 0.85,
+            metalness: 0,
+            side: DoubleSide
+          });
+        }
+      });
     }
-    this._currentModel.traverse((child) => {
-      if (!child.isMesh) return;
-      child._mvOriginalMaterial = child.material;
-      if (m === "normals") {
-        child.material = new MeshNormalMaterial({ flatShading: false });
-      } else {
-        child.material = new MeshStandardMaterial({
-          color: 13619926,
-          roughness: 0.85,
-          metalness: 0,
-          side: DoubleSide
-        });
-      }
-    });
     this._renderMode = m;
     this._applyEnvironment();
+    this._reapplyAllOpacities();
     return true;
   }
   getRenderMode() {
@@ -43288,23 +44088,25 @@ var Viewer3D = class {
       this._clip = null;
       return true;
     }
-    if (!this._currentModel) return false;
+    if (this._objects.length === 0) return false;
     const axis = opts.axis || "camera";
     const t2 = opts.position !== void 0 ? Math.max(0, Math.min(1, opts.position)) : 0.5;
     const flip = !!opts.flip;
-    const box = new Box3().setFromObject(this._currentModel);
-    const center = box.getCenter(new Vector3());
-    const size = box.getSize(new Vector3());
     this._clip = { axis, t: t2, flip };
     r.localClippingEnabled = true;
     r.clippingPlanes = [this._computeClipPlane()];
     return true;
   }
-  /** Build the current clipping plane (called on set and, for 'camera', each frame). */
+  /** Build the current clipping plane (called on set and, for 'camera', each frame).
+   *  Geometry derives from the VISIBLE-SCENE union: the renderer's clipping plane
+   *  cuts every object, so `position: 0.5` must mean "middle of the scene", not
+   *  "middle of whichever object happens to be active" (which would slice
+   *  neighbors at unpredictable places). */
   _computeClipPlane() {
-    if (!this._clip || !this._currentModel) return null;
+    if (!this._clip) return null;
+    const box = this._visibleUnionBox();
+    if (!box) return null;
     const { axis, t: t2, flip } = this._clip;
-    const box = new Box3().setFromObject(this._currentModel);
     const center = box.getCenter(new Vector3());
     const size = box.getSize(new Vector3());
     const sign2 = flip ? -1 : 1;
@@ -43372,7 +44174,10 @@ var Viewer3D = class {
     const round2 = (v) => Math.round(v * 1e3) / 1e3;
     const pos = this._camera.position;
     const tgt = this._controls.target;
+    const activeAnim = this._activeAnimation;
+    const unionBox = this._visibleUnionBox();
     return {
+      // `model` describes the ACTIVE object (single-object commands target it).
       model: {
         loaded: !!this._currentModel,
         name: this._lastModelName,
@@ -43386,6 +44191,16 @@ var Viewer3D = class {
         bounds: this.getBounds(),
         scale: this._modelScale,
         modified: !!this._modelModified
+      },
+      // Scene composition: every loaded object + which one is active.
+      scene: {
+        objectCount: this._objects.length,
+        activeObjectId: this._activeObjectId,
+        objects: this.listObjects(),
+        bounds: unionBox && !unionBox.isEmpty() ? {
+          min: [round2(unionBox.min.x), round2(unionBox.min.y), round2(unionBox.min.z)],
+          max: [round2(unionBox.max.x), round2(unionBox.max.y), round2(unionBox.max.z)]
+        } : null
       },
       camera: {
         mode: this._navMode,
@@ -43407,8 +44222,8 @@ var Viewer3D = class {
       },
       animation: {
         hasAnimations: this.hasAnimations(),
-        clips: (this._animationClips || []).map((c, i) => c.name || `Clip ${i + 1}`),
-        playing: !!this._animationPlaying,
+        clips: (activeAnim ? activeAnim.clips : []).map((c, i) => c.name || `Clip ${i + 1}`),
+        playing: !!(activeAnim && activeAnim.playing),
         time: round2(this.getAnimationTime()),
         duration: round2(this.getAnimationDuration())
       },
@@ -44481,20 +45296,21 @@ var Viewer3D = class {
    * Auto-frame the camera to fit the model in view.
    */
   _frameModel(object) {
-    this._preFocusClip = null;
     const box = new Box3().setFromObject(object);
+    this._frameToBox(box);
+  }
+  /**
+   * Frame an arbitrary world-space box: size the scene rig to it and move the
+   * camera to the classic 3/4 view. `frame_all` passes the visible-scene union;
+   * single-object loads pass the object's own box (unchanged behavior).
+   */
+  _frameToBox(box) {
+    if (!box || box.isEmpty()) return;
+    this._preFocusClip = null;
+    this._updateSceneRig(box);
     const size = box.getSize(new Vector3());
     const center = box.getCenter(new Vector3());
-    this._modelCenter.copy(center);
     const maxDim = Math.max(size.x, size.y, size.z);
-    this._keyLightRadius = maxDim * 3;
-    const axisSize = maxDim * 0.5;
-    this._buildAxisHelper(axisSize);
-    this._axisGroup.position.copy(center);
-    this._axisGroup.position.y = box.min.y;
-    const minY = box.min.y;
-    this._ground.position.y = minY;
-    this._rebuildGrid(maxDim, minY);
     const fov2 = this._camera.fov * (Math.PI / 180);
     let distance = maxDim / (2 * Math.tan(fov2 / 2));
     distance *= 1.8;
@@ -44504,20 +45320,45 @@ var Viewer3D = class {
     );
     this._controls.target.copy(center);
     this._controls.update();
-    const shadowPad = maxDim * 2;
-    this._keyLight.shadow.camera.left = -shadowPad;
-    this._keyLight.shadow.camera.right = shadowPad;
-    this._keyLight.shadow.camera.top = shadowPad;
-    this._keyLight.shadow.camera.bottom = -shadowPad;
-    this._keyLight.shadow.camera.far = distance * 4;
-    this._keyLight.shadow.camera.updateProjectionMatrix();
-    this._updateKeyLightPosition();
-    if (this._scene.fog) this._scene.fog.density = 0.5 / maxDim;
     this._camera.near = distance * 1e-3;
     this._camera.far = distance * 10;
     this._camera.updateProjectionMatrix();
     this._initialCameraPos.copy(this._camera.position);
     this._initialTarget.copy(this._controls.target);
+  }
+  /**
+   * Size the NON-CAMERA scene rig (lights, shadows, ground, grid, axes, fog,
+   * nav speed) to a world-space box, without touching the user's camera.
+   * Called by framing AND whenever composition changes (add/remove/transform/
+   * visibility) so shadows/lights never go stale as objects move around
+   * (a placed object outside the last-framed footprint would silently lose
+   * its shadow otherwise).
+   */
+  _updateSceneRig(box) {
+    if (!box || box.isEmpty()) return;
+    const size = box.getSize(new Vector3());
+    const center = box.getCenter(new Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    this._modelCenter.copy(center);
+    this._keyLightRadius = maxDim * 3;
+    const axisSize = maxDim * 0.5;
+    this._buildAxisHelper(axisSize);
+    this._axisGroup.position.copy(center);
+    this._axisGroup.position.y = box.min.y;
+    const minY = box.min.y;
+    this._ground.position.y = minY;
+    this._rebuildGrid(maxDim, minY);
+    const fov2 = this._camera.fov * (Math.PI / 180);
+    const frameDistance = maxDim / (2 * Math.tan(fov2 / 2)) * 1.8;
+    const shadowPad = maxDim * 2;
+    this._keyLight.shadow.camera.left = -shadowPad;
+    this._keyLight.shadow.camera.right = shadowPad;
+    this._keyLight.shadow.camera.top = shadowPad;
+    this._keyLight.shadow.camera.bottom = -shadowPad;
+    this._keyLight.shadow.camera.far = frameDistance * 4;
+    this._keyLight.shadow.camera.updateProjectionMatrix();
+    this._updateKeyLightPosition();
+    if (this._scene.fog) this._scene.fog.density = 0.5 / maxDim;
     this._moveSpeed = maxDim * 1.5;
   }
   // ==========================================
@@ -44576,10 +45417,11 @@ var Viewer3D = class {
    * @param {number} scale - Scale factor (e.g., 0.25, 0.5, 1.0, 2.0)
    */
   setModelScale(scale) {
-    if (this._currentModel) {
-      this._currentModel.scale.setScalar(scale);
+    const entry = this._activeEntry();
+    if (entry) {
+      entry.model.scale.setScalar(scale);
+      entry.modelScale = scale;
     }
-    this._modelScale = scale;
   }
   getModelScale() {
     return this._modelScale;
@@ -44589,8 +45431,8 @@ var Viewer3D = class {
    * @param {boolean} enabled - Whether to show wireframe
    */
   setWireframe(enabled) {
-    if (this._currentModel) {
-      this._currentModel.traverse((child) => {
+    for (const entry of this._objects) {
+      entry.model.traverse((child) => {
         if (child.isMesh && child.material) {
           const mats = Array.isArray(child.material) ? child.material : [child.material];
           mats.forEach((m) => {
@@ -44614,19 +45456,21 @@ var Viewer3D = class {
    */
   setNormalsVisible(enabled) {
     this._clearNormalsHelpers();
-    if (enabled && this._currentModel) {
+    if (enabled && this._objects.length > 0) {
       this._normalsHelpers = [];
-      const box = new Box3().setFromObject(this._currentModel);
-      const size = box.getSize(new Vector3());
-      const maxDim = Math.max(size.x, size.y, size.z);
-      const normalLength = maxDim * 0.02;
-      this._currentModel.traverse((child) => {
-        if (child.isMesh && child.geometry) {
-          const helper = new VertexNormalsHelper(child, normalLength, 4513279);
-          this._scene.add(helper);
-          this._normalsHelpers.push(helper);
-        }
-      });
+      for (const entry of this._visibleEntries()) {
+        const box = new Box3().setFromObject(entry.wrapper);
+        const size = box.getSize(new Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z) || 1;
+        const normalLength = maxDim * 0.02;
+        entry.model.traverse((child) => {
+          if (child.isMesh && child.geometry) {
+            const helper = new VertexNormalsHelper(child, normalLength, 4513279);
+            this._scene.add(helper);
+            this._normalsHelpers.push(helper);
+          }
+        });
+      }
     }
     this._normalsVisible = enabled;
   }
@@ -44663,8 +45507,9 @@ var Viewer3D = class {
    * Rebuilds the grid with the current model dimensions and new colors.
    */
   _updateGridColors() {
-    if (!this._grid || !this._currentModel) return;
-    const box = new Box3().setFromObject(this._currentModel);
+    if (!this._grid) return;
+    const box = this._visibleUnionBox();
+    if (!box) return;
     const size = box.getSize(new Vector3());
     const maxDim = Math.max(size.x, size.y, size.z);
     this._rebuildGrid(maxDim, box.min.y);
@@ -44700,35 +45545,48 @@ var Viewer3D = class {
    * Save a snapshot of all geometry positions + mesh transforms
    * so we can restore them on Reset.
    */
-  _saveOriginalGeometry() {
-    this._originalState = [];
-    if (!this._currentModel) return;
-    this._currentModel.updateMatrixWorld(true);
-    this._currentModel.traverse((child) => {
+  /** Per-entry geometry snapshot (Reset support). See _insertEntry. */
+  _saveOriginalGeometryForEntry(entry) {
+    const items = [];
+    entry.model.updateMatrixWorld(true);
+    entry.model.traverse((child) => {
       if (child.isMesh && child.geometry) {
         const posAttr = child.geometry.attributes.position;
-        this._originalState.push({
+        items.push({
           mesh: child,
+          geometry: child.geometry,
           positions: new Float32Array(posAttr.array),
-          // Save mesh local transform
           position: child.position.clone(),
           rotation: child.rotation.clone(),
           scale: child.scale.clone()
         });
       }
     });
-    this._originalRootPos = this._currentModel.position.clone();
-    this._originalRootRot = this._currentModel.rotation.clone();
-    this._originalRootScale = this._currentModel.scale.clone();
+    entry.originalState = {
+      items,
+      rootPos: entry.model.position.clone(),
+      rootRot: entry.model.rotation.clone(),
+      rootScale: entry.model.scale.clone()
+    };
   }
   /**
-   * Reset model to its original state (undo all recenter/orient/scale).
-   * Does NOT touch the camera.
+   * Reset the ACTIVE object's geometry to its last snapshot (undo transform
+   * bakes: center/ground/rotate/orient/scale). Does NOT touch the camera or
+   * the object's PLACEMENT (wrapper) — use reset_object_transform for that.
+   *
+   * The snapshot is RETAKEN after geometry-replacing ops (simplify, recompute
+   * normals): restoring a positions array into a differently-sized geometry is
+   * exactly the long-standing "offset is out of bounds" crash, so Reset honestly
+   * undoes bakes since the last geometry-modifying operation instead.
    */
   resetModel() {
-    if (!this._currentModel || !this._originalState) return;
-    for (const saved of this._originalState) {
+    const entry = this._activeEntry();
+    if (!entry || !entry.originalState) return;
+    const snap = entry.originalState;
+    for (const saved of snap.items) {
+      if (saved.mesh.geometry !== saved.geometry) continue;
       const posAttr = saved.mesh.geometry.attributes.position;
+      if (!posAttr || posAttr.array.length !== saved.positions.length) continue;
       posAttr.array.set(saved.positions);
       posAttr.needsUpdate = true;
       saved.mesh.position.copy(saved.position);
@@ -44739,29 +45597,47 @@ var Viewer3D = class {
       saved.mesh.geometry.computeBoundingBox();
       saved.mesh.geometry.computeBoundingSphere();
     }
-    this._currentModel.position.copy(this._originalRootPos);
-    this._currentModel.rotation.copy(this._originalRootRot);
-    this._currentModel.scale.copy(this._originalRootScale);
-    this._modelModified = false;
+    entry.model.position.copy(snap.rootPos);
+    entry.model.rotation.copy(snap.rootRot);
+    entry.model.scale.copy(snap.rootScale);
+    entry.modified = false;
   }
   /**
-   * Bake all world transforms into geometry vertex positions.
-   * After this, all mesh and root transforms are identity,
-   * and vertices contain actual world-space coordinates.
+   * Bake the active object's transforms into vertex positions, RELATIVE TO ITS
+   * WRAPPER. After this, all transforms inside the model subtree are identity
+   * and vertices are wrapper-local coordinates.
+   *
+   * The wrapper (scene placement, backlog 042) is deliberately excluded: baking
+   * matrixWorld outright would fold the user's scene placement into the asset's
+   * geometry — exports and manifests would then double-apply it.
+   *
+   * Refuses skinned models: zeroing bone-carrying nodes corrupts the bind pose
+   * (documented pre-existing failure — now blocked instead of inherited).
    */
   _bakeWorldTransforms() {
-    this._currentModel.updateMatrixWorld(true);
-    this._currentModel.traverse((child) => {
+    const entry = this._activeEntry();
+    if (!entry) return;
+    if (entry.skinned) {
+      throw new Error(
+        "Transform baking (center/ground/rotate/orient/simplify) is not supported for skinned/animated models \u2014 it corrupts the bind pose. Use set_object_transform to place the object instead."
+      );
+    }
+    const model = entry.model;
+    entry.wrapper.updateMatrixWorld(true);
+    const wrapperInv = new Matrix4().copy(entry.wrapper.matrixWorld).invert();
+    const local = new Matrix4();
+    model.traverse((child) => {
       if (child.isMesh && child.geometry) {
         this._dequantizeVectorAttributes(child.geometry);
-        child.geometry.applyMatrix4(child.matrixWorld);
+        local.multiplyMatrices(wrapperInv, child.matrixWorld);
+        child.geometry.applyMatrix4(local);
         child.position.set(0, 0, 0);
         child.rotation.set(0, 0, 0);
         child.scale.set(1, 1, 1);
         child.updateMatrix();
       }
     });
-    this._currentModel.traverse((node) => {
+    model.traverse((node) => {
       if (!node.isMesh) {
         node.position.set(0, 0, 0);
         node.rotation.set(0, 0, 0);
@@ -44769,6 +45645,27 @@ var Viewer3D = class {
         node.updateMatrix();
       }
     });
+    model.updateMatrixWorld(true);
+  }
+  /**
+   * Wrapper-LOCAL bounding box of the active object AFTER a bake (all subtree
+   * transforms identity ⇒ geometry coordinates ARE wrapper-local). Box math for
+   * bake ops must use this, never Box3.setFromObject (which is world space and
+   * would fold the wrapper placement back into the offsets — under a rotated
+   * wrapper, ground would shift along the wrong axes).
+   */
+  _localBakedBox() {
+    const entry = this._activeEntry();
+    const box = new Box3();
+    if (!entry) return box;
+    entry.model.traverse((child) => {
+      if (!child.isMesh || !child.geometry) return;
+      child.geometry.computeBoundingBox();
+      if (child.geometry.boundingBox && !child.geometry.boundingBox.isEmpty()) {
+        box.union(child.geometry.boundingBox);
+      }
+    });
+    return box;
   }
   /**
    * Replace integer/normalized vector attributes (position/normal/tangent) with plain
@@ -44799,7 +45696,7 @@ var Viewer3D = class {
   recenterModel() {
     if (!this._currentModel) return;
     this._bakeWorldTransforms();
-    const box = new Box3().setFromObject(this._currentModel);
+    const box = this._localBakedBox();
     const center = box.getCenter(new Vector3());
     this._currentModel.traverse((child) => {
       if (child.isMesh && child.geometry) {
@@ -44824,7 +45721,7 @@ var Viewer3D = class {
   groundModel() {
     if (!this._currentModel) return;
     this._bakeWorldTransforms();
-    const box = new Box3().setFromObject(this._currentModel);
+    const box = this._localBakedBox();
     const center = box.getCenter(new Vector3());
     const offsetX = -center.x;
     const offsetZ = -center.z;
@@ -44881,9 +45778,13 @@ var Viewer3D = class {
     });
     this._modelModified = true;
     if (hadNormals) this.setNormalsVisible(true);
-    const stats = this._computeStats(this._currentModel);
-    this._lastStats = stats;
-    this._onInfoUpdate(stats);
+    const entry = this._activeEntry();
+    if (entry) {
+      this._saveOriginalGeometryForEntry(entry);
+      entry.stats = this._computeStats(entry.model);
+      this._lastStats = entry.stats;
+      this._onInfoUpdate(entry.stats);
+    }
   }
   /**
    * Return a geometry safe to feed to mergeVertices/SimplifyModifier: a clone with
@@ -44908,7 +45809,7 @@ var Viewer3D = class {
     if (axis === "x") rotMatrix.makeRotationX(angleRad);
     else if (axis === "y") rotMatrix.makeRotationY(angleRad);
     else if (axis === "z") rotMatrix.makeRotationZ(angleRad);
-    const box = new Box3().setFromObject(this._currentModel);
+    const box = this._localBakedBox();
     const center = box.getCenter(new Vector3());
     this._currentModel.traverse((child) => {
       if (child.isMesh && child.geometry) {
@@ -45174,6 +46075,14 @@ var Viewer3D = class {
     }
     this._modelModified = true;
     if (hadNormals) this.setNormalsVisible(true);
+    const entry = this._activeEntry();
+    if (entry) {
+      this._saveOriginalGeometryForEntry(entry);
+      entry.stats = this._computeStats(entry.model);
+      this._lastStats = entry.stats;
+      this._onInfoUpdate(entry.stats);
+      return { before: totalBefore, after: totalAfter };
+    }
     const stats = this._computeStats(this._currentModel);
     this._onInfoUpdate(stats);
     return { before: totalBefore, after: totalAfter };
@@ -45332,10 +46241,17 @@ var Viewer3D = class {
       this._scene.background = null;
       r.setClearColor(0, 0);
     }
+    const hiddenHelpers = (this._captureHidden || []).filter((o) => o.visible);
+    hiddenHelpers.forEach((o) => {
+      o.visible = false;
+    });
     this._refreshCameraClip();
     if (useComposer) this._composer.render();
     else r.render(this._scene, cam);
     const dataUrl = r.domElement.toDataURL("image/png");
+    hiddenHelpers.forEach((o) => {
+      o.visible = true;
+    });
     this._scene.background = prevBg;
     this._scene.fog = prevFog;
     r.setClearColor(prevClear, prevClearAlpha);
@@ -45377,11 +46293,29 @@ var Viewer3D = class {
    * writes pixel data without implicit flips.
    */
   async exportAsGLB() {
-    if (!this._currentModel) return null;
+    if (this._objects.length === 0) return null;
     const exportScene = new Scene();
     exportScene.name = "MeshVault";
-    this._currentModel.updateMatrixWorld(true);
-    this._currentModel.traverse((child) => {
+    for (const entry of this._visibleEntries()) {
+      entry.wrapper.updateMatrixWorld(true);
+      entry.model.traverse((child) => {
+        this._appendExportMesh(exportScene, child);
+      });
+    }
+    if (exportScene.children.length === 0) return null;
+    const exporter = new GLTFExporter();
+    return new Promise((resolve, reject) => {
+      exporter.parse(
+        exportScene,
+        (result) => resolve(result),
+        (error) => reject(error),
+        { binary: true, maxTextureSize: 4096 }
+      );
+    });
+  }
+  /** Clone one mesh into the export scene with glTF-safe geometry + material. */
+  _appendExportMesh(exportScene, child) {
+    {
       if (!child.isMesh || !child.geometry) return;
       const srcGeo = child.geometry;
       const geo = new BufferGeometry();
@@ -45406,7 +46340,8 @@ var Viewer3D = class {
         geo.setAttribute("tangent", new BufferAttribute(tanArr, 4));
       }
       if (srcGeo.index) geo.setIndex(srcGeo.index.clone());
-      const srcMat = Array.isArray(child.material) ? child.material[0] : child.material;
+      const stash = child._mvOriginalMaterial || child.material;
+      const srcMat = Array.isArray(stash) ? stash[0] : stash;
       const matParams = {
         roughness: srcMat.roughness !== void 0 ? srcMat.roughness : 0.5,
         metalness: srcMat.metalness !== void 0 ? srcMat.metalness : 0,
@@ -45435,8 +46370,11 @@ var Viewer3D = class {
           geo.setAttribute("uv2", new BufferAttribute(uv2Arr, 2));
         }
       }
-      if (srcMat.opacity !== void 0 && srcMat.opacity < 1) {
-        matParams.opacity = srcMat.opacity;
+      const backup = srcMat.userData && srcMat.userData._mvViewerOpacityBackup;
+      const authoredOpacity = backup ? backup.opacity : srcMat.opacity;
+      const authoredTransparent = backup ? backup.transparent : srcMat.transparent;
+      if (authoredOpacity !== void 0 && authoredOpacity < 1 && authoredTransparent) {
+        matParams.opacity = authoredOpacity;
         matParams.transparent = true;
       }
       const mesh = new Mesh(geo, new MeshStandardMaterial(matParams));
@@ -45444,17 +46382,7 @@ var Viewer3D = class {
       mesh.matrixAutoUpdate = false;
       mesh.matrix.copy(child.matrixWorld);
       exportScene.add(mesh);
-    });
-    if (exportScene.children.length === 0) return null;
-    const exporter = new GLTFExporter();
-    return new Promise((resolve, reject) => {
-      exporter.parse(
-        exportScene,
-        (result) => resolve(result),
-        (error) => reject(error),
-        { binary: true, maxTextureSize: 4096 }
-      );
-    });
+    }
   }
   /**
    * Prepare a texture for GLB export.
@@ -45530,8 +46458,9 @@ var Viewer3D = class {
       if (this._controls.enabled) {
         this._controls.update();
       }
-      for (const mixer of this._mixers) {
-        mixer.update(delta);
+      const activeAnim = this._activeAnimation;
+      if (activeAnim && activeAnim.mixer) {
+        activeAnim.mixer.update(delta);
       }
       if (this._clip && this._clip.axis === "camera") {
         const plane = this._computeClipPlane();
@@ -49974,6 +50903,7 @@ var AgentLink = class {
   constructor(deps) {
     this._fileBrowser = deps.fileBrowser;
     this._openAsset = deps.openAsset;
+    this._openScene = deps.openScene || null;
     this._applyCamera = deps.applyCamera;
     this._getLoadedAssetKey = deps.getLoadedAssetKey;
     this._toast = deps.showToast;
@@ -49991,9 +50921,14 @@ var AgentLink = class {
    */
   async boot() {
     const params = new URLSearchParams(window.location.search);
+    const scene = params.get("scene");
     const path = params.get("path");
     const dir = params.get("dir");
     try {
+      if (scene && this._openScene) {
+        await this._openScene(scene);
+        return true;
+      }
       if (path) {
         await this.openPath(path, null);
         return true;
@@ -50014,6 +50949,10 @@ var AgentLink = class {
    * related_files), select it, load it, then optionally apply a camera pose.
    */
   async openPath(pathOrKey, camera = null) {
+    if (/\.mvscene$/i.test(pathOrKey) && this._openScene) {
+      await this._openScene(pathOrKey);
+      return;
+    }
     const archive = pathOrKey.match(ARCHIVE_KEY_RE);
     if (!archive && !MODEL_EXT_RE.test(pathOrKey)) {
       if (!await this._fileBrowser.browse(pathOrKey)) {
@@ -50046,6 +50985,10 @@ var AgentLink = class {
    */
   syncDir(dirPath) {
     this._replaceQuery(`?dir=${encodeURIComponent(dirPath)}`);
+  }
+  /** Reflect a loaded/saved scene file in the URL (deep-linkable composition). */
+  syncScene(scenePath) {
+    this._replaceQuery(`?scene=${encodeURIComponent(scenePath)}`);
   }
   _replaceQuery(query) {
     try {
@@ -50133,6 +51076,1192 @@ var AgentLink = class {
   }
 };
 
+// node_modules/three/examples/jsm/controls/TransformControls.js
+var _raycaster = new Raycaster();
+var _tempVector = new Vector3();
+var _tempVector2 = new Vector3();
+var _tempQuaternion = new Quaternion();
+var _unit = {
+  X: new Vector3(1, 0, 0),
+  Y: new Vector3(0, 1, 0),
+  Z: new Vector3(0, 0, 1)
+};
+var _changeEvent2 = { type: "change" };
+var _mouseDownEvent = { type: "mouseDown", mode: null };
+var _mouseUpEvent = { type: "mouseUp", mode: null };
+var _objectChangeEvent = { type: "objectChange" };
+var TransformControls = class extends Controls {
+  constructor(camera, domElement = null) {
+    super(void 0, domElement);
+    const root = new TransformControlsRoot(this);
+    this._root = root;
+    const gizmo = new TransformControlsGizmo();
+    this._gizmo = gizmo;
+    root.add(gizmo);
+    const plane = new TransformControlsPlane();
+    this._plane = plane;
+    root.add(plane);
+    const scope = this;
+    function defineProperty(propName, defaultValue) {
+      let propValue = defaultValue;
+      Object.defineProperty(scope, propName, {
+        get: function() {
+          return propValue !== void 0 ? propValue : defaultValue;
+        },
+        set: function(value) {
+          if (propValue !== value) {
+            propValue = value;
+            plane[propName] = value;
+            gizmo[propName] = value;
+            scope.dispatchEvent({ type: propName + "-changed", value });
+            scope.dispatchEvent(_changeEvent2);
+          }
+        }
+      });
+      scope[propName] = defaultValue;
+      plane[propName] = defaultValue;
+      gizmo[propName] = defaultValue;
+    }
+    defineProperty("camera", camera);
+    defineProperty("object", void 0);
+    defineProperty("enabled", true);
+    defineProperty("axis", null);
+    defineProperty("mode", "translate");
+    defineProperty("translationSnap", null);
+    defineProperty("rotationSnap", null);
+    defineProperty("scaleSnap", null);
+    defineProperty("space", "world");
+    defineProperty("size", 1);
+    defineProperty("dragging", false);
+    defineProperty("showX", true);
+    defineProperty("showY", true);
+    defineProperty("showZ", true);
+    defineProperty("minX", -Infinity);
+    defineProperty("maxX", Infinity);
+    defineProperty("minY", -Infinity);
+    defineProperty("maxY", Infinity);
+    defineProperty("minZ", -Infinity);
+    defineProperty("maxZ", Infinity);
+    const worldPosition = new Vector3();
+    const worldPositionStart = new Vector3();
+    const worldQuaternion = new Quaternion();
+    const worldQuaternionStart = new Quaternion();
+    const cameraPosition = new Vector3();
+    const cameraQuaternion = new Quaternion();
+    const pointStart = new Vector3();
+    const pointEnd = new Vector3();
+    const rotationAxis = new Vector3();
+    const rotationAngle = 0;
+    const eye = new Vector3();
+    defineProperty("worldPosition", worldPosition);
+    defineProperty("worldPositionStart", worldPositionStart);
+    defineProperty("worldQuaternion", worldQuaternion);
+    defineProperty("worldQuaternionStart", worldQuaternionStart);
+    defineProperty("cameraPosition", cameraPosition);
+    defineProperty("cameraQuaternion", cameraQuaternion);
+    defineProperty("pointStart", pointStart);
+    defineProperty("pointEnd", pointEnd);
+    defineProperty("rotationAxis", rotationAxis);
+    defineProperty("rotationAngle", rotationAngle);
+    defineProperty("eye", eye);
+    this._offset = new Vector3();
+    this._startNorm = new Vector3();
+    this._endNorm = new Vector3();
+    this._cameraScale = new Vector3();
+    this._parentPosition = new Vector3();
+    this._parentQuaternion = new Quaternion();
+    this._parentQuaternionInv = new Quaternion();
+    this._parentScale = new Vector3();
+    this._worldScaleStart = new Vector3();
+    this._worldQuaternionInv = new Quaternion();
+    this._worldScale = new Vector3();
+    this._positionStart = new Vector3();
+    this._quaternionStart = new Quaternion();
+    this._scaleStart = new Vector3();
+    this._getPointer = getPointer.bind(this);
+    this._onPointerDown = onPointerDown2.bind(this);
+    this._onPointerHover = onPointerHover.bind(this);
+    this._onPointerMove = onPointerMove2.bind(this);
+    this._onPointerUp = onPointerUp2.bind(this);
+    if (domElement !== null) {
+      this.connect();
+    }
+  }
+  connect() {
+    this.domElement.addEventListener("pointerdown", this._onPointerDown);
+    this.domElement.addEventListener("pointermove", this._onPointerHover);
+    this.domElement.addEventListener("pointerup", this._onPointerUp);
+    this.domElement.style.touchAction = "none";
+  }
+  disconnect() {
+    this.domElement.removeEventListener("pointerdown", this._onPointerDown);
+    this.domElement.removeEventListener("pointermove", this._onPointerHover);
+    this.domElement.removeEventListener("pointermove", this._onPointerMove);
+    this.domElement.removeEventListener("pointerup", this._onPointerUp);
+    this.domElement.style.touchAction = "auto";
+  }
+  getHelper() {
+    return this._root;
+  }
+  pointerHover(pointer) {
+    if (this.object === void 0 || this.dragging === true) return;
+    if (pointer !== null) _raycaster.setFromCamera(pointer, this.camera);
+    const intersect2 = intersectObjectWithRay(this._gizmo.picker[this.mode], _raycaster);
+    if (intersect2) {
+      this.axis = intersect2.object.name;
+    } else {
+      this.axis = null;
+    }
+  }
+  pointerDown(pointer) {
+    if (this.object === void 0 || this.dragging === true || pointer != null && pointer.button !== 0) return;
+    if (this.axis !== null) {
+      if (pointer !== null) _raycaster.setFromCamera(pointer, this.camera);
+      const planeIntersect = intersectObjectWithRay(this._plane, _raycaster, true);
+      if (planeIntersect) {
+        this.object.updateMatrixWorld();
+        this.object.parent.updateMatrixWorld();
+        this._positionStart.copy(this.object.position);
+        this._quaternionStart.copy(this.object.quaternion);
+        this._scaleStart.copy(this.object.scale);
+        this.object.matrixWorld.decompose(this.worldPositionStart, this.worldQuaternionStart, this._worldScaleStart);
+        this.pointStart.copy(planeIntersect.point).sub(this.worldPositionStart);
+      }
+      this.dragging = true;
+      _mouseDownEvent.mode = this.mode;
+      this.dispatchEvent(_mouseDownEvent);
+    }
+  }
+  pointerMove(pointer) {
+    const axis = this.axis;
+    const mode = this.mode;
+    const object = this.object;
+    let space = this.space;
+    if (mode === "scale") {
+      space = "local";
+    } else if (axis === "E" || axis === "XYZE" || axis === "XYZ") {
+      space = "world";
+    }
+    if (object === void 0 || axis === null || this.dragging === false || pointer !== null && pointer.button !== -1) return;
+    if (pointer !== null) _raycaster.setFromCamera(pointer, this.camera);
+    const planeIntersect = intersectObjectWithRay(this._plane, _raycaster, true);
+    if (!planeIntersect) return;
+    this.pointEnd.copy(planeIntersect.point).sub(this.worldPositionStart);
+    if (mode === "translate") {
+      this._offset.copy(this.pointEnd).sub(this.pointStart);
+      if (space === "local" && axis !== "XYZ") {
+        this._offset.applyQuaternion(this._worldQuaternionInv);
+      }
+      if (axis.indexOf("X") === -1) this._offset.x = 0;
+      if (axis.indexOf("Y") === -1) this._offset.y = 0;
+      if (axis.indexOf("Z") === -1) this._offset.z = 0;
+      if (space === "local" && axis !== "XYZ") {
+        this._offset.applyQuaternion(this._quaternionStart).divide(this._parentScale);
+      } else {
+        this._offset.applyQuaternion(this._parentQuaternionInv).divide(this._parentScale);
+      }
+      object.position.copy(this._offset).add(this._positionStart);
+      if (this.translationSnap) {
+        if (space === "local") {
+          object.position.applyQuaternion(_tempQuaternion.copy(this._quaternionStart).invert());
+          if (axis.search("X") !== -1) {
+            object.position.x = Math.round(object.position.x / this.translationSnap) * this.translationSnap;
+          }
+          if (axis.search("Y") !== -1) {
+            object.position.y = Math.round(object.position.y / this.translationSnap) * this.translationSnap;
+          }
+          if (axis.search("Z") !== -1) {
+            object.position.z = Math.round(object.position.z / this.translationSnap) * this.translationSnap;
+          }
+          object.position.applyQuaternion(this._quaternionStart);
+        }
+        if (space === "world") {
+          if (object.parent) {
+            object.position.add(_tempVector.setFromMatrixPosition(object.parent.matrixWorld));
+          }
+          if (axis.search("X") !== -1) {
+            object.position.x = Math.round(object.position.x / this.translationSnap) * this.translationSnap;
+          }
+          if (axis.search("Y") !== -1) {
+            object.position.y = Math.round(object.position.y / this.translationSnap) * this.translationSnap;
+          }
+          if (axis.search("Z") !== -1) {
+            object.position.z = Math.round(object.position.z / this.translationSnap) * this.translationSnap;
+          }
+          if (object.parent) {
+            object.position.sub(_tempVector.setFromMatrixPosition(object.parent.matrixWorld));
+          }
+        }
+      }
+      object.position.x = Math.max(this.minX, Math.min(this.maxX, object.position.x));
+      object.position.y = Math.max(this.minY, Math.min(this.maxY, object.position.y));
+      object.position.z = Math.max(this.minZ, Math.min(this.maxZ, object.position.z));
+    } else if (mode === "scale") {
+      if (axis.search("XYZ") !== -1) {
+        let d = this.pointEnd.length() / this.pointStart.length();
+        if (this.pointEnd.dot(this.pointStart) < 0) d *= -1;
+        _tempVector2.set(d, d, d);
+      } else {
+        _tempVector.copy(this.pointStart);
+        _tempVector2.copy(this.pointEnd);
+        _tempVector.applyQuaternion(this._worldQuaternionInv);
+        _tempVector2.applyQuaternion(this._worldQuaternionInv);
+        _tempVector2.divide(_tempVector);
+        if (axis.search("X") === -1) {
+          _tempVector2.x = 1;
+        }
+        if (axis.search("Y") === -1) {
+          _tempVector2.y = 1;
+        }
+        if (axis.search("Z") === -1) {
+          _tempVector2.z = 1;
+        }
+      }
+      object.scale.copy(this._scaleStart).multiply(_tempVector2);
+      if (this.scaleSnap) {
+        if (axis.search("X") !== -1) {
+          object.scale.x = Math.round(object.scale.x / this.scaleSnap) * this.scaleSnap || this.scaleSnap;
+        }
+        if (axis.search("Y") !== -1) {
+          object.scale.y = Math.round(object.scale.y / this.scaleSnap) * this.scaleSnap || this.scaleSnap;
+        }
+        if (axis.search("Z") !== -1) {
+          object.scale.z = Math.round(object.scale.z / this.scaleSnap) * this.scaleSnap || this.scaleSnap;
+        }
+      }
+    } else if (mode === "rotate") {
+      this._offset.copy(this.pointEnd).sub(this.pointStart);
+      const ROTATION_SPEED = 20 / this.worldPosition.distanceTo(_tempVector.setFromMatrixPosition(this.camera.matrixWorld));
+      let _inPlaneRotation = false;
+      if (axis === "XYZE") {
+        this.rotationAxis.copy(this._offset).cross(this.eye).normalize();
+        this.rotationAngle = this._offset.dot(_tempVector.copy(this.rotationAxis).cross(this.eye)) * ROTATION_SPEED;
+      } else if (axis === "X" || axis === "Y" || axis === "Z") {
+        this.rotationAxis.copy(_unit[axis]);
+        _tempVector.copy(_unit[axis]);
+        if (space === "local") {
+          _tempVector.applyQuaternion(this.worldQuaternion);
+        }
+        _tempVector.cross(this.eye);
+        if (_tempVector.length() === 0) {
+          _inPlaneRotation = true;
+        } else {
+          this.rotationAngle = this._offset.dot(_tempVector.normalize()) * ROTATION_SPEED;
+        }
+      }
+      if (axis === "E" || _inPlaneRotation) {
+        this.rotationAxis.copy(this.eye);
+        this.rotationAngle = this.pointEnd.angleTo(this.pointStart);
+        this._startNorm.copy(this.pointStart).normalize();
+        this._endNorm.copy(this.pointEnd).normalize();
+        this.rotationAngle *= this._endNorm.cross(this._startNorm).dot(this.eye) < 0 ? 1 : -1;
+      }
+      if (this.rotationSnap) this.rotationAngle = Math.round(this.rotationAngle / this.rotationSnap) * this.rotationSnap;
+      if (space === "local" && axis !== "E" && axis !== "XYZE") {
+        object.quaternion.copy(this._quaternionStart);
+        object.quaternion.multiply(_tempQuaternion.setFromAxisAngle(this.rotationAxis, this.rotationAngle)).normalize();
+      } else {
+        this.rotationAxis.applyQuaternion(this._parentQuaternionInv);
+        object.quaternion.copy(_tempQuaternion.setFromAxisAngle(this.rotationAxis, this.rotationAngle));
+        object.quaternion.multiply(this._quaternionStart).normalize();
+      }
+    }
+    this.dispatchEvent(_changeEvent2);
+    this.dispatchEvent(_objectChangeEvent);
+  }
+  pointerUp(pointer) {
+    if (pointer !== null && pointer.button !== 0) return;
+    if (this.dragging && this.axis !== null) {
+      _mouseUpEvent.mode = this.mode;
+      this.dispatchEvent(_mouseUpEvent);
+    }
+    this.dragging = false;
+    this.axis = null;
+  }
+  dispose() {
+    this.disconnect();
+    this._root.dispose();
+  }
+  // Set current object
+  attach(object) {
+    this.object = object;
+    this._root.visible = true;
+    return this;
+  }
+  // Detach from object
+  detach() {
+    this.object = void 0;
+    this.axis = null;
+    this._root.visible = false;
+    return this;
+  }
+  reset() {
+    if (!this.enabled) return;
+    if (this.dragging) {
+      this.object.position.copy(this._positionStart);
+      this.object.quaternion.copy(this._quaternionStart);
+      this.object.scale.copy(this._scaleStart);
+      this.dispatchEvent(_changeEvent2);
+      this.dispatchEvent(_objectChangeEvent);
+      this.pointStart.copy(this.pointEnd);
+    }
+  }
+  getRaycaster() {
+    return _raycaster;
+  }
+  // TODO: deprecate
+  getMode() {
+    return this.mode;
+  }
+  setMode(mode) {
+    this.mode = mode;
+  }
+  setTranslationSnap(translationSnap) {
+    this.translationSnap = translationSnap;
+  }
+  setRotationSnap(rotationSnap) {
+    this.rotationSnap = rotationSnap;
+  }
+  setScaleSnap(scaleSnap) {
+    this.scaleSnap = scaleSnap;
+  }
+  setSize(size) {
+    this.size = size;
+  }
+  setSpace(space) {
+    this.space = space;
+  }
+};
+function getPointer(event) {
+  if (this.domElement.ownerDocument.pointerLockElement) {
+    return {
+      x: 0,
+      y: 0,
+      button: event.button
+    };
+  } else {
+    const rect = this.domElement.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) / rect.width * 2 - 1,
+      y: -(event.clientY - rect.top) / rect.height * 2 + 1,
+      button: event.button
+    };
+  }
+}
+function onPointerHover(event) {
+  if (!this.enabled) return;
+  switch (event.pointerType) {
+    case "mouse":
+    case "pen":
+      this.pointerHover(this._getPointer(event));
+      break;
+  }
+}
+function onPointerDown2(event) {
+  if (!this.enabled) return;
+  if (!document.pointerLockElement) {
+    this.domElement.setPointerCapture(event.pointerId);
+  }
+  this.domElement.addEventListener("pointermove", this._onPointerMove);
+  this.pointerHover(this._getPointer(event));
+  this.pointerDown(this._getPointer(event));
+}
+function onPointerMove2(event) {
+  if (!this.enabled) return;
+  this.pointerMove(this._getPointer(event));
+}
+function onPointerUp2(event) {
+  if (!this.enabled) return;
+  this.domElement.releasePointerCapture(event.pointerId);
+  this.domElement.removeEventListener("pointermove", this._onPointerMove);
+  this.pointerUp(this._getPointer(event));
+}
+function intersectObjectWithRay(object, raycaster, includeInvisible) {
+  const allIntersections = raycaster.intersectObject(object, true);
+  for (let i = 0; i < allIntersections.length; i++) {
+    if (allIntersections[i].object.visible || includeInvisible) {
+      return allIntersections[i];
+    }
+  }
+  return false;
+}
+var _tempEuler = new Euler();
+var _alignVector = new Vector3(0, 1, 0);
+var _zeroVector = new Vector3(0, 0, 0);
+var _lookAtMatrix = new Matrix4();
+var _tempQuaternion2 = new Quaternion();
+var _identityQuaternion = new Quaternion();
+var _dirVector = new Vector3();
+var _tempMatrix = new Matrix4();
+var _unitX = new Vector3(1, 0, 0);
+var _unitY = new Vector3(0, 1, 0);
+var _unitZ = new Vector3(0, 0, 1);
+var _v12 = new Vector3();
+var _v22 = new Vector3();
+var _v3 = new Vector3();
+var TransformControlsRoot = class extends Object3D {
+  constructor(controls) {
+    super();
+    this.isTransformControlsRoot = true;
+    this.controls = controls;
+    this.visible = false;
+  }
+  // updateMatrixWorld updates key transformation variables
+  updateMatrixWorld(force) {
+    const controls = this.controls;
+    if (controls.object !== void 0) {
+      controls.object.updateMatrixWorld();
+      if (controls.object.parent === null) {
+        console.error("TransformControls: The attached 3D object must be a part of the scene graph.");
+      } else {
+        controls.object.parent.matrixWorld.decompose(controls._parentPosition, controls._parentQuaternion, controls._parentScale);
+      }
+      controls.object.matrixWorld.decompose(controls.worldPosition, controls.worldQuaternion, controls._worldScale);
+      controls._parentQuaternionInv.copy(controls._parentQuaternion).invert();
+      controls._worldQuaternionInv.copy(controls.worldQuaternion).invert();
+    }
+    controls.camera.updateMatrixWorld();
+    controls.camera.matrixWorld.decompose(controls.cameraPosition, controls.cameraQuaternion, controls._cameraScale);
+    if (controls.camera.isOrthographicCamera) {
+      controls.camera.getWorldDirection(controls.eye).negate();
+    } else {
+      controls.eye.copy(controls.cameraPosition).sub(controls.worldPosition).normalize();
+    }
+    super.updateMatrixWorld(force);
+  }
+  dispose() {
+    this.traverse(function(child) {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) child.material.dispose();
+    });
+  }
+};
+var TransformControlsGizmo = class extends Object3D {
+  constructor() {
+    super();
+    this.isTransformControlsGizmo = true;
+    this.type = "TransformControlsGizmo";
+    const gizmoMaterial = new MeshBasicMaterial({
+      depthTest: false,
+      depthWrite: false,
+      fog: false,
+      toneMapped: false,
+      transparent: true
+    });
+    const gizmoLineMaterial = new LineBasicMaterial({
+      depthTest: false,
+      depthWrite: false,
+      fog: false,
+      toneMapped: false,
+      transparent: true
+    });
+    const matInvisible = gizmoMaterial.clone();
+    matInvisible.opacity = 0.15;
+    const matHelper = gizmoLineMaterial.clone();
+    matHelper.opacity = 0.5;
+    const matRed = gizmoMaterial.clone();
+    matRed.color.setHex(16711680);
+    const matGreen = gizmoMaterial.clone();
+    matGreen.color.setHex(65280);
+    const matBlue = gizmoMaterial.clone();
+    matBlue.color.setHex(255);
+    const matRedTransparent = gizmoMaterial.clone();
+    matRedTransparent.color.setHex(16711680);
+    matRedTransparent.opacity = 0.5;
+    const matGreenTransparent = gizmoMaterial.clone();
+    matGreenTransparent.color.setHex(65280);
+    matGreenTransparent.opacity = 0.5;
+    const matBlueTransparent = gizmoMaterial.clone();
+    matBlueTransparent.color.setHex(255);
+    matBlueTransparent.opacity = 0.5;
+    const matWhiteTransparent = gizmoMaterial.clone();
+    matWhiteTransparent.opacity = 0.25;
+    const matYellowTransparent = gizmoMaterial.clone();
+    matYellowTransparent.color.setHex(16776960);
+    matYellowTransparent.opacity = 0.25;
+    const matYellow = gizmoMaterial.clone();
+    matYellow.color.setHex(16776960);
+    const matGray = gizmoMaterial.clone();
+    matGray.color.setHex(7895160);
+    const arrowGeometry = new CylinderGeometry(0, 0.04, 0.1, 12);
+    arrowGeometry.translate(0, 0.05, 0);
+    const scaleHandleGeometry = new BoxGeometry(0.08, 0.08, 0.08);
+    scaleHandleGeometry.translate(0, 0.04, 0);
+    const lineGeometry = new BufferGeometry();
+    lineGeometry.setAttribute("position", new Float32BufferAttribute([0, 0, 0, 1, 0, 0], 3));
+    const lineGeometry2 = new CylinderGeometry(75e-4, 75e-4, 0.5, 3);
+    lineGeometry2.translate(0, 0.25, 0);
+    function CircleGeometry(radius, arc) {
+      const geometry = new TorusGeometry(radius, 75e-4, 3, 64, arc * Math.PI * 2);
+      geometry.rotateY(Math.PI / 2);
+      geometry.rotateX(Math.PI / 2);
+      return geometry;
+    }
+    function TranslateHelperGeometry() {
+      const geometry = new BufferGeometry();
+      geometry.setAttribute("position", new Float32BufferAttribute([0, 0, 0, 1, 1, 1], 3));
+      return geometry;
+    }
+    const gizmoTranslate = {
+      X: [
+        [new Mesh(arrowGeometry, matRed), [0.5, 0, 0], [0, 0, -Math.PI / 2]],
+        [new Mesh(arrowGeometry, matRed), [-0.5, 0, 0], [0, 0, Math.PI / 2]],
+        [new Mesh(lineGeometry2, matRed), [0, 0, 0], [0, 0, -Math.PI / 2]]
+      ],
+      Y: [
+        [new Mesh(arrowGeometry, matGreen), [0, 0.5, 0]],
+        [new Mesh(arrowGeometry, matGreen), [0, -0.5, 0], [Math.PI, 0, 0]],
+        [new Mesh(lineGeometry2, matGreen)]
+      ],
+      Z: [
+        [new Mesh(arrowGeometry, matBlue), [0, 0, 0.5], [Math.PI / 2, 0, 0]],
+        [new Mesh(arrowGeometry, matBlue), [0, 0, -0.5], [-Math.PI / 2, 0, 0]],
+        [new Mesh(lineGeometry2, matBlue), null, [Math.PI / 2, 0, 0]]
+      ],
+      XYZ: [
+        [new Mesh(new OctahedronGeometry(0.1, 0), matWhiteTransparent.clone()), [0, 0, 0]]
+      ],
+      XY: [
+        [new Mesh(new BoxGeometry(0.15, 0.15, 0.01), matBlueTransparent.clone()), [0.15, 0.15, 0]]
+      ],
+      YZ: [
+        [new Mesh(new BoxGeometry(0.15, 0.15, 0.01), matRedTransparent.clone()), [0, 0.15, 0.15], [0, Math.PI / 2, 0]]
+      ],
+      XZ: [
+        [new Mesh(new BoxGeometry(0.15, 0.15, 0.01), matGreenTransparent.clone()), [0.15, 0, 0.15], [-Math.PI / 2, 0, 0]]
+      ]
+    };
+    const pickerTranslate = {
+      X: [
+        [new Mesh(new CylinderGeometry(0.2, 0, 0.6, 4), matInvisible), [0.3, 0, 0], [0, 0, -Math.PI / 2]],
+        [new Mesh(new CylinderGeometry(0.2, 0, 0.6, 4), matInvisible), [-0.3, 0, 0], [0, 0, Math.PI / 2]]
+      ],
+      Y: [
+        [new Mesh(new CylinderGeometry(0.2, 0, 0.6, 4), matInvisible), [0, 0.3, 0]],
+        [new Mesh(new CylinderGeometry(0.2, 0, 0.6, 4), matInvisible), [0, -0.3, 0], [0, 0, Math.PI]]
+      ],
+      Z: [
+        [new Mesh(new CylinderGeometry(0.2, 0, 0.6, 4), matInvisible), [0, 0, 0.3], [Math.PI / 2, 0, 0]],
+        [new Mesh(new CylinderGeometry(0.2, 0, 0.6, 4), matInvisible), [0, 0, -0.3], [-Math.PI / 2, 0, 0]]
+      ],
+      XYZ: [
+        [new Mesh(new OctahedronGeometry(0.2, 0), matInvisible)]
+      ],
+      XY: [
+        [new Mesh(new BoxGeometry(0.2, 0.2, 0.01), matInvisible), [0.15, 0.15, 0]]
+      ],
+      YZ: [
+        [new Mesh(new BoxGeometry(0.2, 0.2, 0.01), matInvisible), [0, 0.15, 0.15], [0, Math.PI / 2, 0]]
+      ],
+      XZ: [
+        [new Mesh(new BoxGeometry(0.2, 0.2, 0.01), matInvisible), [0.15, 0, 0.15], [-Math.PI / 2, 0, 0]]
+      ]
+    };
+    const helperTranslate = {
+      START: [
+        [new Mesh(new OctahedronGeometry(0.01, 2), matHelper), null, null, null, "helper"]
+      ],
+      END: [
+        [new Mesh(new OctahedronGeometry(0.01, 2), matHelper), null, null, null, "helper"]
+      ],
+      DELTA: [
+        [new Line(TranslateHelperGeometry(), matHelper), null, null, null, "helper"]
+      ],
+      X: [
+        [new Line(lineGeometry, matHelper.clone()), [-1e3, 0, 0], null, [1e6, 1, 1], "helper"]
+      ],
+      Y: [
+        [new Line(lineGeometry, matHelper.clone()), [0, -1e3, 0], [0, 0, Math.PI / 2], [1e6, 1, 1], "helper"]
+      ],
+      Z: [
+        [new Line(lineGeometry, matHelper.clone()), [0, 0, -1e3], [0, -Math.PI / 2, 0], [1e6, 1, 1], "helper"]
+      ]
+    };
+    const gizmoRotate = {
+      XYZE: [
+        [new Mesh(CircleGeometry(0.5, 1), matGray), null, [0, Math.PI / 2, 0]]
+      ],
+      X: [
+        [new Mesh(CircleGeometry(0.5, 0.5), matRed)]
+      ],
+      Y: [
+        [new Mesh(CircleGeometry(0.5, 0.5), matGreen), null, [0, 0, -Math.PI / 2]]
+      ],
+      Z: [
+        [new Mesh(CircleGeometry(0.5, 0.5), matBlue), null, [0, Math.PI / 2, 0]]
+      ],
+      E: [
+        [new Mesh(CircleGeometry(0.75, 1), matYellowTransparent), null, [0, Math.PI / 2, 0]]
+      ]
+    };
+    const helperRotate = {
+      AXIS: [
+        [new Line(lineGeometry, matHelper.clone()), [-1e3, 0, 0], null, [1e6, 1, 1], "helper"]
+      ]
+    };
+    const pickerRotate = {
+      XYZE: [
+        [new Mesh(new SphereGeometry(0.25, 10, 8), matInvisible)]
+      ],
+      X: [
+        [new Mesh(new TorusGeometry(0.5, 0.1, 4, 24), matInvisible), [0, 0, 0], [0, -Math.PI / 2, -Math.PI / 2]]
+      ],
+      Y: [
+        [new Mesh(new TorusGeometry(0.5, 0.1, 4, 24), matInvisible), [0, 0, 0], [Math.PI / 2, 0, 0]]
+      ],
+      Z: [
+        [new Mesh(new TorusGeometry(0.5, 0.1, 4, 24), matInvisible), [0, 0, 0], [0, 0, -Math.PI / 2]]
+      ],
+      E: [
+        [new Mesh(new TorusGeometry(0.75, 0.1, 2, 24), matInvisible)]
+      ]
+    };
+    const gizmoScale = {
+      X: [
+        [new Mesh(scaleHandleGeometry, matRed), [0.5, 0, 0], [0, 0, -Math.PI / 2]],
+        [new Mesh(lineGeometry2, matRed), [0, 0, 0], [0, 0, -Math.PI / 2]],
+        [new Mesh(scaleHandleGeometry, matRed), [-0.5, 0, 0], [0, 0, Math.PI / 2]]
+      ],
+      Y: [
+        [new Mesh(scaleHandleGeometry, matGreen), [0, 0.5, 0]],
+        [new Mesh(lineGeometry2, matGreen)],
+        [new Mesh(scaleHandleGeometry, matGreen), [0, -0.5, 0], [0, 0, Math.PI]]
+      ],
+      Z: [
+        [new Mesh(scaleHandleGeometry, matBlue), [0, 0, 0.5], [Math.PI / 2, 0, 0]],
+        [new Mesh(lineGeometry2, matBlue), [0, 0, 0], [Math.PI / 2, 0, 0]],
+        [new Mesh(scaleHandleGeometry, matBlue), [0, 0, -0.5], [-Math.PI / 2, 0, 0]]
+      ],
+      XY: [
+        [new Mesh(new BoxGeometry(0.15, 0.15, 0.01), matBlueTransparent), [0.15, 0.15, 0]]
+      ],
+      YZ: [
+        [new Mesh(new BoxGeometry(0.15, 0.15, 0.01), matRedTransparent), [0, 0.15, 0.15], [0, Math.PI / 2, 0]]
+      ],
+      XZ: [
+        [new Mesh(new BoxGeometry(0.15, 0.15, 0.01), matGreenTransparent), [0.15, 0, 0.15], [-Math.PI / 2, 0, 0]]
+      ],
+      XYZ: [
+        [new Mesh(new BoxGeometry(0.1, 0.1, 0.1), matWhiteTransparent.clone())]
+      ]
+    };
+    const pickerScale = {
+      X: [
+        [new Mesh(new CylinderGeometry(0.2, 0, 0.6, 4), matInvisible), [0.3, 0, 0], [0, 0, -Math.PI / 2]],
+        [new Mesh(new CylinderGeometry(0.2, 0, 0.6, 4), matInvisible), [-0.3, 0, 0], [0, 0, Math.PI / 2]]
+      ],
+      Y: [
+        [new Mesh(new CylinderGeometry(0.2, 0, 0.6, 4), matInvisible), [0, 0.3, 0]],
+        [new Mesh(new CylinderGeometry(0.2, 0, 0.6, 4), matInvisible), [0, -0.3, 0], [0, 0, Math.PI]]
+      ],
+      Z: [
+        [new Mesh(new CylinderGeometry(0.2, 0, 0.6, 4), matInvisible), [0, 0, 0.3], [Math.PI / 2, 0, 0]],
+        [new Mesh(new CylinderGeometry(0.2, 0, 0.6, 4), matInvisible), [0, 0, -0.3], [-Math.PI / 2, 0, 0]]
+      ],
+      XY: [
+        [new Mesh(new BoxGeometry(0.2, 0.2, 0.01), matInvisible), [0.15, 0.15, 0]]
+      ],
+      YZ: [
+        [new Mesh(new BoxGeometry(0.2, 0.2, 0.01), matInvisible), [0, 0.15, 0.15], [0, Math.PI / 2, 0]]
+      ],
+      XZ: [
+        [new Mesh(new BoxGeometry(0.2, 0.2, 0.01), matInvisible), [0.15, 0, 0.15], [-Math.PI / 2, 0, 0]]
+      ],
+      XYZ: [
+        [new Mesh(new BoxGeometry(0.2, 0.2, 0.2), matInvisible), [0, 0, 0]]
+      ]
+    };
+    const helperScale = {
+      X: [
+        [new Line(lineGeometry, matHelper.clone()), [-1e3, 0, 0], null, [1e6, 1, 1], "helper"]
+      ],
+      Y: [
+        [new Line(lineGeometry, matHelper.clone()), [0, -1e3, 0], [0, 0, Math.PI / 2], [1e6, 1, 1], "helper"]
+      ],
+      Z: [
+        [new Line(lineGeometry, matHelper.clone()), [0, 0, -1e3], [0, -Math.PI / 2, 0], [1e6, 1, 1], "helper"]
+      ]
+    };
+    function setupGizmo(gizmoMap) {
+      const gizmo = new Object3D();
+      for (const name in gizmoMap) {
+        for (let i = gizmoMap[name].length; i--; ) {
+          const object = gizmoMap[name][i][0].clone();
+          const position = gizmoMap[name][i][1];
+          const rotation = gizmoMap[name][i][2];
+          const scale = gizmoMap[name][i][3];
+          const tag = gizmoMap[name][i][4];
+          object.name = name;
+          object.tag = tag;
+          if (position) {
+            object.position.set(position[0], position[1], position[2]);
+          }
+          if (rotation) {
+            object.rotation.set(rotation[0], rotation[1], rotation[2]);
+          }
+          if (scale) {
+            object.scale.set(scale[0], scale[1], scale[2]);
+          }
+          object.updateMatrix();
+          const tempGeometry = object.geometry.clone();
+          tempGeometry.applyMatrix4(object.matrix);
+          object.geometry = tempGeometry;
+          object.renderOrder = Infinity;
+          object.position.set(0, 0, 0);
+          object.rotation.set(0, 0, 0);
+          object.scale.set(1, 1, 1);
+          gizmo.add(object);
+        }
+      }
+      return gizmo;
+    }
+    this.gizmo = {};
+    this.picker = {};
+    this.helper = {};
+    this.add(this.gizmo["translate"] = setupGizmo(gizmoTranslate));
+    this.add(this.gizmo["rotate"] = setupGizmo(gizmoRotate));
+    this.add(this.gizmo["scale"] = setupGizmo(gizmoScale));
+    this.add(this.picker["translate"] = setupGizmo(pickerTranslate));
+    this.add(this.picker["rotate"] = setupGizmo(pickerRotate));
+    this.add(this.picker["scale"] = setupGizmo(pickerScale));
+    this.add(this.helper["translate"] = setupGizmo(helperTranslate));
+    this.add(this.helper["rotate"] = setupGizmo(helperRotate));
+    this.add(this.helper["scale"] = setupGizmo(helperScale));
+    this.picker["translate"].visible = false;
+    this.picker["rotate"].visible = false;
+    this.picker["scale"].visible = false;
+  }
+  // updateMatrixWorld will update transformations and appearance of individual handles
+  updateMatrixWorld(force) {
+    const space = this.mode === "scale" ? "local" : this.space;
+    const quaternion = space === "local" ? this.worldQuaternion : _identityQuaternion;
+    this.gizmo["translate"].visible = this.mode === "translate";
+    this.gizmo["rotate"].visible = this.mode === "rotate";
+    this.gizmo["scale"].visible = this.mode === "scale";
+    this.helper["translate"].visible = this.mode === "translate";
+    this.helper["rotate"].visible = this.mode === "rotate";
+    this.helper["scale"].visible = this.mode === "scale";
+    let handles = [];
+    handles = handles.concat(this.picker[this.mode].children);
+    handles = handles.concat(this.gizmo[this.mode].children);
+    handles = handles.concat(this.helper[this.mode].children);
+    for (let i = 0; i < handles.length; i++) {
+      const handle = handles[i];
+      handle.visible = true;
+      handle.rotation.set(0, 0, 0);
+      handle.position.copy(this.worldPosition);
+      let factor;
+      if (this.camera.isOrthographicCamera) {
+        factor = (this.camera.top - this.camera.bottom) / this.camera.zoom;
+      } else {
+        factor = this.worldPosition.distanceTo(this.cameraPosition) * Math.min(1.9 * Math.tan(Math.PI * this.camera.fov / 360) / this.camera.zoom, 7);
+      }
+      handle.scale.set(1, 1, 1).multiplyScalar(factor * this.size / 4);
+      if (handle.tag === "helper") {
+        handle.visible = false;
+        if (handle.name === "AXIS") {
+          handle.visible = !!this.axis;
+          if (this.axis === "X") {
+            _tempQuaternion.setFromEuler(_tempEuler.set(0, 0, 0));
+            handle.quaternion.copy(quaternion).multiply(_tempQuaternion);
+            if (Math.abs(_alignVector.copy(_unitX).applyQuaternion(quaternion).dot(this.eye)) > 0.9) {
+              handle.visible = false;
+            }
+          }
+          if (this.axis === "Y") {
+            _tempQuaternion.setFromEuler(_tempEuler.set(0, 0, Math.PI / 2));
+            handle.quaternion.copy(quaternion).multiply(_tempQuaternion);
+            if (Math.abs(_alignVector.copy(_unitY).applyQuaternion(quaternion).dot(this.eye)) > 0.9) {
+              handle.visible = false;
+            }
+          }
+          if (this.axis === "Z") {
+            _tempQuaternion.setFromEuler(_tempEuler.set(0, Math.PI / 2, 0));
+            handle.quaternion.copy(quaternion).multiply(_tempQuaternion);
+            if (Math.abs(_alignVector.copy(_unitZ).applyQuaternion(quaternion).dot(this.eye)) > 0.9) {
+              handle.visible = false;
+            }
+          }
+          if (this.axis === "XYZE") {
+            _tempQuaternion.setFromEuler(_tempEuler.set(0, Math.PI / 2, 0));
+            _alignVector.copy(this.rotationAxis);
+            handle.quaternion.setFromRotationMatrix(_lookAtMatrix.lookAt(_zeroVector, _alignVector, _unitY));
+            handle.quaternion.multiply(_tempQuaternion);
+            handle.visible = this.dragging;
+          }
+          if (this.axis === "E") {
+            handle.visible = false;
+          }
+        } else if (handle.name === "START") {
+          handle.position.copy(this.worldPositionStart);
+          handle.visible = this.dragging;
+        } else if (handle.name === "END") {
+          handle.position.copy(this.worldPosition);
+          handle.visible = this.dragging;
+        } else if (handle.name === "DELTA") {
+          handle.position.copy(this.worldPositionStart);
+          handle.quaternion.copy(this.worldQuaternionStart);
+          _tempVector.set(1e-10, 1e-10, 1e-10).add(this.worldPositionStart).sub(this.worldPosition).multiplyScalar(-1);
+          _tempVector.applyQuaternion(this.worldQuaternionStart.clone().invert());
+          handle.scale.copy(_tempVector);
+          handle.visible = this.dragging;
+        } else {
+          handle.quaternion.copy(quaternion);
+          if (this.dragging) {
+            handle.position.copy(this.worldPositionStart);
+          } else {
+            handle.position.copy(this.worldPosition);
+          }
+          if (this.axis) {
+            handle.visible = this.axis.search(handle.name) !== -1;
+          }
+        }
+        continue;
+      }
+      handle.quaternion.copy(quaternion);
+      if (this.mode === "translate" || this.mode === "scale") {
+        const AXIS_HIDE_THRESHOLD = 0.99;
+        const PLANE_HIDE_THRESHOLD = 0.2;
+        if (handle.name === "X") {
+          if (Math.abs(_alignVector.copy(_unitX).applyQuaternion(quaternion).dot(this.eye)) > AXIS_HIDE_THRESHOLD) {
+            handle.scale.set(1e-10, 1e-10, 1e-10);
+            handle.visible = false;
+          }
+        }
+        if (handle.name === "Y") {
+          if (Math.abs(_alignVector.copy(_unitY).applyQuaternion(quaternion).dot(this.eye)) > AXIS_HIDE_THRESHOLD) {
+            handle.scale.set(1e-10, 1e-10, 1e-10);
+            handle.visible = false;
+          }
+        }
+        if (handle.name === "Z") {
+          if (Math.abs(_alignVector.copy(_unitZ).applyQuaternion(quaternion).dot(this.eye)) > AXIS_HIDE_THRESHOLD) {
+            handle.scale.set(1e-10, 1e-10, 1e-10);
+            handle.visible = false;
+          }
+        }
+        if (handle.name === "XY") {
+          if (Math.abs(_alignVector.copy(_unitZ).applyQuaternion(quaternion).dot(this.eye)) < PLANE_HIDE_THRESHOLD) {
+            handle.scale.set(1e-10, 1e-10, 1e-10);
+            handle.visible = false;
+          }
+        }
+        if (handle.name === "YZ") {
+          if (Math.abs(_alignVector.copy(_unitX).applyQuaternion(quaternion).dot(this.eye)) < PLANE_HIDE_THRESHOLD) {
+            handle.scale.set(1e-10, 1e-10, 1e-10);
+            handle.visible = false;
+          }
+        }
+        if (handle.name === "XZ") {
+          if (Math.abs(_alignVector.copy(_unitY).applyQuaternion(quaternion).dot(this.eye)) < PLANE_HIDE_THRESHOLD) {
+            handle.scale.set(1e-10, 1e-10, 1e-10);
+            handle.visible = false;
+          }
+        }
+      } else if (this.mode === "rotate") {
+        _tempQuaternion2.copy(quaternion);
+        _alignVector.copy(this.eye).applyQuaternion(_tempQuaternion.copy(quaternion).invert());
+        if (handle.name.search("E") !== -1) {
+          handle.quaternion.setFromRotationMatrix(_lookAtMatrix.lookAt(this.eye, _zeroVector, _unitY));
+        }
+        if (handle.name === "X") {
+          _tempQuaternion.setFromAxisAngle(_unitX, Math.atan2(-_alignVector.y, _alignVector.z));
+          _tempQuaternion.multiplyQuaternions(_tempQuaternion2, _tempQuaternion);
+          handle.quaternion.copy(_tempQuaternion);
+        }
+        if (handle.name === "Y") {
+          _tempQuaternion.setFromAxisAngle(_unitY, Math.atan2(_alignVector.x, _alignVector.z));
+          _tempQuaternion.multiplyQuaternions(_tempQuaternion2, _tempQuaternion);
+          handle.quaternion.copy(_tempQuaternion);
+        }
+        if (handle.name === "Z") {
+          _tempQuaternion.setFromAxisAngle(_unitZ, Math.atan2(_alignVector.y, _alignVector.x));
+          _tempQuaternion.multiplyQuaternions(_tempQuaternion2, _tempQuaternion);
+          handle.quaternion.copy(_tempQuaternion);
+        }
+      }
+      handle.visible = handle.visible && (handle.name.indexOf("X") === -1 || this.showX);
+      handle.visible = handle.visible && (handle.name.indexOf("Y") === -1 || this.showY);
+      handle.visible = handle.visible && (handle.name.indexOf("Z") === -1 || this.showZ);
+      handle.visible = handle.visible && (handle.name.indexOf("E") === -1 || this.showX && this.showY && this.showZ);
+      handle.material._color = handle.material._color || handle.material.color.clone();
+      handle.material._opacity = handle.material._opacity || handle.material.opacity;
+      handle.material.color.copy(handle.material._color);
+      handle.material.opacity = handle.material._opacity;
+      if (this.enabled && this.axis) {
+        if (handle.name === this.axis) {
+          handle.material.color.setHex(16776960);
+          handle.material.opacity = 1;
+        } else if (this.axis.split("").some(function(a) {
+          return handle.name === a;
+        })) {
+          handle.material.color.setHex(16776960);
+          handle.material.opacity = 1;
+        }
+      }
+    }
+    super.updateMatrixWorld(force);
+  }
+};
+var TransformControlsPlane = class extends Mesh {
+  constructor() {
+    super(
+      new PlaneGeometry(1e5, 1e5, 2, 2),
+      new MeshBasicMaterial({ visible: false, wireframe: true, side: DoubleSide, transparent: true, opacity: 0.1, toneMapped: false })
+    );
+    this.isTransformControlsPlane = true;
+    this.type = "TransformControlsPlane";
+  }
+  updateMatrixWorld(force) {
+    let space = this.space;
+    this.position.copy(this.worldPosition);
+    if (this.mode === "scale") space = "local";
+    _v12.copy(_unitX).applyQuaternion(space === "local" ? this.worldQuaternion : _identityQuaternion);
+    _v22.copy(_unitY).applyQuaternion(space === "local" ? this.worldQuaternion : _identityQuaternion);
+    _v3.copy(_unitZ).applyQuaternion(space === "local" ? this.worldQuaternion : _identityQuaternion);
+    _alignVector.copy(_v22);
+    switch (this.mode) {
+      case "translate":
+      case "scale":
+        switch (this.axis) {
+          case "X":
+            _alignVector.copy(this.eye).cross(_v12);
+            _dirVector.copy(_v12).cross(_alignVector);
+            break;
+          case "Y":
+            _alignVector.copy(this.eye).cross(_v22);
+            _dirVector.copy(_v22).cross(_alignVector);
+            break;
+          case "Z":
+            _alignVector.copy(this.eye).cross(_v3);
+            _dirVector.copy(_v3).cross(_alignVector);
+            break;
+          case "XY":
+            _dirVector.copy(_v3);
+            break;
+          case "YZ":
+            _dirVector.copy(_v12);
+            break;
+          case "XZ":
+            _alignVector.copy(_v3);
+            _dirVector.copy(_v22);
+            break;
+          case "XYZ":
+          case "E":
+            _dirVector.set(0, 0, 0);
+            break;
+        }
+        break;
+      case "rotate":
+      default:
+        _dirVector.set(0, 0, 0);
+    }
+    if (_dirVector.length() === 0) {
+      this.quaternion.copy(this.cameraQuaternion);
+    } else {
+      _tempMatrix.lookAt(_tempVector.set(0, 0, 0), _dirVector, _alignVector);
+      this.quaternion.setFromRotationMatrix(_tempMatrix);
+    }
+    super.updateMatrixWorld(force);
+  }
+};
+
+// frontend/js/scene_panel.js
+var ScenePanel = class {
+  /**
+   * @param {import("./viewer_3d.js").Viewer3D} viewer
+   * @param {object} deps
+   * @param {(msg:string, type?:string)=>void} deps.showToast
+   * @param {()=>Promise<void>} deps.onSaveScene - app-owned save flow
+   */
+  constructor(viewer, deps) {
+    this._viewer = viewer;
+    this._toast = deps.showToast;
+    this._onSaveScene = deps.onSaveScene;
+    this._panel = document.getElementById("scene-panel");
+    this._list = document.getElementById("scene-objects-list");
+    this._toggleBtn = document.getElementById("scene-toggle");
+    this._gizmoMode = "translate";
+    if (!this._panel || !this._toggleBtn) return;
+    this._toggleBtn.addEventListener("click", () => {
+      const visible = this._panel.style.display !== "none";
+      this._panel.style.display = visible ? "none" : "block";
+      this._toggleBtn.classList.toggle("active", !visible);
+    });
+    document.getElementById("scene-frame-all")?.addEventListener("click", () => {
+      this._viewer.frameAll();
+    });
+    document.getElementById("scene-save")?.addEventListener("click", () => {
+      this._onSaveScene();
+    });
+    for (const mode of ["translate", "rotate", "scale"]) {
+      document.getElementById(`gizmo-${mode}`)?.addEventListener("click", () => {
+        this.setGizmoMode(mode);
+      });
+    }
+    viewer._container.addEventListener("objectschange", (e) => {
+      this._render(e.detail);
+    });
+    this._initGizmo();
+    this._initClickSelect();
+  }
+  // ------------------------------------------------------------------
+  // Gizmo (three.js TransformControls on the wrapper = placement only)
+  // ------------------------------------------------------------------
+  _initGizmo() {
+    const v = this._viewer;
+    this._gizmo = new TransformControls(v._camera, v._renderer.domElement);
+    this._gizmo.setMode(this._gizmoMode);
+    const helper = this._gizmo.getHelper();
+    helper.name = "__gizmo__";
+    v._scene.add(helper);
+    v._captureHidden = v._captureHidden || [];
+    v._captureHidden.push(helper);
+    this._gizmo.addEventListener("dragging-changed", (e) => {
+      v._controls.enabled = !e.value;
+      if (!e.value) {
+        v._updateSceneRig(v._visibleUnionBox());
+        this._refreshTransforms();
+      }
+    });
+    window.addEventListener("keydown", (e) => {
+      if (!this._gizmo.object) return;
+      const tag = document.activeElement && document.activeElement.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      const key = e.key.toLowerCase();
+      if (key === "t") this.setGizmoMode("translate");
+      else if (key === "r") this.setGizmoMode("rotate");
+      else if (key === "s") this.setGizmoMode("scale");
+    });
+  }
+  setGizmoMode(mode) {
+    this._gizmoMode = mode;
+    this._gizmo.setMode(mode);
+    for (const m of ["translate", "rotate", "scale"]) {
+      document.getElementById(`gizmo-${m}`)?.classList.toggle("active", m === mode);
+    }
+  }
+  /** Attach the gizmo to an object's placement wrapper (never the model). */
+  _attachGizmo(entry) {
+    if (!entry) {
+      this._gizmo.detach();
+      return;
+    }
+    this._gizmo.attach(entry.wrapper);
+    this._gizmo.setSize(0.9);
+  }
+  // ------------------------------------------------------------------
+  // Click-to-select in the viewport
+  // ------------------------------------------------------------------
+  _initClickSelect() {
+    const v = this._viewer;
+    const canvas = v._renderer.domElement;
+    const raycaster = new Raycaster();
+    const mouse = new Vector2();
+    let downPos = null;
+    let downTime = 0;
+    canvas.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      downPos = { x: e.clientX, y: e.clientY };
+      downTime = performance.now();
+    });
+    canvas.addEventListener("mouseup", (e) => {
+      if (e.button !== 0 || !downPos) return;
+      const wasDrag = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) > 6 || performance.now() - downTime > 350;
+      downPos = null;
+      if (wasDrag) return;
+      if (v._objects.length < 2 || v._measureMode || this._gizmo.dragging) return;
+      const rect = canvas.getBoundingClientRect();
+      mouse.x = (e.clientX - rect.left) / rect.width * 2 - 1;
+      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(mouse, v._camera);
+      const hits = raycaster.intersectObjects(v._visibleMeshes(), false);
+      if (hits.length === 0) return;
+      const entry = v._entryForNode(hits[0].object);
+      if (entry && entry.id !== v._activeObjectId) {
+        v.setActiveObject(entry.id);
+        this._toast(`Selected: ${entry.name}`, "info");
+      }
+    });
+  }
+  // ------------------------------------------------------------------
+  // Panel rendering
+  // ------------------------------------------------------------------
+  _render(detail) {
+    if (!this._list) return;
+    const objects = detail.objects || [];
+    if (objects.length > 1 && this._panel.style.display === "none") {
+      this._panel.style.display = "block";
+      this._toggleBtn.classList.add("active");
+    }
+    if (objects.length === 0) {
+      this._panel.style.display = "none";
+      this._toggleBtn.classList.remove("active");
+    }
+    const count = document.getElementById("scene-objects-count");
+    if (count) count.textContent = objects.length ? `${objects.length}` : "";
+    this._list.innerHTML = "";
+    for (const obj of objects) {
+      this._list.appendChild(this._buildRow(obj));
+    }
+    const active = this._viewer._activeEntry();
+    this._attachGizmo(objects.length > 1 ? active : null);
+  }
+  _buildRow(obj) {
+    const v = this._viewer;
+    const row = document.createElement("div");
+    row.className = "scene-object-row" + (obj.active ? " active" : "");
+    const name = document.createElement("span");
+    name.className = "scene-object-name";
+    name.textContent = obj.name;
+    name.title = obj.name;
+    name.addEventListener("click", () => v.setActiveObject(obj.id));
+    row.appendChild(name);
+    const eye = document.createElement("button");
+    eye.className = "scene-object-btn";
+    eye.textContent = obj.visible ? "\u{1F441}" : "\u2013";
+    eye.title = obj.visible ? "Hide" : "Show";
+    eye.addEventListener("click", () => {
+      v.setObjectVisible(obj.id, !obj.visible);
+      this._render({ objects: v.listObjects() });
+    });
+    row.appendChild(eye);
+    const opacity = document.createElement("input");
+    opacity.type = "range";
+    opacity.min = "0.1";
+    opacity.max = "1";
+    opacity.step = "0.05";
+    opacity.value = String(obj.opacity);
+    opacity.className = "scene-object-opacity";
+    opacity.title = "Opacity";
+    opacity.addEventListener("input", () => {
+      v.setObjectOpacity(obj.id, parseFloat(opacity.value));
+    });
+    row.appendChild(opacity);
+    const reset = document.createElement("button");
+    reset.className = "scene-object-btn";
+    reset.textContent = "\u27F2";
+    reset.title = "Reset placement (position/rotation/scale)";
+    reset.addEventListener("click", () => {
+      v.resetObjectTransform(obj.id);
+      this._toast(`Placement reset: ${obj.name}`, "info");
+    });
+    row.appendChild(reset);
+    const remove = document.createElement("button");
+    remove.className = "scene-object-btn";
+    remove.textContent = "\u2715";
+    remove.title = "Remove from scene";
+    remove.addEventListener("click", () => {
+      v.removeObject(obj.id);
+    });
+    row.appendChild(remove);
+    return row;
+  }
+  _refreshTransforms() {
+    this._render({ objects: this._viewer.listObjects() });
+  }
+};
+
 // frontend/js/app.js
 var App = class {
   constructor() {
@@ -50165,7 +52294,8 @@ var App = class {
       (text) => this._updateStatus(text),
       (asset) => this._onExportRequested(asset),
       this._thumbnailer,
-      (asset) => this._onCompareRequested(asset)
+      (asset) => this._onCompareRequested(asset),
+      (asset) => this._onAddToScene(asset)
     );
     this._viewer = new Viewer3D(
       this._elements.viewerContainer,
@@ -50179,6 +52309,10 @@ var App = class {
       }
     );
     this._comparer = new ModelComparer(this._viewer, (m, t2) => this._showToast(m, t2));
+    this._scenePanel = new ScenePanel(this._viewer, {
+      showToast: (m, t2) => this._showToast(m, t2),
+      onSaveScene: () => this._saveScene()
+    });
     this._exportPanel = new ExportPanel(
       {
         controls: this._elements.assetControls,
@@ -50268,6 +52402,7 @@ var App = class {
     this._agentLink = new AgentLink({
       fileBrowser: this._fileBrowser,
       openAsset: (asset) => this._onAssetSelected(asset),
+      openScene: (path) => this._loadSceneFile(path),
       applyCamera: (cam) => this._applyAgentCamera(cam),
       getLoadedAssetKey: () => this._lastLoadedAsset ? assetKey(this._lastLoadedAsset) : null,
       showToast: (m, t2) => this._showToast(m, t2)
@@ -50348,47 +52483,83 @@ var App = class {
     }
   }
   /**
+   * Resolve an asset (plain file or archive member) to a loadable URL + viewer
+   * options. Shared by replace-load, add-to-scene, and scene-manifest loads so
+   * FBX auto-conversion, archive extraction, related files, and the persistent
+   * source descriptor behave identically everywhere.
+   */
+  async _resolveAssetForLoad(asset) {
+    let url;
+    let relatedFiles = asset.related_files || [];
+    let sourcePath = asset.path;
+    let loadExtension = asset.extension;
+    const source = asset.is_in_archive ? { kind: "archive", archivePath: asset.archive_path, innerPath: asset.inner_path } : { kind: "file", path: asset.path };
+    if (asset.is_in_archive) {
+      const prepareUrl = `/api/asset/prepare_archive?archive_path=${encodeURIComponent(asset.archive_path)}&inner_path=${encodeURIComponent(asset.inner_path)}`;
+      const prepResp = await fetch(prepareUrl);
+      if (!prepResp.ok) {
+        const err2 = await prepResp.json();
+        throw new Error(err2.detail || "Failed to extract from archive");
+      }
+      const prepared = await prepResp.json();
+      url = prepared.file_url;
+      relatedFiles = prepared.related_files || [];
+      sourcePath = prepared.file_path || asset.path;
+      if (prepared.actual_extension) {
+        loadExtension = prepared.actual_extension;
+      }
+    } else {
+      url = `/api/asset/file?path=${encodeURIComponent(asset.path)}`;
+      if (asset.extension.toLowerCase() === ".fbx") {
+        try {
+          const headResp = await fetch(url, { method: "HEAD" });
+          const ct2 = headResp.headers.get("content-type") || "";
+          if (ct2.includes("obj")) {
+            loadExtension = ".obj";
+          }
+        } catch {
+        }
+      }
+    }
+    return {
+      url,
+      loadExtension,
+      options: {
+        relatedFiles,
+        sourcePath,
+        source,
+        name: `${asset.name}${asset.extension}`
+      }
+    };
+  }
+  /**
+   * Composed-scene guard: replacing a multi-object scene must be a deliberate
+   * act, not a stray sidebar click (a 30-minute composition would die silently).
+   */
+  _confirmSceneReplace(what) {
+    const count = this._viewer._objects ? this._viewer._objects.length : 0;
+    if (count <= 1) return true;
+    return window.confirm(
+      `Replace the current scene (${count} objects) with ${what}?
+Use right-click \u2192 "Add to scene" to compose instead, or Save the scene first.`
+    );
+  }
+  /**
    * Called when a 3D asset is selected in the file browser.
    * Loads the asset in the 3D viewer and shows the export controls.
    */
   async _onAssetSelected(asset) {
+    if (String(asset.extension).toLowerCase() === ".mvscene") {
+      await this._loadSceneFile(asset.path);
+      return;
+    }
+    if (!this._confirmSceneReplace(`"${asset.name}${asset.extension}"`)) return;
     if (this._comparer && this._comparer.isActive) this._comparer.clear();
     this._lastLoadedAsset = asset;
     this._elements.loadingOverlay.style.display = "flex";
     this._elements.viewerPlaceholder.style.display = "none";
     try {
-      let url;
-      let relatedFiles = asset.related_files || [];
-      let sourcePath = asset.path;
-      let loadExtension = asset.extension;
-      if (asset.is_in_archive) {
-        const prepareUrl = `/api/asset/prepare_archive?archive_path=${encodeURIComponent(asset.archive_path)}&inner_path=${encodeURIComponent(asset.inner_path)}`;
-        const prepResp = await fetch(prepareUrl);
-        if (!prepResp.ok) {
-          const err2 = await prepResp.json();
-          throw new Error(err2.detail || "Failed to extract from archive");
-        }
-        const prepared = await prepResp.json();
-        url = prepared.file_url;
-        relatedFiles = prepared.related_files || [];
-        sourcePath = prepared.file_path || asset.path;
-        if (prepared.actual_extension) {
-          loadExtension = prepared.actual_extension;
-        }
-      } else {
-        url = `/api/asset/file?path=${encodeURIComponent(asset.path)}`;
-        if (asset.extension.toLowerCase() === ".fbx") {
-          try {
-            const headResp = await fetch(url, { method: "HEAD" });
-            const ct2 = headResp.headers.get("content-type") || "";
-            if (ct2.includes("obj")) {
-              loadExtension = ".obj";
-            }
-          } catch {
-          }
-        }
-      }
-      const options = { relatedFiles, sourcePath };
+      const { url, loadExtension, options } = await this._resolveAssetForLoad(asset);
       await this._viewer.loadModel(url, loadExtension, options);
       this._exportPanel.setAsset(
         asset,
@@ -50408,6 +52579,188 @@ var App = class {
       this._updateStatus(`Error loading asset`);
     } finally {
       this._elements.loadingOverlay.style.display = "none";
+    }
+  }
+  // ==========================================================
+  // Scene composition (backlog 042)
+  // ==========================================================
+  /** Context menu → "Add to scene": co-load without clearing (composition). */
+  async _onAddToScene(asset) {
+    if (!this._viewer._objects.length) {
+      await this._onAssetSelected(asset);
+      return;
+    }
+    this._elements.loadingOverlay.style.display = "flex";
+    try {
+      const { url, loadExtension, options } = await this._resolveAssetForLoad(asset);
+      const result = await this._viewer.addModel(url, loadExtension, options);
+      if (result.discarded) return;
+      const count = this._viewer._objects.length;
+      this._updateStatus(`Added: ${asset.name}${asset.extension} (${count} objects in scene)`);
+      this._showToast(`Added to scene: ${asset.name}${asset.extension}`, "info");
+    } catch (err2) {
+      console.error("Add to scene failed:", err2);
+      this._showToast(`Add to scene failed: ${err2.message}`, "error");
+    } finally {
+      this._elements.loadingOverlay.style.display = "none";
+    }
+  }
+  /** Load a .mvscene manifest and rebuild the composition (replaces the scene). */
+  async _loadSceneFile(path) {
+    if (!this._confirmSceneReplace(`the scene file "${path.split("/").pop()}"`)) return;
+    this._elements.loadingOverlay.style.display = "flex";
+    this._elements.viewerPlaceholder.style.display = "none";
+    try {
+      const resp = await fetch(`/api/scene/load?path=${encodeURIComponent(path)}`);
+      if (!resp.ok) {
+        const err2 = await resp.json().catch(() => ({}));
+        throw new Error(err2.detail || `Scene load failed (${resp.status})`);
+      }
+      const { manifest } = await resp.json();
+      const { loaded, failed } = await this._applySceneManifest(manifest);
+      this._elements.viewerInfo.style.display = "flex";
+      this._resetScaleControl();
+      if (this._resetRenderModeUI) this._resetRenderModeUI();
+      this._agentLink.syncScene(path);
+      this._updateStatus(`Scene loaded: ${loaded} object${loaded === 1 ? "" : "s"}` + (failed.length ? ` (${failed.length} unavailable)` : ""));
+      if (failed.length) {
+        this._showToast(`${failed.length} object(s) unavailable: ` + failed.slice(0, 3).join(", ") + (failed.length > 3 ? "\u2026" : ""), "error");
+      }
+    } catch (err2) {
+      console.error("Scene load failed:", err2);
+      this._showToast(`Scene load failed: ${err2.message}`, "error");
+      this._elements.viewerPlaceholder.style.display = "flex";
+    } finally {
+      this._elements.loadingOverlay.style.display = "none";
+    }
+  }
+  /**
+   * Rebuild a scene from a manifest: add every resolvable object with its saved
+   * placement/visibility/opacity, then restore scene lighting/environment/
+   * background. One unavailable object degrades per-object, never the scene.
+   */
+  async _applySceneManifest(manifest) {
+    this._viewer.unload();
+    if (this._comparer && this._comparer.isActive) this._comparer.clear();
+    let loaded = 0;
+    const failed = [];
+    const browseCache = /* @__PURE__ */ new Map();
+    for (const obj of manifest.objects || []) {
+      try {
+        const src = obj.source || {};
+        let resolved;
+        if (src.kind === "file") {
+          const asset = await this._assetFromPath(src.path, browseCache);
+          resolved = await this._resolveAssetForLoad(asset);
+        } else if (src.kind === "archive") {
+          const inner = src.innerPath || "";
+          resolved = await this._resolveAssetForLoad({
+            is_in_archive: true,
+            archive_path: src.archivePath,
+            inner_path: inner,
+            path: src.archivePath,
+            name: (obj.name || inner).replace(/\.[^.]+$/, ""),
+            extension: "." + inner.split(".").pop().toLowerCase(),
+            related_files: []
+          });
+        } else if (src.kind === "url") {
+          const ext = "." + String(src.url).split(".").pop().split("?")[0].toLowerCase();
+          resolved = {
+            url: src.url,
+            loadExtension: ext,
+            options: { relatedFiles: [], source: src, name: obj.name }
+          };
+        } else {
+          throw new Error("unsupported source");
+        }
+        const result = await this._viewer.addModel(resolved.url, resolved.loadExtension, {
+          ...resolved.options,
+          name: obj.name || resolved.options.name,
+          transform: obj.transform,
+          frame: false
+        });
+        if (result.objectId !== void 0) {
+          if (obj.visible === false) this._viewer.setObjectVisible(result.objectId, false);
+          if (typeof obj.opacity === "number" && obj.opacity < 1) {
+            this._viewer.setObjectOpacity(result.objectId, obj.opacity);
+          }
+        }
+        loaded++;
+      } catch (err2) {
+        console.warn("Scene object unavailable:", obj.name, err2);
+        failed.push(obj.name || "(unnamed)");
+      }
+    }
+    const lighting = manifest.lighting;
+    if (lighting) {
+      this._viewer.setLighting({
+        azimuth: lighting.keyAzimuth,
+        elevation: lighting.keyElevation,
+        key_intensity: lighting.keyIntensity,
+        fill_intensity: lighting.fillIntensity,
+        ambient: lighting.ambientIntensity,
+        exposure: lighting.exposure
+      });
+    }
+    if (manifest.environment) this._viewer.setEnvironment(manifest.environment);
+    if (typeof manifest.background === "string") this._viewer.setBackground(manifest.background);
+    this._viewer.frameAll();
+    return { loaded, failed };
+  }
+  /**
+   * Full asset record for an absolute path, via the guarded browse endpoint —
+   * the listing carries related_files (MTL/textures), which manifests don't.
+   * Results are cached per parent directory for multi-object scene loads.
+   */
+  async _assetFromPath(path, cache = /* @__PURE__ */ new Map()) {
+    const dir = path.slice(0, path.lastIndexOf("/")) || "/";
+    if (!cache.has(dir)) {
+      const resp = await fetch(`/api/browse?path=${encodeURIComponent(dir)}`);
+      if (!resp.ok) throw new Error(`folder unavailable: ${dir}`);
+      cache.set(dir, (await resp.json()).assets || []);
+    }
+    const base = path.split("/").pop();
+    const asset = cache.get(dir).find(
+      (a) => !a.is_in_archive && a.path.split("/").pop() === base
+    );
+    if (!asset) throw new Error(`not found: ${path}`);
+    return asset;
+  }
+  /** Save the composed scene as a .mvscene file in the current browse directory. */
+  async _saveScene() {
+    const manifest = this._viewer.getSceneManifest();
+    if (!manifest.objects.length) {
+      this._showToast("Nothing to save \u2014 the scene has no persistable objects", "error");
+      return;
+    }
+    if (manifest.skippedVolatile && manifest.skippedVolatile.length) {
+      this._showToast(`Not saved (drag-dropped, no file path): ` + manifest.skippedVolatile.join(", "), "info");
+    }
+    const name = window.prompt("Scene name (.mvscene):", "scene");
+    if (!name) return;
+    const targetDir = this._fileBrowser.currentPath;
+    const save = async (overwrite) => fetch("/api/scene/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target_dir: targetDir, name, manifest, overwrite })
+    });
+    try {
+      let resp = await save(false);
+      if (resp.status === 409) {
+        if (!window.confirm(`"${name}.mvscene" exists \u2014 overwrite?`)) return;
+        resp = await save(true);
+      }
+      if (!resp.ok) {
+        const err2 = await resp.json().catch(() => ({}));
+        throw new Error(err2.detail || `save failed (${resp.status})`);
+      }
+      const data = await resp.json();
+      this._showToast(`Scene saved: ${data.path.split("/").pop()} (${data.objects} objects)`, "info");
+      await this._fileBrowser.browse(targetDir);
+      this._agentLink.syncScene(data.path);
+    } catch (err2) {
+      console.error("Scene save failed:", err2);
+      this._showToast(`Scene save failed: ${err2.message}`, "error");
     }
   }
   /**
@@ -51390,6 +53743,7 @@ var App = class {
    * genuine local-preview path that respects the sandbox: nothing is written.
    */
   async _loadDroppedFile(file, ext) {
+    if (!this._confirmSceneReplace(`the dropped file "${file.name}"`)) return;
     this._elements.loadingOverlay.style.display = "flex";
     this._elements.viewerPlaceholder.style.display = "none";
     let objectUrl = null;

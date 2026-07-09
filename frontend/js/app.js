@@ -11,6 +11,7 @@ import { ExportPanel } from "./export_panel.js";
 import { Thumbnailer } from "./thumbnailer.js";
 import { ModelComparer } from "./compare.js";
 import { AgentLink } from "./agent_link.js";
+import { ScenePanel } from "./scene_panel.js";
 
 
 class App {
@@ -48,6 +49,7 @@ class App {
             (asset) => this._onExportRequested(asset),
             this._thumbnailer,
             (asset) => this._onCompareRequested(asset),
+            (asset) => this._onAddToScene(asset),
         );
 
         this._viewer = new Viewer3D(
@@ -65,6 +67,12 @@ class App {
 
         // Shape comparison (backlog 041): compare another asset against the loaded model.
         this._comparer = new ModelComparer(this._viewer, (m, t) => this._showToast(m, t));
+
+        // Scene composition UI (objects panel + gizmo + click-select), backlog 042.
+        this._scenePanel = new ScenePanel(this._viewer, {
+            showToast: (m, t) => this._showToast(m, t),
+            onSaveScene: () => this._saveScene(),
+        });
 
         this._exportPanel = new ExportPanel(
             {
@@ -185,10 +193,11 @@ class App {
         this._initDragAndDrop();
         this._initRecentFiles();
 
-        // --- Agent link: deep links (?path=/?dir=) + live agent push (SSE) ---
+        // --- Agent link: deep links (?path=/?dir=/?scene=) + live agent push (SSE) ---
         this._agentLink = new AgentLink({
             fileBrowser: this._fileBrowser,
             openAsset: (asset) => this._onAssetSelected(asset),
+            openScene: (path) => this._loadSceneFile(path),
             applyCamera: (cam) => this._applyAgentCamera(cam),
             getLoadedAssetKey: () =>
                 this._lastLoadedAsset ? assetKey(this._lastLoadedAsset) : null,
@@ -287,10 +296,98 @@ class App {
     }
 
     /**
+     * Resolve an asset (plain file or archive member) to a loadable URL + viewer
+     * options. Shared by replace-load, add-to-scene, and scene-manifest loads so
+     * FBX auto-conversion, archive extraction, related files, and the persistent
+     * source descriptor behave identically everywhere.
+     */
+    async _resolveAssetForLoad(asset) {
+        let url;
+        let relatedFiles = asset.related_files || [];
+        let sourcePath = asset.path;
+
+        // The actual format to load (may differ if FBX was auto-converted to OBJ)
+        let loadExtension = asset.extension;
+
+        // Persistent source identity for scene manifests (backlog 042).
+        const source = asset.is_in_archive
+            ? { kind: "archive", archivePath: asset.archive_path, innerPath: asset.inner_path }
+            : { kind: "file", path: asset.path };
+
+        if (asset.is_in_archive) {
+            // For archived assets, use the prepare endpoint to extract
+            // and get resolved temp filesystem paths for all files
+            const prepareUrl = `/api/asset/prepare_archive?archive_path=${
+                encodeURIComponent(asset.archive_path)
+            }&inner_path=${encodeURIComponent(asset.inner_path)}`;
+
+            const prepResp = await fetch(prepareUrl);
+            if (!prepResp.ok) {
+                const err = await prepResp.json();
+                throw new Error(err.detail || "Failed to extract from archive");
+            }
+
+            const prepared = await prepResp.json();
+            url = prepared.file_url;
+            // Use the resolved temp paths instead of archive-internal paths
+            relatedFiles = prepared.related_files || [];
+            sourcePath = prepared.file_path || asset.path;
+            // Use actual extension (may be .obj if FBX was auto-converted)
+            if (prepared.actual_extension) {
+                loadExtension = prepared.actual_extension;
+            }
+        } else {
+            url = `/api/asset/file?path=${encodeURIComponent(asset.path)}`;
+            // For FBX files on disk, the backend may auto-convert old versions
+            // to OBJ. Check the response content-type to detect this.
+            if (asset.extension.toLowerCase() === ".fbx") {
+                try {
+                    const headResp = await fetch(url, { method: "HEAD" });
+                    const ct = headResp.headers.get("content-type") || "";
+                    if (ct.includes("obj")) {
+                        loadExtension = ".obj";
+                    }
+                } catch { /* ignore, will try as FBX */ }
+            }
+        }
+
+        return {
+            url,
+            loadExtension,
+            options: {
+                relatedFiles,
+                sourcePath,
+                source,
+                name: `${asset.name}${asset.extension}`,
+            },
+        };
+    }
+
+    /**
+     * Composed-scene guard: replacing a multi-object scene must be a deliberate
+     * act, not a stray sidebar click (a 30-minute composition would die silently).
+     */
+    _confirmSceneReplace(what) {
+        const count = this._viewer._objects ? this._viewer._objects.length : 0;
+        if (count <= 1) return true;
+        return window.confirm(
+            `Replace the current scene (${count} objects) with ${what}?\n` +
+            `Use right-click → "Add to scene" to compose instead, or Save the scene first.`);
+    }
+
+    /**
      * Called when a 3D asset is selected in the file browser.
      * Loads the asset in the 3D viewer and shows the export controls.
      */
     async _onAssetSelected(asset) {
+        // Scene manifests rebuild a whole composition — their own flow entirely.
+        if (String(asset.extension).toLowerCase() === ".mvscene") {
+            await this._loadSceneFile(asset.path);
+            return;
+        }
+
+        if (!this._confirmSceneReplace(`"${asset.name}${asset.extension}"`)) return;
+
         // Selecting a new model ends any active comparison (heatmap belongs to the old one).
         if (this._comparer && this._comparer.isActive) this._comparer.clear();
 
@@ -301,52 +398,7 @@ class App {
         this._elements.viewerPlaceholder.style.display = "none";
 
         try {
-            let url;
-            let relatedFiles = asset.related_files || [];
-            let sourcePath = asset.path;
-
-            // The actual format to load (may differ if FBX was auto-converted to OBJ)
-            let loadExtension = asset.extension;
-
-            if (asset.is_in_archive) {
-                // For archived assets, use the prepare endpoint to extract
-                // and get resolved temp filesystem paths for all files
-                const prepareUrl = `/api/asset/prepare_archive?archive_path=${
-                    encodeURIComponent(asset.archive_path)
-                }&inner_path=${encodeURIComponent(asset.inner_path)}`;
-
-                const prepResp = await fetch(prepareUrl);
-                if (!prepResp.ok) {
-                    const err = await prepResp.json();
-                    throw new Error(err.detail || "Failed to extract from archive");
-                }
-
-                const prepared = await prepResp.json();
-                url = prepared.file_url;
-                // Use the resolved temp paths instead of archive-internal paths
-                relatedFiles = prepared.related_files || [];
-                sourcePath = prepared.file_path || asset.path;
-                // Use actual extension (may be .obj if FBX was auto-converted)
-                if (prepared.actual_extension) {
-                    loadExtension = prepared.actual_extension;
-                }
-            } else {
-                url = `/api/asset/file?path=${encodeURIComponent(asset.path)}`;
-                // For FBX files on disk, the backend may auto-convert old versions
-                // to OBJ. Check the response content-type to detect this.
-                if (asset.extension.toLowerCase() === ".fbx") {
-                    try {
-                        const headResp = await fetch(url, { method: "HEAD" });
-                        const ct = headResp.headers.get("content-type") || "";
-                        if (ct.includes("obj")) {
-                            loadExtension = ".obj";
-                        }
-                    } catch { /* ignore, will try as FBX */ }
-                }
-            }
-
-            // Prepare options for the viewer
-            const options = { relatedFiles, sourcePath };
+            const { url, loadExtension, options } = await this._resolveAssetForLoad(asset);
 
             // Load the model (use loadExtension which may differ from original
             // if backend auto-converted an old FBX to OBJ)
@@ -382,6 +434,206 @@ class App {
             this._updateStatus(`Error loading asset`);
         } finally {
             this._elements.loadingOverlay.style.display = "none";
+        }
+    }
+
+    // ==========================================================
+    // Scene composition (backlog 042)
+    // ==========================================================
+
+    /** Context menu → "Add to scene": co-load without clearing (composition). */
+    async _onAddToScene(asset) {
+        // An empty viewer has nothing to compose with — behave like a normal load.
+        if (!this._viewer._objects.length) {
+            await this._onAssetSelected(asset);
+            return;
+        }
+        this._elements.loadingOverlay.style.display = "flex";
+        try {
+            const { url, loadExtension, options } = await this._resolveAssetForLoad(asset);
+            const result = await this._viewer.addModel(url, loadExtension, options);
+            if (result.discarded) return;
+            const count = this._viewer._objects.length;
+            this._updateStatus(`Added: ${asset.name}${asset.extension} (${count} objects in scene)`);
+            this._showToast(`Added to scene: ${asset.name}${asset.extension}`, "info");
+        } catch (err) {
+            console.error("Add to scene failed:", err);
+            this._showToast(`Add to scene failed: ${err.message}`, "error");
+        } finally {
+            this._elements.loadingOverlay.style.display = "none";
+        }
+    }
+
+    /** Load a .mvscene manifest and rebuild the composition (replaces the scene). */
+    async _loadSceneFile(path) {
+        if (!this._confirmSceneReplace(`the scene file "${path.split("/").pop()}"`)) return;
+
+        this._elements.loadingOverlay.style.display = "flex";
+        this._elements.viewerPlaceholder.style.display = "none";
+        try {
+            const resp = await fetch(`/api/scene/load?path=${encodeURIComponent(path)}`);
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                throw new Error(err.detail || `Scene load failed (${resp.status})`);
+            }
+            const { manifest } = await resp.json();
+            const { loaded, failed } = await this._applySceneManifest(manifest);
+
+            this._elements.viewerInfo.style.display = "flex";
+            this._resetScaleControl();
+            if (this._resetRenderModeUI) this._resetRenderModeUI();
+            this._agentLink.syncScene(path);
+            this._updateStatus(`Scene loaded: ${loaded} object${loaded === 1 ? "" : "s"}`
+                + (failed.length ? ` (${failed.length} unavailable)` : ""));
+            if (failed.length) {
+                this._showToast(`${failed.length} object(s) unavailable: `
+                    + failed.slice(0, 3).join(", ")
+                    + (failed.length > 3 ? "…" : ""), "error");
+            }
+        } catch (err) {
+            console.error("Scene load failed:", err);
+            this._showToast(`Scene load failed: ${err.message}`, "error");
+            this._elements.viewerPlaceholder.style.display = "flex";
+        } finally {
+            this._elements.loadingOverlay.style.display = "none";
+        }
+    }
+
+    /**
+     * Rebuild a scene from a manifest: add every resolvable object with its saved
+     * placement/visibility/opacity, then restore scene lighting/environment/
+     * background. One unavailable object degrades per-object, never the scene.
+     */
+    async _applySceneManifest(manifest) {
+        this._viewer.unload();
+        if (this._comparer && this._comparer.isActive) this._comparer.clear();
+
+        let loaded = 0;
+        const failed = [];
+        const browseCache = new Map();
+
+        for (const obj of manifest.objects || []) {
+            try {
+                const src = obj.source || {};
+                let resolved;
+                if (src.kind === "file") {
+                    const asset = await this._assetFromPath(src.path, browseCache);
+                    resolved = await this._resolveAssetForLoad(asset);
+                } else if (src.kind === "archive") {
+                    const inner = src.innerPath || "";
+                    resolved = await this._resolveAssetForLoad({
+                        is_in_archive: true,
+                        archive_path: src.archivePath,
+                        inner_path: inner,
+                        path: src.archivePath,
+                        name: (obj.name || inner).replace(/\.[^.]+$/, ""),
+                        extension: "." + inner.split(".").pop().toLowerCase(),
+                        related_files: [],
+                    });
+                } else if (src.kind === "url") {
+                    const ext = "." + String(src.url).split(".").pop().split("?")[0].toLowerCase();
+                    resolved = {
+                        url: src.url, loadExtension: ext,
+                        options: { relatedFiles: [], source: src, name: obj.name },
+                    };
+                } else {
+                    throw new Error("unsupported source");
+                }
+
+                const result = await this._viewer.addModel(resolved.url, resolved.loadExtension, {
+                    ...resolved.options,
+                    name: obj.name || resolved.options.name,
+                    transform: obj.transform,
+                    frame: false,
+                });
+                if (result.objectId !== undefined) {
+                    if (obj.visible === false) this._viewer.setObjectVisible(result.objectId, false);
+                    if (typeof obj.opacity === "number" && obj.opacity < 1) {
+                        this._viewer.setObjectOpacity(result.objectId, obj.opacity);
+                    }
+                }
+                loaded++;
+            } catch (err) {
+                console.warn("Scene object unavailable:", obj.name, err);
+                failed.push(obj.name || "(unnamed)");
+            }
+        }
+
+        const lighting = manifest.lighting;
+        if (lighting) {
+            this._viewer.setLighting({
+                azimuth: lighting.keyAzimuth, elevation: lighting.keyElevation,
+                key_intensity: lighting.keyIntensity, fill_intensity: lighting.fillIntensity,
+                ambient: lighting.ambientIntensity, exposure: lighting.exposure,
+            });
+        }
+        if (manifest.environment) this._viewer.setEnvironment(manifest.environment);
+        if (typeof manifest.background === "string") this._viewer.setBackground(manifest.background);
+        this._viewer.frameAll();
+
+        return { loaded, failed };
+    }
+
+    /**
+     * Full asset record for an absolute path, via the guarded browse endpoint —
+     * the listing carries related_files (MTL/textures), which manifests don't.
+     * Results are cached per parent directory for multi-object scene loads.
+     */
+    async _assetFromPath(path, cache = new Map()) {
+        const dir = path.slice(0, path.lastIndexOf("/")) || "/";
+        if (!cache.has(dir)) {
+            const resp = await fetch(`/api/browse?path=${encodeURIComponent(dir)}`);
+            if (!resp.ok) throw new Error(`folder unavailable: ${dir}`);
+            cache.set(dir, (await resp.json()).assets || []);
+        }
+        const base = path.split("/").pop();
+        const asset = cache.get(dir).find(
+            (a) => !a.is_in_archive && a.path.split("/").pop() === base);
+        if (!asset) throw new Error(`not found: ${path}`);
+        return asset;
+    }
+
+    /** Save the composed scene as a .mvscene file in the current browse directory. */
+    async _saveScene() {
+        const manifest = this._viewer.getSceneManifest();
+        if (!manifest.objects.length) {
+            this._showToast("Nothing to save — the scene has no persistable objects", "error");
+            return;
+        }
+        if (manifest.skippedVolatile && manifest.skippedVolatile.length) {
+            this._showToast(`Not saved (drag-dropped, no file path): `
+                + manifest.skippedVolatile.join(", "), "info");
+        }
+        const name = window.prompt("Scene name (.mvscene):", "scene");
+        if (!name) return;
+        const targetDir = this._fileBrowser.currentPath;
+
+        const save = async (overwrite) => fetch("/api/scene/save", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ target_dir: targetDir, name, manifest, overwrite }),
+        });
+
+        try {
+            let resp = await save(false);
+            if (resp.status === 409) {
+                if (!window.confirm(`"${name}.mvscene" exists — overwrite?`)) return;
+                resp = await save(true);
+            }
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                throw new Error(err.detail || `save failed (${resp.status})`);
+            }
+            const data = await resp.json();
+            this._showToast(`Scene saved: ${data.path.split("/").pop()} `
+                + `(${data.objects} objects)`, "info");
+            // Refresh the listing FIRST (its navigate hook syncs ?dir=), then pin
+            // the more specific ?scene= deep link as the final URL state.
+            await this._fileBrowser.browse(targetDir);
+            this._agentLink.syncScene(data.path);
+        } catch (err) {
+            console.error("Scene save failed:", err);
+            this._showToast(`Scene save failed: ${err.message}`, "error");
         }
     }
 
@@ -1570,6 +1822,7 @@ class App {
      * genuine local-preview path that respects the sandbox: nothing is written.
      */
     async _loadDroppedFile(file, ext) {
+        if (!this._confirmSceneReplace(`the dropped file "${file.name}"`)) return;
         this._elements.loadingOverlay.style.display = "flex";
         this._elements.viewerPlaceholder.style.display = "none";
         let objectUrl = null;

@@ -205,6 +205,30 @@ const shot = await mv.execute({ action: "screenshot", params: { width: 1024, hei
 ```
 
 ================================================================================
+## 5b. Scene composition (multi-object scenes)
+
+`load` REPLACES the whole scene; `add_model` COMPOSES (same params as load, plus
+`transform` for immediate placement and `frame:false` to keep the camera). The newest
+object becomes ACTIVE — every single-object command (describe_scene, get_mesh_stats,
+center/ground/rotate, focus, animation) targets the active object; `describe_scene`
+adds a `scene` section (per-object summaries + totals) whenever objectCount > 1.
+
+- `list_objects` → per-object {id, name, active, visible, opacity, transform, source}.
+- `set_active_object { id }` — retarget single-object commands.
+- `set_object_transform { id, position?:[x,y,z], quaternion?:[x,y,z,w] |
+  rotation?:[x,y,z] Euler°, scale?:number | scale_xyz?:[x,y,z] }` — PLACEMENT lives
+  on a per-object wrapper, never baked into vertices; `get_object_transform`,
+  `reset_object_transform` read/clear it.
+- `set_object_visible { id, visible }`, `set_object_opacity { id, opacity:0..1 }`
+  (ghosting — display-only, exports keep authored materials), `remove_object { id }`.
+- `frame_all` — frame the union of visible objects (presets/orbit frame the ACTIVE
+  object only).
+- `get_scene_manifest` — version-1 JSON {objects:[{source, transform, visible,
+  opacity}], lighting, environment, background} for .mvscene persistence.
+- Vertex-bake ops normalize the active object in its OWN frame and refuse skinned
+  models. GLB export = all visible objects with placements applied.
+
+================================================================================
 ## 6. Camera
 
 - `set_view { preset: front|back|left|right|top|bottom|iso, fill?:0.1..1 }` — world-axis preset. `fill` = framing tightness (higher = tighter).

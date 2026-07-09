@@ -1877,3 +1877,38 @@ html, body {
 }
 .cmp-table td { padding: 4px 0; }
 .cmp-hint { margin-top: 10px; font-size: 11px; color: #7f858c; }
+
+/* ==========================================================
+   Scene composition panel (backlog 042)
+   ========================================================== */
+.scene-panel { width: 300px; }
+.scene-panel-actions {
+    display: flex; gap: 4px; padding: 8px 10px 4px;
+}
+.scene-panel-actions .btn-small {
+    flex: 1; padding: 4px 6px; font-size: 11px;
+    background: #1a1c22; color: #c8cdd4; border: 1px solid #2a2d35;
+    border-radius: 5px; cursor: pointer;
+}
+.scene-panel-actions .btn-small:hover { background: #24272f; }
+.scene-panel-actions .btn-small.active {
+    background: #2d5f8a; border-color: #3f79ab; color: #fff;
+}
+.scene-objects-list { max-height: 300px; overflow-y: auto; padding: 6px 8px 10px; }
+.scene-object-row {
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 6px; border-radius: 6px; font-size: 12px;
+}
+.scene-object-row.active { background: rgba(70, 130, 190, 0.22); }
+.scene-object-row:hover { background: rgba(255, 255, 255, 0.05); }
+.scene-object-name {
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    cursor: pointer; color: #d7dbe0;
+}
+.scene-object-row.active .scene-object-name { color: #fff; font-weight: 600; }
+.scene-object-btn {
+    background: none; border: none; color: #9aa1a9; cursor: pointer;
+    font-size: 12px; padding: 2px 4px; border-radius: 4px;
+}
+.scene-object-btn:hover { color: #fff; background: rgba(255,255,255,0.08); }
+.scene-object-opacity { width: 54px; }

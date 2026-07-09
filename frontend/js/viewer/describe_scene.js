@@ -79,6 +79,30 @@ export function describeScene(viewer, opts = {}) {
         },
     };
 
+    // Scene composition (backlog 042): when several objects are co-loaded, say so
+    // EXPLICITLY — the `model` section above describes only the ACTIVE object, and
+    // an agent QAing "the scene" must not mistake one object's counts for the whole.
+    if (state.scene && state.scene.objectCount > 1) {
+        const objs = state.scene.objects || [];
+        report.scene = {
+            objectCount: state.scene.objectCount,
+            activeObjectId: state.scene.activeObjectId,
+            // Scene-wide totals come from the per-entry loader stats (cheap); the
+            // ACTIVE object's numbers above are live-recomputed as before.
+            totalVertices: objs.reduce((s, o) => s + (o.vertices || 0), 0),
+            totalFaces: objs.reduce((s, o) => s + (o.faces || 0), 0),
+            bounds: state.scene.bounds,
+            objects: objs.slice(0, maxItems).map((o) => ({
+                id: o.id, name: o.name, active: o.active, visible: o.visible,
+                opacity: o.opacity, vertices: o.vertices, faces: o.faces,
+                position: o.transform ? o.transform.position : null,
+            })),
+            truncated: Math.max(0, objs.length - maxItems),
+            note: "model/meshes/materials/issues above describe the ACTIVE object only. "
+                + "Use set_active_object to inspect another; frame_all to view the whole scene.",
+        };
+    }
+
     // Optional: candidate "front" angles (costs a few offscreen renders → opt-in).
     if (opts.views) {
         try {
@@ -465,6 +489,13 @@ function buildSummary(r) {
     const m = r.model;
     const d = m.dimensions;
     const parts = [];
+    if (r.scene && r.scene.objectCount > 1) {
+        parts.push(
+            `Composed scene: ${r.scene.objectCount} objects, ` +
+            `${r.scene.totalFaces.toLocaleString()} faces total. ` +
+            `ACTIVE object described below (others summarized in \`scene.objects\`).`
+        );
+    }
     parts.push(
         `"${m.name}": ${m.meshCount} mesh${m.meshCount === 1 ? "" : "es"}, ` +
         `${m.materialCount} material${m.materialCount === 1 ? "" : "s"}` +

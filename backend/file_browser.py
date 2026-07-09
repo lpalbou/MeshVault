@@ -19,6 +19,10 @@ from backend.archive_inspector import ArchiveInspector
 SUPPORTED_3D_EXTENSIONS = {
     ".obj", ".fbx", ".gltf", ".glb", ".stl",
     ".ply", ".dae", ".3mf", ".usdz",
+    # Scene manifests (backlog 042): listed like assets so a click can rebuild the
+    # composed scene. The FRONTEND branches on the extension — scene files never
+    # enter the 3D loader or thumbnail pipelines.
+    ".mvscene",
 }
 
 # Supported archive extensions

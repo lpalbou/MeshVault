@@ -1,17 +1,19 @@
 # MeshVault MCP Server
 
 Drive the MeshVault 3D viewer from any MCP client (Claude Desktop, Claude Code, Cursor,
-VS Code, …). The server runs a headless, GPU-optional viewer and exposes **nine tools** —
-a deliberately thin surface routed through the viewer's self-describing control API
-(one-tool-per-command surfaces measurably degrade agent performance).
+VS Code, …). The server runs a headless, GPU-optional viewer and exposes **eleven
+tools** — a deliberately thin surface routed through the viewer's self-describing
+control API (one-tool-per-command surfaces measurably degrade agent performance).
 
 An agent can: load a model from a **URL or a local file path** (multi-file assets load
-textured), get a structured text description (no vision needed), discover and run any
-of the ~50 viewer commands (camera, render modes, lighting/IBL, transforms,
-cross-sections, measurement, animation), compare models geometrically, get PNG
-screenshots back as proper MCP image content, and share a session with a human both
-ways — push what it sees into the running app (`open_in_app`), or pick up what the
-human sees (`get_app_state`).
+textured), COMPOSE multi-object scenes (`load_model {add:true}` + placement commands,
+persisted as `.mvscene` manifests via `save_scene`/`load_scene`), get a structured text
+description (no vision needed), discover and run any of the ~60 viewer commands
+(camera, render modes, lighting/IBL, transforms, cross-sections, measurement,
+animation, per-object placement), compare models geometrically, get PNG screenshots
+back as proper MCP image content, and share a session with a human both ways — push
+what it sees into the running app (`open_in_app`), or pick up what the human sees
+(`get_app_state`).
 
 > Not speaking MCP? The local server also exposes `GET /api/screenshot` — a plain
 > authenticated HTTP endpoint returning a PNG render (same presets, same confinement)
@@ -85,7 +87,9 @@ interpreter and working directory).
 | `get_state` | Compact state snapshot (model, camera, display, animation, lighting) — verify a command's effect without a screenshot. |
 | `compare_models` | Compare ONE reference against N candidates (1–8) **geometrically**, via shape registration — not screenshots. Per candidate: `alignment` (uniform scale ratio, rotation angle, translation — how it had to be transformed to match; unit mismatches surface as the scale ratio), `distances` (symmetric chamfer mean/p95 + Hausdorff, normalized by the reference bbox diagonal, floor-corrected for sampling noise; `asymmetry` flags missing/extra regions), `classification` (identical / near_identical / same_shape_modified / different, with `borderline` + `warnings`), and `structural` count/inventory deltas. Returns `rankingBySimilarity`. Reference or candidates may be paths or URLs; `align:false` compares in place (detects pose changes). |
 | `screenshot` | Render the model as MCP **image content** (PNG, 16–8192 px), with a JSON metadata text block first. `best_view: true` moves to the model's most detailed angle (the chosen azimuth/elevation/score come back in the metadata). `views: ["front","left","45,20"]` captures several angles — presets or "azimuth,elevation" degrees — in ONE call, images returned in order. `preset: "studio"\|"neutral"\|"dark"` pins the **full** lighting/background state to a documented look first, so renders are comparable across sessions and agents (see below). |
-| `open_in_app` | Push the model you are inspecting — plus your current camera pose — into the **running MeshVault app** (`meshvault`), live, so a human co-reviews exactly what you see. Discovers the app via `~/.meshvault/app_session.json` (override: `MESHVAULT_APP_URL` + `MESHVAULT_TOKEN`). Returns `{clients, deep_link}`; when no tab is connected, hand the human the `deep_link` (the app honors `?path=`/`?dir=` deep links). |
+| `save_scene` | Persist the composed scene as a `.mvscene` manifest: per-object source + placement transform + visibility/opacity, plus scene lighting/environment/background. Objects from volatile sources (drag-drops) can't persist and are reported. |
+| `load_scene` | Rebuild a composed scene from a `.mvscene` file (replaces the current scene). Unresolvable objects degrade per-object; the rest load. Archive-member sources are app-only. |
+| `open_in_app` | Push the model you are inspecting — plus your current camera pose — into the **running MeshVault app** (`meshvault`), live, so a human co-reviews exactly what you see. Discovers the app via `~/.meshvault/app_session.json` (override: `MESHVAULT_APP_URL` + `MESHVAULT_TOKEN`). Returns `{clients, deep_link}`; when no tab is connected, hand the human the `deep_link` (the app honors `?path=`/`?dir=`/`?scene=` deep links). |
 | `get_app_state` | The reverse of `open_in_app`: read **what the human is looking at** in the running app — current asset path, camera pose, and freshness (`age_seconds`). Continue their session headless: `load_model` the returned path, then `viewer_execute {action:"set_camera"}` with the returned camera. |
 
 Typical flow:
@@ -101,7 +105,33 @@ compare_models { reference: "v1.glb",
                  candidates: ["v2.glb","v3.glb"] }  → geometric diff of iterations
 open_in_app {}                                      → human co-views your model + camera, live
 get_app_state {}                                    → what is the HUMAN looking at? (path+camera)
+load_model { source: "b.glb", add: true,
+             transform: {position: [2,0,0]} }       → compose a scene (does NOT clear)
+save_scene { path: "/abs/scene.mvscene" }           → persist the composition
 ```
+
+### Composing scenes (backlog 042)
+
+`load_model` REPLACES the scene by default; `add: true` composes. Placement lives on
+a per-object wrapper — never baked into geometry — and is driven through viewer
+commands (`viewer_execute`): `list_objects`, `set_active_object {id}`,
+`set_object_transform {id, position, quaternion|rotation, scale}`,
+`set_object_visible/opacity`, `remove_object`, `reset_object_transform`, `frame_all`,
+`get_scene_manifest`. Rules an agent must know:
+
+- Single-object commands (describe/stats/transform-bakes/focus/animation) target the
+  **ACTIVE** object — the one loaded/added last, or chosen with `set_active_object`.
+  `describe_scene` says this explicitly and adds a `scene` section with per-object
+  summaries and scene totals when more than one object is loaded.
+- Camera presets/`orbit`/`frame` frame the ACTIVE object; use `frame_all` before
+  scene-wide screenshots.
+- `compare_models` refuses to run while a composed scene is loaded (its sequential
+  loads would destroy it) — `save_scene` first, or `unload`.
+- Vertex-bake ops (`center`/`ground`/`rotate`/`auto_orient`/`simplify`) normalize the
+  active object in its OWN local frame and are blocked on skinned models; use
+  `set_object_transform` for scene placement.
+- GLB export includes every VISIBLE object with placements applied (authored
+  materials, never viewer overrides); OBJ export stays active-object-only.
 
 ### Render presets (`screenshot { preset }`)
 

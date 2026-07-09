@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "meshvault"
-version = "0.5.0"
+version = "0.6.0"
 description = "A professional 3D asset browser for rapid browsing, previewing, and managing OBJ/FBX files"
 authors = ["Laurent-Philippe Albou <contact@abstractcore.ai>"]
 license = "MIT"

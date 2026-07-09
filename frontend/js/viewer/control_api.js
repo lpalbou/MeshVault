@@ -168,6 +168,10 @@ export class ViewerControlAPI {
                 else return { error: `Param '${key}' must be a boolean (got ${JSON.stringify(v)})` };
             } else if (spec.type === "array") {
                 if (!Array.isArray(v)) return { error: `Param '${key}' must be an array` };
+            } else if (spec.type === "object") {
+                if (typeof v !== "object" || v === null || Array.isArray(v)) {
+                    return { error: `Param '${key}' must be an object` };
+                }
             } else if (spec.type === "string") {
                 v = String(v);
             }
@@ -363,26 +367,128 @@ export class ViewerControlAPI {
 
             // --- loading ---
             load: {
-                description: "Load a 3D model from a URL. Extension is inferred if omitted. relatedFiles lists companion files (MTL, textures) for multi-file formats — entries may be relative to the model's URL directory (e.g. ['model.mtl', 'textures/diffuse.png']) or absolute refs the host's resolver understands.",
+                description: "Load a 3D model from a URL — REPLACES the entire scene, including a composed multi-object scene (use add_model to compose without clearing). Extension is inferred if omitted. relatedFiles lists companion files (MTL, textures) for multi-file formats — entries may be relative to the model's URL directory (e.g. ['model.mtl', 'textures/diffuse.png']) or absolute refs the host's resolver understands.",
                 params: {
                     url: { type: "string", required: true },
                     extension: { type: "string" },
                     name: { type: "string" },
                     relatedFiles: { type: "array" },
+                    source: { type: "object" },
                 },
                 handler: async (p) => {
                     const ext = p.extension || "." + p.url.split(".").pop().split("?")[0].toLowerCase();
                     const stats = await v.loadModel(p.url, ext, {
                         name: p.name,
                         relatedFiles: p.relatedFiles || [],
+                        source: p.source,
                     });
                     this._emit("loaded", { name: v.getState().model.name, stats });
                     return { stats, state: v.getState() };
                 },
             },
             unload: {
-                description: "Remove the current model and reset the viewer to an empty scene.",
+                description: "Remove EVERY object and reset the viewer to an empty scene. To remove one object of a composed scene, use remove_object.",
                 handler: () => v.unload(),
+            },
+
+            // --- scene composition (backlog 042) ---
+            add_model: {
+                description: "Co-load a model into the CURRENT scene without clearing it (composition). `load` REPLACES the whole scene; add_model ADDS. The new object becomes ACTIVE (single-object commands target it). Optional transform places it immediately: {position:[x,y,z], quaternion:[x,y,z,w] OR rotation:[x,y,z] Euler degrees, scale:[x,y,z] or uniform number}. frame:false keeps the current camera instead of framing the whole scene.",
+                params: {
+                    url: { type: "string", required: true },
+                    extension: { type: "string" },
+                    name: { type: "string" },
+                    relatedFiles: { type: "array" },
+                    source: { type: "object" },
+                    transform: { type: "object" },
+                    frame: { type: "boolean", default: true },
+                },
+                handler: async (p) => {
+                    const ext = p.extension || "." + p.url.split(".").pop().split("?")[0].toLowerCase();
+                    const result = await v.addModel(p.url, ext, {
+                        name: p.name,
+                        relatedFiles: p.relatedFiles || [],
+                        source: p.source,
+                        transform: p.transform,
+                        frame: p.frame,
+                    });
+                    this._emit("object_added", { objectId: result.objectId, name: v.getState().model.name });
+                    return { stats: result, objectId: result.objectId, scene: v.getState().scene };
+                },
+            },
+            list_objects: {
+                description: "List every object in the scene: id, name, active flag, visibility, opacity, per-object placement transform, source. Object ids are the handles for all set_object_*/remove_object commands.",
+                handler: () => ({ objects: v.listObjects(), activeObjectId: v._activeObjectId }),
+            },
+            set_active_object: {
+                description: "Make an object ACTIVE: all single-object commands (describe_scene, get_mesh_stats, transforms, focus, animation) target the active object. The scene keeps rendering all visible objects.",
+                params: { id: { type: "number", required: true } },
+                requiresModel: true,
+                handler: (p) => { v.setActiveObject(p.id); return { activeObjectId: p.id, state: v.getState().scene }; },
+            },
+            remove_object: {
+                description: "Remove ONE object from the scene (disposes its GPU resources). If it was active, the most recently added remaining object becomes active.",
+                params: { id: { type: "number", required: true } },
+                requiresModel: true,
+                handler: (p) => { v.removeObject(p.id); return { removed: p.id, scene: v.getState().scene }; },
+            },
+            set_object_visible: {
+                description: "Show/hide one object (it stays in the scene and in manifests).",
+                params: {
+                    id: { type: "number", required: true },
+                    visible: { type: "boolean", required: true },
+                },
+                requiresModel: true,
+                handler: (p) => { v.setObjectVisible(p.id, p.visible); return true; },
+            },
+            set_object_opacity: {
+                description: "Per-object opacity (0..1; 1 = opaque). Viewer display state only — ghosting for overlays/comparisons; exports keep the authored materials.",
+                params: {
+                    id: { type: "number", required: true },
+                    opacity: { type: "number", required: true, min: 0, max: 1 },
+                },
+                requiresModel: true,
+                handler: (p) => { v.setObjectOpacity(p.id, p.opacity); return true; },
+            },
+            set_object_transform: {
+                description: "Place an object in the scene: set its wrapper transform (NEVER baked into vertices — placement lives in the scene/manifest, not the asset). position [x,y,z]; quaternion [x,y,z,w] OR rotation [x,y,z] Euler degrees; scale [x,y,z] or uniform number. Omitted parts are unchanged. Returns the resulting transform.",
+                params: {
+                    id: { type: "number", required: true },
+                    position: { type: "array" },
+                    quaternion: { type: "array" },
+                    rotation: { type: "array" },
+                    scale: { type: "number" },
+                    scale_xyz: { type: "array" },
+                },
+                requiresModel: true,
+                handler: (p) => v.setObjectTransform(p.id, {
+                    position: p.position,
+                    quaternion: p.quaternion,
+                    rotation: p.rotation,
+                    scale: p.scale_xyz !== undefined ? p.scale_xyz : p.scale,
+                }),
+            },
+            get_object_transform: {
+                description: "Read an object's placement transform {position, quaternion, scale}.",
+                params: { id: { type: "number", required: true } },
+                requiresModel: true,
+                handler: (p) => v.getObjectTransform(p.id),
+            },
+            reset_object_transform: {
+                description: "Reset an object's placement to identity (undo scene positioning; the asset's geometry is untouched).",
+                params: { id: { type: "number", required: true } },
+                requiresModel: true,
+                handler: (p) => v.resetObjectTransform(p.id),
+            },
+            frame_all: {
+                description: "Frame the WHOLE composed scene (union of all visible objects). Camera presets/orbit/frame target the ACTIVE object; use this before scene-wide screenshots.",
+                requiresModel: true,
+                handler: () => v.frameAll(),
+            },
+            get_scene_manifest: {
+                description: "Serializable scene manifest (version 1): per-object source + placement transform + visibility/opacity, plus scene lighting/environment/background. Objects with volatile sources (drag-drops) are excluded and listed in skippedVolatile. Save it as a .mvscene file; rebuild with load + add_model or the app/MCP scene loaders.",
+                requiresModel: true,
+                handler: () => v.getSceneManifest(),
             },
 
             // --- camera ---

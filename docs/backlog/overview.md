@@ -3,10 +3,10 @@
 Durable planning memory for MeshVault. Records what exists, what is next, what was
 considered, and why priorities are ordered as they are. Treat stale text here as a bug.
 
-Last update: 2026-07-09 (044: multi-file texture defect fixed at the root, reverse
-co-review bridge `get_app_state`, and headless `GET /api/screenshot` on the new shared
-headless runtime — all E2E-verified. 043 the day before: `open_in_app`, deep links,
-render presets).
+Last update: 2026-07-09 (042 shipped: multi-object scene composition — registry with
+active object, wrapper placement + gizmo, `.mvscene` persistence, composed GLB export,
+full MCP parity; designed against 2 pre-implementation adversarial reviews. Same day:
+044 — multi-file texture fix, reverse bridge, `GET /api/screenshot`).
 
 ---
 
@@ -25,11 +25,19 @@ Next free ID: **0025**.
 
 | State | Count | IDs |
 |-------|------:|-----|
-| completed | 27 | 001–005, 009–014, 017–021, 025, 026, 027, 029, 030, 031, 036, 037, 039, 043, 044 |
+| completed | 28 | 001–005, 009–014, 017–021, 025, 026, 027, 029, 030, 031, 036, 037, 039, 042, 043, 044 |
 | planned | 3 | 006, 007, 008 |
-| proposed | 14 | 015, 016, 022, 023, 024 (partial — endpoint slice shipped in 044, CLI remains), 028, 032, 033, 034, 035, 038 (partial), 040 (parked), 041 (v1 done; v2 proposed), 042 |
+| proposed | 13 | 015, 016, 022, 023, 024 (partial — endpoint slice shipped in 044, CLI remains), 028, 032, 033, 034, 035, 038 (partial), 040 (parked), 041 (v1 done; v2 rides on 042's set_object_transform) |
 
 Next free ID: **0045**.
+
+Note: `042` (2026-07-09) shipped ALL four stages of scene composition in 0.6.0 —
+object registry + placement wrappers + gizmo/panel UX + `.mvscene` persistence +
+composed GLB export + MCP parity (`load_model {add:true}`, `save_scene`/`load_scene`,
+11 tools). Two pre-implementation adversarial reviews drove the design; their
+must-fix lists are fully implemented and their deferrals recorded in the item.
+Incidentally fixed: the documented reset-after-simplify crash, and exports baking
+viewer display state (clay materials / ghost opacity) into assets.
 
 Note: `044` (2026-07-09) fixed the untextured multi-file defect at the root (texture
 pending-vs-broken classification + directory-companion serving + model-relative
