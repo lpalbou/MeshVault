@@ -2,13 +2,14 @@
 MeshVault MCP server — a thin Model Context Protocol adapter over the viewer control API
 (backlog 030).
 
-Design: ~8 tools, NOT one-tool-per-command (wide tool surfaces measurably degrade agent
+Design: ~9 tools, NOT one-tool-per-command (wide tool surfaces measurably degrade agent
 performance). Everything routes through the existing self-describing `execute()` registry
 of the standalone viewer, which runs in a headless Chromium page hosted by a tiny
-loopback HTTP server. The page is the single source of truth; this module only marshals
-JSON in/out and images back to the MCP client. `open_in_app` additionally bridges to a
-RUNNING MeshVault app (separate process) via backend/agent_bridge.py, so a human can
-co-view what the agent is inspecting.
+loopback model server (both shared with the app's /api/screenshot endpoint — see
+backend/headless_viewer.py). The page is the single source of truth; this module only
+marshals JSON in/out and images back to the MCP client. `open_in_app`/`get_app_state`
+additionally bridge to a RUNNING MeshVault app (separate process) via
+backend/agent_bridge.py, so a human and an agent can co-review in both directions.
 
 Model input: `load_model` accepts EITHER an http(s) URL or a local file path.
 - Local files are registered under an unguessable /models/<token> route on the loopback
@@ -23,13 +24,9 @@ Deps: pip install "meshvault[mcp]"  then  playwright install chromium
 
 from __future__ import annotations
 
-import base64
-import http.server
 import json
 import secrets
-import socket
 import tempfile
-import threading
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -39,10 +36,13 @@ from typing import Annotated
 from mcp.server.fastmcp import FastMCP, Image
 from pydantic import Field
 
-# Formats the viewer can load (kept in sync with frontend loaders).
-SUPPORTED_EXTENSIONS = {
-    ".obj", ".fbx", ".gltf", ".glb", ".stl", ".ply", ".dae", ".3mf", ".usdz",
-}
+from backend.headless_viewer import (
+    SUPPORTED_EXTENSIONS,
+    VIEW_PRESETS,
+    HeadlessViewer,
+    LocalModelServer,
+    companion_files,
+)
 
 # Hard cap for server-side URL downloads (CORS fallback) — keeps a hostile/mistyped URL
 # from filling the disk. Large real-world GLBs are usually well under this.
@@ -65,124 +65,49 @@ window.mvReady = true;
 </script></body></html>"""
 
 
-class _AssetHandler(http.server.BaseHTTPRequestHandler):
-    """Serves the harness page, the viewer bundle + decoders, and registered models."""
-
-    runtime: "_Runtime" = None  # set by _Runtime
-
-    def do_GET(self):  # noqa: N802 (http.server API)
-        path = self.path.split("?", 1)[0]
-        if path == "/":
-            return self._send(200, HARNESS_HTML.encode("utf-8"), "text/html")
-        if path.startswith("/models/"):
-            token = path.split("/", 2)[2]
-            file_path = self.runtime.registered_models.get(token)
-            if not file_path:
-                return self._send(404, b"unknown model token", "text/plain")
-            return self._send_file(file_path)
-        # Static frontend assets (bundle, vendor decoders) — confined to FRONTEND_ROOT.
-        # is_relative_to gives a real path-boundary check; a string prefix compare would
-        # wrongly admit sibling dirs like frontend_x/ (adversarial review finding).
-        rel = path.lstrip("/")
-        candidate = (FRONTEND_ROOT / rel).resolve()
-        if candidate.is_file() and candidate.is_relative_to(FRONTEND_ROOT):
-            return self._send_file(candidate)
-        return self._send(404, b"not found", "text/plain")
-
-    def _send_file(self, file_path: Path):
-        ctype = {
-            ".js": "text/javascript", ".wasm": "application/wasm",
-            ".html": "text/html", ".glb": "model/gltf-binary",
-            ".gltf": "model/gltf+json",
-        }.get(file_path.suffix.lower(), "application/octet-stream")
-        try:
-            data = file_path.read_bytes()
-        except OSError:
-            return self._send(404, b"unreadable", "text/plain")
-        return self._send(200, data, ctype)
-
-    def _send(self, code: int, body: bytes, ctype: str):
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):  # stdio transport: NOTHING may pollute stdout/stderr noise
-        pass
-
-
 class _Runtime:
-    """Lazily-started loopback HTTP server + headless browser page hosting the viewer."""
+    """Lazily-started loopback model server + shared HeadlessViewer hosting the page."""
 
     def __init__(self):
-        self.registered_models: dict[str, Path] = {}
-        self._httpd = None
-        self._page = None
-        self._playwright = None
-        self._browser = None
+        # Serves the harness, the viewer bundle + decoders, and registered models
+        # WITH their directory companions (the untextured multi-file fix) — see
+        # backend/headless_viewer.py.
+        self._server = LocalModelServer(HARNESS_HTML, static_root=FRONTEND_ROOT)
+        self._viewer = HeadlessViewer()
         self._tmpdir = tempfile.TemporaryDirectory(prefix="meshvault_mcp_")
-        self._lock = None  # created lazily inside the running event loop
-        self.base_url = None
         # Local file behind the currently loaded model (None for direct URL loads).
         # open_in_app uses it to push "what the agent is looking at" into the app.
         self.last_local_model: Path | None = None
 
+    @property
+    def base_url(self):
+        return self._server.base_url
+
     async def page(self):
-        import asyncio
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-        async with self._lock:
-            if self._page is not None:
-                return self._page
-            self._start_http()
-            await self._start_browser()
-            return self._page
+        if self._viewer.page is not None:
+            return self._viewer.page
+        self._server.start()
+        # HeadlessViewer serializes concurrent ensure() calls internally.
+        return await self._viewer.ensure(self.base_url + "/")
 
-    def _start_http(self):
-        if self._httpd:
-            return
-        handler = _AssetHandler
-        handler.runtime = self
-        # Bind loopback on an ephemeral port; never reachable off-host.
-        self._httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        port = self._httpd.server_address[1]
-        self.base_url = f"http://127.0.0.1:{port}"
-        threading.Thread(target=self._httpd.serve_forever, daemon=True).start()
-
-    async def _start_browser(self):
-        try:
-            from playwright.async_api import async_playwright
-        except ImportError as e:
-            raise RuntimeError(
-                "playwright is required: pip install 'meshvault[mcp]' && playwright install chromium"
-            ) from e
-        self._playwright = await async_playwright().start()
-        try:
-            self._browser = await self._playwright.chromium.launch(
-                headless=True,
-                # SwiftShader keeps WebGL working on GPU-less hosts (CI, servers) and
-                # renders deterministically; harmless on machines with a GPU.
-                args=["--use-gl=angle", "--use-angle=swiftshader"],
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Could not launch Chromium ({e}). Run: playwright install chromium"
-            ) from e
-        context = await self._browser.new_context(viewport={"width": 1280, "height": 960})
-        self._page = await context.new_page()
-        await self._page.goto(self.base_url + "/", wait_until="load")
-        await self._page.wait_for_function("() => window.mvReady === true", timeout=30000)
+    @property
+    def viewer(self) -> HeadlessViewer:
+        return self._viewer
 
     def register_local_file(self, file_path: Path) -> str:
-        token = secrets.token_urlsafe(16) + file_path.suffix.lower()
-        self.registered_models[token] = file_path
-        return f"{self.base_url}/models/{token}"
+        return self._server.register(file_path)
 
     def download_to_temp(self, url: str) -> Path:
-        """Server-side fetch for CORS-blocked URLs; size-capped, into the runtime tempdir."""
+        """Server-side fetch for CORS-blocked URLs; size-capped, into the runtime tempdir.
+
+        Each download gets its OWN subdirectory: model URLs now expose their whole
+        directory (companion serving), so isolating downloads keeps one registered
+        model from advertising unrelated ones as siblings.
+        """
         suffix = Path(url.split("?", 1)[0]).suffix.lower() or ".glb"
-        target = Path(self._tmpdir.name) / (secrets.token_hex(8) + suffix)
+        download_dir = Path(self._tmpdir.name) / secrets.token_hex(8)
+        download_dir.mkdir(parents=True, exist_ok=True)
+        target = download_dir / ("model" + suffix)
         req = urllib.request.Request(url, headers={"User-Agent": "meshvault-mcp"})
         with urllib.request.urlopen(req, timeout=60) as resp, open(target, "wb") as out:
             total = 0
@@ -194,12 +119,8 @@ class _Runtime:
         return target
 
     async def close(self):
-        if self._browser:
-            await self._browser.close()
-        if self._playwright:
-            await self._playwright.stop()
-        if self._httpd:
-            self._httpd.shutdown()
+        await self._viewer.close()
+        self._server.shutdown()
         self._tmpdir.cleanup()
 
 
@@ -244,12 +165,14 @@ mcp = FastMCP(
     lifespan=_lifespan,
     instructions=(
         "MeshVault: a headless 3D model viewer you can drive entirely through JSON. "
-        "Typical flow: load_model (URL or local path) → describe_scene (understand WHAT "
-        "loaded, no vision needed) → viewer_execute for camera/render/transform commands "
-        "(discover them with list_viewer_commands) → screenshot to SEE the result "
+        "Typical flow: load_model (URL or local path; multi-file OBJ/FBX assets load "
+        "with their MTL/textures) → describe_scene (understand WHAT loaded, no vision "
+        "needed) → viewer_execute for camera/render/transform commands (discover them "
+        "with list_viewer_commands) → screenshot to SEE the result "
         "(pass preset:\"studio\" for renders comparable across sessions). "
-        "When a human is co-reviewing, open_in_app pushes your current model + camera "
-        "into their running MeshVault app so they see what you see. "
+        "When a human is co-reviewing: open_in_app pushes your current model + camera "
+        "into their running MeshVault app so they see what you see; get_app_state reads "
+        "back what THEY are looking at so you can pick up their subject headless. "
         "Supports .obj .fbx .gltf .glb (incl. Draco/KTX2/Meshopt) .stl .ply .dae .3mf .usdz."
     ),
 )
@@ -327,8 +250,12 @@ async def _load_source(source: str, name: str | None = None) -> dict:
                                       f"Supported: {' '.join(sorted(SUPPORTED_EXTENSIONS))}"}
     await _runtime.page()  # ensure base_url exists before registering
     url = _runtime.register_local_file(path)
+    # Companion refs (OBJ→mtllib, FBX→textures) resolve as sibling URLs under the
+    # model's token directory — this is what makes multi-file assets load TEXTURED.
+    related = companion_files(path)
     result = await _mv_execute(
-        "load", {"url": url, "extension": ext, "name": name or path.name})
+        "load", {"url": url, "extension": ext, "name": name or path.name,
+                 "relatedFiles": related})
     if result.get("ok"):
         _runtime.last_local_model = path
     return result
@@ -619,58 +546,13 @@ def _structural_delta(ref_desc: dict, cand_desc: dict) -> dict:
     }
 
 
-VIEW_PRESETS = {"front", "back", "left", "right", "top", "bottom", "iso"}
-
-# Render presets: named, fully-pinned lighting/background states so screenshots are
-# comparable across sessions, machines, and agents (the FR that motivated this: two
-# agents critiquing the same model must not diverge because one session had tweaked
-# lights). Each preset sets EVERY pixel-affecting lighting/background variable —
-# a partial preset would silently inherit session state and break comparability.
-RENDER_PRESETS: dict[str, list[tuple[str, dict]]] = {
-    # The app's factory look, pinned: balanced key/fill studio + IBL.
-    "studio": [
-        ("set_environment", {"enabled": True, "intensity": 1.0, "asBackground": False}),
-        ("set_lighting", {"azimuth": 45, "elevation": 60, "key_intensity": 1.2,
-                          "fill_intensity": 0.5, "ambient": 0.3, "exposure": 1.2}),
-        ("set_background", {"color": "#33373f"}),
-    ],
-    # Even, low-contrast lighting on mid-gray — for color/texture comparison.
-    "neutral": [
-        ("set_environment", {"enabled": True, "intensity": 1.0, "asBackground": False}),
-        ("set_lighting", {"azimuth": 45, "elevation": 55, "key_intensity": 0.8,
-                          "fill_intensity": 0.6, "ambient": 0.5, "exposure": 1.0}),
-        ("set_background", {"color": "#808080"}),
-    ],
-    # Presentation hero look: stronger key, near-black backdrop.
-    "dark": [
-        ("set_environment", {"enabled": True, "intensity": 1.2, "asBackground": False}),
-        ("set_lighting", {"azimuth": 45, "elevation": 60, "key_intensity": 1.5,
-                          "fill_intensity": 0.4, "ambient": 0.2, "exposure": 1.1}),
-        ("set_background", {"color": "#0d0d1a"}),
-    ],
-}
-
-
-async def _apply_render_preset(name: str) -> None:
-    """Apply a named render preset (raises on unknown name or command failure)."""
-    steps = RENDER_PRESETS.get(name)
-    if steps is None:
-        raise RuntimeError(
-            f"Unknown preset '{name}'. Available: {', '.join(sorted(RENDER_PRESETS))}.")
-    for action, params in steps:
-        r = await _mv_execute(action, params)
-        if not r.get("ok"):
-            raise RuntimeError(f"Preset '{name}' failed at {action}: {r.get('error')}")
+# View + render presets live in backend/headless_viewer.py (shared with the app's
+# /api/screenshot endpoint so both surfaces expose identical documented looks).
 
 
 async def _shot(width, height, transparent, hide_ground) -> Image:
-    result = await _mv_execute("screenshot", {
-        "width": width, "height": height,
-        "transparent": transparent, "hideGround": hide_ground,
-    })
-    if not result.get("ok"):
-        raise RuntimeError(result.get("error", "screenshot failed"))
-    png = base64.b64decode(result["result"].split(",", 1)[1])
+    png = await _runtime.viewer.capture_png(
+        width, height, transparent=transparent, hide_ground=hide_ground)
     return Image(data=png, format="png")
 
 
@@ -718,7 +600,7 @@ async def screenshot(
     contents: list = []
 
     if preset is not None:
-        await _apply_render_preset(preset)
+        await _runtime.viewer.apply_render_preset(preset)
         meta["preset"] = preset
 
     if views is not None:
@@ -756,6 +638,50 @@ async def screenshot(
         contents.append(await _shot(width, height, transparent, hide_ground))
 
     return [json.dumps(meta), *contents]
+
+
+@mcp.tool()
+async def get_app_state() -> dict:
+    """What is the human looking at in the running MeshVault app, right now?
+
+    The reverse of open_in_app: reads the state the app tabs report (current asset
+    path + camera pose + freshness), so you can pick up the human's subject and
+    continue headless — typically `load_model` with the returned path, then
+    `viewer_execute {action:"set_camera", params:{position, target, fov}}` to see
+    exactly what they see. Discovery works like open_in_app
+    (~/.meshvault/app_session.json, env overrides MESHVAULT_APP_URL/MESHVAULT_TOKEN).
+
+    Returns {ok, state: {path, name, camera, age_seconds} | null, clients}.
+    state:null means the app is running but no tab has loaded anything yet.
+    """
+    from backend.agent_bridge import (
+        StaleSessionError, discover_app_session, fetch_app_state)
+
+    try:
+        session = discover_app_session()
+    except StaleSessionError as e:
+        return {"ok": False, "error": f"Stale session file: the app that published it "
+                                      f"(pid {e.pid}) is dead. Ask the human to start "
+                                      "the app (`meshvault`)."}
+    if session is None:
+        return {"ok": False, "error": "No running MeshVault app found: "
+                                      "~/.meshvault/app_session.json is missing and "
+                                      "MESHVAULT_APP_URL is not set."}
+    import asyncio
+    try:
+        result = await asyncio.to_thread(fetch_app_state, session)
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+
+    state = result.get("state")
+    out = {"ok": True, "app": session["url"], "state": state,
+           "clients": result.get("clients", 0)}
+    if state and state.get("path"):
+        out["hint"] = (f"Continue headless: load_model {{source: \"{state['path']}\"}} "
+                       "then viewer_execute set_camera with the returned camera.")
+    elif state is None:
+        out["hint"] = "The app is running but no tab has reported a loaded model yet."
+    return out
 
 
 def main():

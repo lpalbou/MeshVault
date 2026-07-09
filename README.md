@@ -8,7 +8,7 @@ A professional, local web-based tool for rapidly browsing, previewing, and manag
 |---|---|---|
 | **Online, zero install** | [Open the live viewer](https://www.lpalbou.info/MeshVault/) — drag-drop a model or pass `?src=<url>`; nothing is uploaded | Drive `window.mv` on the live page via browser automation — see the site's [`llms.txt`](https://www.lpalbou.info/MeshVault/llms.txt) |
 | **Local app** | `pip install meshvault` → `meshvault` → browse your filesystem at `http://localhost:8420` | Same server also serves the JSON control API docs at `/llms.txt` |
-| **MCP server** | — | `pip install "meshvault[mcp]"` → `meshvault-mcp`: 8 tools (load by path/URL, describe, mesh stats, geometric compare, reproducible screenshots, push-to-app co-review) for Claude/Cursor — [docs/mcp.md](docs/mcp.md) |
+| **MCP server** | — | `pip install "meshvault[mcp]"` → `meshvault-mcp`: 9 tools (load by path/URL, describe, mesh stats, geometric compare, reproducible screenshots, two-way co-review with the app) for Claude/Cursor — [docs/mcp.md](docs/mcp.md) |
 
 [![CI](https://github.com/lpalbou/meshvault/actions/workflows/ci.yml/badge.svg)](https://github.com/lpalbou/meshvault/actions)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
@@ -67,7 +67,7 @@ banner. See [API Reference](docs/api.md#security-model).
 
 ## Control MeshVault with AI agents
 
-MeshVault is built to be driven by agents, not just humans. Three entry points, from
+MeshVault is built to be driven by agents, not just humans. Four entry points, from
 lightest to most integrated:
 
 1. **Self-describing JSON control API** — the viewer exposes one entry point,
@@ -77,13 +77,17 @@ lightest to most integrated:
    reference served at [`/llms.txt`](frontend/llms.txt) and
    [`/llms-full.txt`](frontend/llms-full.txt).
 2. **MCP server** — `meshvault-mcp` lets Claude Desktop / Claude Code / Cursor drive a
-   headless viewer natively through 8 tools: load a model by **URL or local file path**,
-   describe it, run any viewer command, and get PNG screenshots back as image content
-   (`best_view: true` gives a one-call hero shot; `preset: "studio"` pins lighting so
-   renders are comparable across sessions). With the app running, `open_in_app` pushes
-   the agent's model + camera into the human's browser tab for live co-review.
-   Setup: [docs/mcp.md](docs/mcp.md).
-3. **Embeddable standalone viewer** — `meshvault-viewer.js` is a server-less ES-module
+   headless viewer natively through 9 tools: load a model by **URL or local file path**
+   (multi-file OBJ/FBX assets load textured), describe it, run any viewer command, and
+   get PNG screenshots back as image content (`best_view: true` gives a one-call hero
+   shot; `preset: "studio"` pins lighting so renders are comparable across sessions).
+   With the app running, co-review works both ways: `open_in_app` pushes the agent's
+   model + camera into the human's browser tab, and `get_app_state` reads back what
+   the human is looking at. Setup: [docs/mcp.md](docs/mcp.md).
+3. **Headless REST screenshot** — `GET /api/screenshot?path=…&best_view=true` returns
+   a PNG over plain authenticated HTTP (same reproducible presets) — agent loops with
+   nothing but curl. Reference: [docs/api.md](docs/api.md#get-apiscreenshot).
+4. **Embeddable standalone viewer** — `meshvault-viewer.js` is a server-less ES-module
    bundle (Three.js included, offline, compressed-glTF decoders bundled) exposing the
    same control API for your own pages or agent harnesses.
 
@@ -95,7 +99,7 @@ semantic front and uprights it) → `set_render_mode` / `set_clip` to inspect �
 
 - [Getting Started](docs/getting_started.md) — Installation, UI overview, complete feature guide
 - [Architecture](docs/architecture.md) — System design, components, rendering pipeline
-- [API Reference](docs/api.md) — REST API (14 endpoints)
+- [API Reference](docs/api.md) — REST API (22 routes, incl. headless `GET /api/screenshot`)
 - [MCP Server](docs/mcp.md) — Drive the viewer from Claude/Cursor via Model Context Protocol
 - [FAQ](docs/faq.md) — Troubleshooting and tips
 

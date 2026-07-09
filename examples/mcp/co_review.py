@@ -54,6 +54,16 @@ async def main():
             print("app is running but no tab is connected; share this deep link:")
             print(" ", push.get("deep_link"))
 
+        # 4. The bridge also works in REVERSE: whatever the human loads or orbits
+        #    to in their tab is readable here, so an agent can pick up the human's
+        #    subject instead of pushing its own.
+        state = result_json(await s.call_tool("get_app_state", {}))
+        if state.get("ok") and state.get("state"):
+            hs = state["state"]
+            print(f"human is looking at: {hs['name']} "
+                  f"(camera {hs['camera']['position']}, {hs['age_seconds']}s ago)")
+            print("to continue their session: load_model + set_camera with those values")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

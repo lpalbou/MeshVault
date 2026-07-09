@@ -133,6 +133,37 @@ export class AgentLink {
     }
 
     // ==========================================================
+    // Reverse bridge: report "what the human is looking at"
+    // ==========================================================
+
+    /**
+     * Periodically report the current asset + camera to the server so agents can
+     * pick up the human's subject (MCP get_app_state). Deduplicated by content —
+     * getState() rounds camera values, so a settled view posts nothing.
+     *
+     * @param {()=>object|null} getReport - returns {path, name, camera} or null
+     */
+    startStateReporting(getReport, intervalMs = 2000) {
+        if (this._reportTimer) return;
+        this._lastReport = "";
+        this._reportTimer = setInterval(async () => {
+            let report = null;
+            try { report = getReport(); } catch { return; }
+            if (!report) return;
+            const body = JSON.stringify(report);
+            if (body === this._lastReport) return;
+            this._lastReport = body;
+            try {
+                await fetch("/api/agent/state", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body,
+                });
+            } catch { /* loopback hiccup — the next tick retries */ }
+        }, intervalMs);
+    }
+
+    // ==========================================================
     // Live agent push (SSE)
     // ==========================================================
 

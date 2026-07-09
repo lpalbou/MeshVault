@@ -220,6 +220,39 @@ Load-bearing details:
   for the same file. `findAsset` matches exact key first, then basename within the
   browsed directory (still exact — one directory cannot contain two entries with the
   same basename).
+
+---
+
+## Textures load ASYNCHRONOUSLY: pending is not broken (`_isBrokenTexture`)
+
+### The bug this encodes (untextured multi-file models, 0.4.x)
+Loaders resolve when the GEOMETRY parses; MTL/FBX texture fetches keep running after.
+`_enhanceModel` runs immediately on the parsed object, and the old `_isUsableTexture`
+returned false for any texture whose `image` hadn't arrived — so every in-flight
+http(s) texture was silently stripped. Over loopback (MCP/headless) the mesh ALWAYS
+wins that race → every OBJ+MTL/FBX model rendered untextured; in the app it was a
+real race for small models. An earlier fix had already special-cased blob:/data:
+images (FBX embedded textures) — the general rule was hiding in that special case.
+
+### The rule
+- A texture with no image yet is **pending** — keep it; its onLoad flags the upload.
+- Broken is only knowable as: image COMPLETED with zero natural size (decode/404 on
+  an attached element), or still image-less after the load has settled.
+- Cleanup of genuinely failed slots happens in ONE place: a janitor pass ~8 s after
+  the model is added (`_sanitizeObjectTextures(object, settled=true)`), guarded by
+  `this._currentModel === object` so a replaced model is never touched. Falling back
+  to base color beats sampling an unbound texture (renders black).
+
+### Multi-file over headless runtimes: serve the DIRECTORY, resolve against the MODEL
+- MCP/loopback: `/models/<token>/<name>` — the token maps to the file, siblings are
+  served from its directory (resolve + `is_relative_to` confinement). A bare
+  `/models/<token>` URL gives relative refs no base; everything companion 404s.
+- Standalone viewer default resolver: relative refs resolve against
+  `viewer.getModelBaseUrl()` (the model URL's directory), not the host page — that is
+  what the platform loaders do natively for `.gltf`→`.bin`.
+- Companion discovery is format-aware and bounded: OBJ declares its libraries
+  (`mtllib` — parse it, don't glob), FBX doesn't (bounded texture scan, basename
+  matching), glTF needs nothing (loader-relative).
 - **SSE breaks uvicorn's default graceful shutdown** — an `EventSource` connection
   never closes on its own, and uvicorn waits for active connections indefinitely, so
   Ctrl-C/SIGTERM hung while any app tab was open (live-verified). Fix:

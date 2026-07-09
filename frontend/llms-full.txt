@@ -25,17 +25,21 @@ instance.
 
 MCP (Model Context Protocol): if you are an MCP-connected agent, you don't need a
 browser at all — the `meshvault-mcp` server hosts this same viewer headlessly and
-exposes 8 tools: `load_model` (http(s) URL or absolute local file path; loads AND
-returns a scene description in one call), `describe_scene`, `viewer_execute`
+exposes 9 tools: `load_model` (http(s) URL or absolute local file path; loads AND
+returns a scene description in one call; multi-file OBJ/FBX/gltf assets load
+textured), `describe_scene`, `viewer_execute`
 ({action, params} passthrough to every command in this document),
 `list_viewer_commands`, `get_state`, `compare_models` (geometric 1-vs-N shape
 registration), `screenshot` (returns real MCP image content; `best_view:true` for a
 one-call hero shot; `preset:"studio"|"neutral"|"dark"` pins lighting/background so
-renders are comparable across sessions), and `open_in_app` (push your current model +
+renders are comparable across sessions), `open_in_app` (push your current model +
 camera into the human's running `meshvault` app for live co-review; the app also
-honors `?path=`/`?dir=` deep links). Install: `pip install "meshvault[mcp]"`,
-`playwright install chromium`, then wire `meshvault-mcp` into your client config.
-Full setup + behavior notes: docs/mcp.md.
+honors `?path=`/`?dir=` deep links), and `get_app_state` (read what the HUMAN is
+looking at — path + camera — to continue their session headless). Install:
+`pip install "meshvault[mcp]"`, `playwright install chromium`, then wire
+`meshvault-mcp` into your client config. Full setup + behavior notes: docs/mcp.md.
+Without MCP, the local server also offers `GET /api/screenshot` (PNG over plain
+authenticated HTTP; same render presets) — see docs/api.md.
 
 `createViewer(container, options)` returns an object with:
 - `execute(command)` → Promise<{ok, result|error}> — the one command entry point.

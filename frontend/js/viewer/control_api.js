@@ -363,15 +363,19 @@ export class ViewerControlAPI {
 
             // --- loading ---
             load: {
-                description: "Load a 3D model from a URL. Extension is inferred if omitted.",
+                description: "Load a 3D model from a URL. Extension is inferred if omitted. relatedFiles lists companion files (MTL, textures) for multi-file formats — entries may be relative to the model's URL directory (e.g. ['model.mtl', 'textures/diffuse.png']) or absolute refs the host's resolver understands.",
                 params: {
                     url: { type: "string", required: true },
                     extension: { type: "string" },
                     name: { type: "string" },
+                    relatedFiles: { type: "array" },
                 },
                 handler: async (p) => {
                     const ext = p.extension || "." + p.url.split(".").pop().split("?")[0].toLowerCase();
-                    const stats = await v.loadModel(p.url, ext, { name: p.name });
+                    const stats = await v.loadModel(p.url, ext, {
+                        name: p.name,
+                        relatedFiles: p.relatedFiles || [],
+                    });
                     this._emit("loaded", { name: v.getState().model.name, stats });
                     return { stats, state: v.getState() };
                 },

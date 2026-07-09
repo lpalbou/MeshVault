@@ -21,17 +21,32 @@ gate, and a `PathGuard` that confines every filesystem access to the allowed roo
 
 ---
 
-## Backend (17 API endpoints)
+## Backend (22 API routes)
 
 ### `app.py` — Server
-Browse, serve, prepare, export (original + modified + GLB), reveal, rename, duplicate, delete, scan textures, agent bridge (`POST /api/agent/open` + `GET /api/events`). Auto-converts old `.fbx` (version < 7000) → `.obj`. Every filesystem endpoint routes through `security.py`'s `PathGuard`.
+Browse, serve, prepare, export (original + modified + GLB), reveal, rename, duplicate, delete, scan textures, agent bridge (`POST /api/agent/open`, `GET /api/events`, `GET/POST /api/agent/state`). Auto-converts old `.fbx` (version < 7000) → `.obj`. Every filesystem endpoint routes through `security.py`'s `PathGuard`.
 
 ### `agent_bridge.py` — Shared session with headless agents
-Both halves of the agent↔app bridge (backlog 043): the app side (session file
-`~/.meshvault/app_session.json` written at launch; `EventBroadcaster` fanning
-`open_asset` messages to app tabs over SSE with bounded queues) and the agent side
-(`discover_app_session()` + `push_open_to_app()`, stdlib-only, used by the MCP
-`open_in_app` tool and any local script).
+Both halves of the agent↔app bridge (backlog 043/044): the app side (session file
+`~/.meshvault/app_session.json` written after a successful bind; `EventBroadcaster`
+fanning `open_asset` messages to app tabs over SSE with bounded queues;
+`AppStateStore` holding the latest "what the human sees" report) and the agent side
+(`discover_app_session()` with stale-pid detection, `push_open_to_app()`,
+`fetch_app_state()` — stdlib-only, used by the MCP tools and any local script).
+
+### `headless_viewer.py` — Shared headless runtime
+`HeadlessViewer` (lazy Playwright/Chromium page hosting the standalone viewer),
+`LocalModelServer` (loopback server exposing a registered model AND its directory
+companions under an unguessable token — the multi-file texture fix), render presets
+(`studio`/`neutral`/`dark`), and `companion_files()` (OBJ `mtllib` parsing, FBX
+texture scan). Consumed by the MCP server and `screenshot_api.py`; the seam a future
+batch-render CLI (backlog 024) plugs into.
+
+### `screenshot_api.py` — Headless REST renders
+`GET /api/screenshot`: PNG renders over plain authenticated HTTP. App-origin harness
+(inherits PathGuard + multi-file resolution via `/api/asset/related`), single-flight
+lock, hard timeout, per-request state re-pin, distinct 503s for missing
+playwright/Chromium. Dependency-injected router (no import cycle with `app.py`).
 
 ### `mesh_compare.py` — Shape registration
 Registers two surface point sets (PCA-initialized trimmed ICP + Kabsch), returns
@@ -53,13 +68,14 @@ ZIP (built-in), RAR (multi-tool fallback), `.unitypackage` (tar.gz with GUID str
 Pure Python FBX binary parser (v5000–6100) → OBJ converter. Zero dependencies.
 
 ### `mcp_server.py` — MCP adapter (optional)
-`meshvault-mcp` exposes the viewer to MCP clients (Claude, Cursor) as 8 tools routed
-through the control API: `load_model` (URL or local path), `describe_scene`,
-`viewer_execute`, `list_viewer_commands`, `get_state`, `compare_models`, `screenshot`
-(MCP image content; render presets for cross-session comparability), `open_in_app`
-(push model + camera into the running app). Runs the standalone viewer in headless
-Chromium behind a loopback, path-confined file server. Optional deps:
-`pip install "meshvault[mcp]"`. See [MCP Server](mcp.md).
+`meshvault-mcp` exposes the viewer to MCP clients (Claude, Cursor) as 9 tools routed
+through the control API: `load_model` (URL or local path; multi-file assets load
+textured), `describe_scene`, `viewer_execute`, `list_viewer_commands`, `get_state`,
+`compare_models`, `screenshot` (MCP image content; render presets for cross-session
+comparability), `open_in_app` (push model + camera into the running app), and
+`get_app_state` (read what the human is looking at). Composes the shared
+`headless_viewer.py` runtime. Optional deps: `pip install "meshvault[mcp]"`.
+See [MCP Server](mcp.md).
 
 ---
 

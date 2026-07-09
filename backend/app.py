@@ -40,6 +40,7 @@ from backend.export_manager import ExportManager
 from backend.fbx_converter import get_fbx_version, convert_fbx_to_obj
 from backend.agent_bridge import (
     SUPPORTED_MODEL_EXTENSIONS,
+    AppStateStore,
     EventBroadcaster,
     remove_session_file,
     sse_format,
@@ -141,6 +142,10 @@ export_manager = ExportManager()
 # tabs over SSE. Lives for the app's lifetime; publishers are /api/agent/* endpoints.
 event_broadcaster = EventBroadcaster()
 
+# Reverse bridge: the latest "what the human is looking at" report from app tabs,
+# readable by agents (MCP get_app_state) to pick up the human's subject headless.
+app_state_store = AppStateStore()
+
 
 def _build_file_response(file_path: Path) -> FileResponse:
     """
@@ -164,15 +169,17 @@ def _build_file_response(file_path: Path) -> FileResponse:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage application lifecycle — clean up temp files on shutdown."""
+    """Manage application lifecycle — clean up temp files and the headless
+    screenshot browser on shutdown."""
     yield
     archive_inspector.cleanup()
+    await screenshot_service.close()
     remove_session_file()
 
 
 # --- FastAPI App ---
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 app = FastAPI(
     title="MeshVault",
@@ -192,6 +199,18 @@ app = FastAPI(
 # the Host allow-list is the outermost guard.
 app.add_middleware(TokenAuthMiddleware, config=security_config)
 app.add_middleware(HostAllowlistMiddleware, allowed_hosts=security_config.allowed_hosts)
+
+# Headless screenshot endpoint (GET /api/screenshot) — declared after the app exists
+# but before requests flow. Dependencies are injected so the endpoint enforces the
+# same PathGuard + FBX-conversion behavior as every other asset route (the guard
+# helper is defined below; Python resolves the reference at call time).
+from backend.screenshot_api import create_router as _create_screenshot_router
+screenshot_router, screenshot_service = _create_screenshot_router(
+    guarded_path=lambda path, **kw: _guarded_path(path, **kw),
+    maybe_convert_asset=lambda p: _maybe_convert_asset(p),
+    token_supplier=lambda: security_config.token if security_config.require_auth else "",
+)
+app.include_router(screenshot_router)
 
 # Serve frontend static files
 # Works both in development (project root) and when installed via pip
@@ -854,6 +873,50 @@ async def agent_open(body: AgentOpenRequest, request: Request):
     # the tool can hand it to the human when clients == 0.
     deep_link = f"{request.base_url}?path={urllib.parse.quote(str(file_path))}"
     return {"ok": True, "clients": delivered, "deep_link": deep_link}
+
+
+class AgentStateReport(BaseModel):
+    """State snapshot an app tab reports (what the human is looking at)."""
+    path: Optional[str] = None
+    name: Optional[str] = None
+    camera: Optional[dict] = None
+
+
+@app.post("/api/agent/state")
+async def agent_state_report(body: AgentStateReport):
+    """
+    Store the latest human-session state (asset + camera) reported by an app tab.
+
+    The reverse of /api/agent/open: agents read it back via GET to continue the
+    human's session headless. The camera is validated with the same contract as
+    the push path; the path is metadata about an already-loaded (already-guarded)
+    asset, so it is only size-bounded here, not re-confined.
+    """
+    if body.path is not None and len(body.path) > 4096:
+        raise HTTPException(status_code=422, detail="path too long")
+    if body.name is not None and len(body.name) > 256:
+        raise HTTPException(status_code=422, detail="name too long")
+    app_state_store.report({
+        "path": body.path,
+        "name": body.name,
+        "camera": _sanitize_camera(body.camera),
+    })
+    return {"ok": True}
+
+
+@app.get("/api/agent/state")
+async def agent_state():
+    """
+    The latest reported human-session state, or state:null when no tab reported.
+
+    `age_seconds` tells the caller how fresh the report is (tabs report on load and
+    when the camera settles, so a co-reviewing human's state is seconds old).
+    """
+    return {
+        "ok": True,
+        "state": app_state_store.snapshot(),
+        "clients": event_broadcaster.client_count,
+    }
 
 
 @app.get("/api/events")

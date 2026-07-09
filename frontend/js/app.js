@@ -197,6 +197,18 @@ class App {
         this._fileBrowser.setNavigateListener((path) => this._agentLink.syncDir(path));
         this._agentLink.connect();
 
+        // Reverse bridge: report what the human is looking at (asset + camera) so
+        // agents can pick up the session headless (MCP get_app_state).
+        this._agentLink.startStateReporting(() => {
+            if (!this._lastLoadedAsset) return null;
+            const cam = this._viewer.getState().camera;
+            return {
+                path: assetKey(this._lastLoadedAsset),
+                name: `${this._lastLoadedAsset.name}${this._lastLoadedAsset.extension}`,
+                camera: { position: cam.position, target: cam.target, fov: cam.fov },
+            };
+        });
+
         // --- Start: URL deep link wins over the localStorage default ---
         this._agentLink.boot().then((handled) => {
             if (!handled) this._fileBrowser.goLastOrHome();

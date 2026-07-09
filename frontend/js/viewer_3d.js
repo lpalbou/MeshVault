@@ -144,6 +144,12 @@ export class Viewer3D {
 
         const ext = extension.toLowerCase();
 
+        // Record the model URL's directory so relative resource references (MTL,
+        // textures, .gltf buffers) can be resolved against the MODEL's location —
+        // what the platform loaders do natively — instead of the host page. Set
+        // before the loaders run because _loadOBJ resolves its MTL during the load.
+        this._modelBaseUrl = this._computeModelBaseUrl(url);
+
         // Fetch + parse FIRST, and only swap models on success: a failed load must not
         // destroy the currently displayed model (an agent/user retrying a bad URL would
         // otherwise silently end up with an empty scene).
@@ -190,6 +196,16 @@ export class Viewer3D {
         // Add to scene
         this._scene.add(object);
         this._currentModel = object;
+
+        // Texture loads OUTLIVE the mesh load (loaders resolve when geometry
+        // parses; MTL/FBX textures keep streaming in). Once they settle, clear
+        // slots that DEFINITIVELY failed (404/decode error) so those materials
+        // fall back to their base color instead of an unbound sampler. Pending
+        // textures are never touched — stripping them here is what used to
+        // render every multi-file model untextured on fast mesh parses.
+        setTimeout(() => {
+            if (this._currentModel === object) this._sanitizeObjectTextures(object);
+        }, 8000);
 
         // Wire up any animation clips and notify the UI (play/pause/scrub controls).
         this._setupAnimations(object);
@@ -2172,6 +2188,23 @@ export class Viewer3D {
     // Model Loading
     // ==========================================
 
+    /**
+     * Directory of the model's own URL ("…/dir/" with trailing slash), or null when
+     * the URL has no usable base (blob:/data: object URLs, bare filenames). Used by
+     * the standalone default resolver to resolve relative resource refs the way the
+     * platform would: against the model, not against the host page.
+     */
+    _computeModelBaseUrl(url) {
+        if (!url || /^(blob:|data:)/i.test(url)) return null;
+        const cut = url.lastIndexOf("/");
+        return cut >= 0 ? url.slice(0, cut + 1) : null;
+    }
+
+    /** Current model's base URL (see _computeModelBaseUrl); null when not applicable. */
+    getModelBaseUrl() {
+        return this._modelBaseUrl || null;
+    }
+
     _loadOBJ(url, options = {}) {
         return new Promise((resolve, reject) => {
             const manager = new THREE.LoadingManager();
@@ -2573,30 +2606,40 @@ export class Viewer3D {
         return applied;
     }
 
-    _isUsableTexture(tex) {
-        if (!tex || !tex.isTexture) return false;
+    /**
+     * Is this texture BROKEN (definitely unusable)?
+     *
+     * Textures load asynchronously: TextureLoader attaches `image` only when the
+     * network fetch + decode complete, so a texture with NO image is normally
+     * PENDING, not broken — treating it as broken is what silently stripped
+     * textures from every model whose mesh parsed faster than its textures
+     * decoded (always the case over loopback in the headless/MCP runtimes, a
+     * race in the app for small models). Failure is only knowable two ways:
+     * an ATTACHED image that completed with zero natural size (decode error),
+     * or a still-missing image once the post-load settling window has passed
+     * (`settled` — the 404 case, cleared by the load's janitor pass so the
+     * material falls back to its base color like before).
+     */
+    _isBrokenTexture(tex, settled = false) {
+        if (!tex || !tex.isTexture) return true;
         const img = tex.image || tex.source?.data || null;
-        if (!img) return false;
-
-        // FBXLoader creates blob: URLs for embedded textures that decode
-        // asynchronously. Before decoding completes, img.width/height are 0
-        // and img.complete is false. Treat pending blob/data images as usable
-        // so _sanitizeMaterialTextureSlots does not clear them prematurely.
+        if (!img) return settled;
         if (img instanceof HTMLImageElement) {
-            const src = img.src || img.currentSrc || "";
-            if (src && (src.startsWith("blob:") || src.startsWith("data:"))) {
-                return true;
-            }
+            if (!img.complete) return settled;
+            return !(img.naturalWidth > 0 && img.naturalHeight > 0);
         }
-
         if (
             typeof img.width === "number" &&
             typeof img.height === "number" &&
             (img.width === 0 || img.height === 0)
         ) {
-            return false;
+            return true;
         }
-        return true;
+        return false;
+    }
+
+    _isUsableTexture(tex, settled = false) {
+        return !!(tex && tex.isTexture) && !this._isBrokenTexture(tex, settled);
     }
 
     _extractTextureFilename(tex) {
@@ -2625,7 +2668,7 @@ export class Viewer3D {
         return /(^|[_\-\s])(normal|nrm|nor|rough|roughness|metal|metallic|ao|occlusion|height|disp|displacement|bump|spec|specular|gloss|glossiness|emissive|emission|mask|alpha|opacity|id|wire|g|s)([_\-\s]|$)/.test(stem);
     }
 
-    _sanitizeMaterialTextureSlots(material) {
+    _sanitizeMaterialTextureSlots(material, settled = false) {
         if (!material) return false;
         const textureSlots = [
             "map",
@@ -2640,7 +2683,7 @@ export class Viewer3D {
         let changed = false;
         for (const slot of textureSlots) {
             const tex = material[slot];
-            if (tex && tex.isTexture && !this._isUsableTexture(tex)) {
+            if (tex && tex.isTexture && this._isBrokenTexture(tex, settled)) {
                 material[slot] = null;
                 changed = true;
             }
@@ -2649,6 +2692,22 @@ export class Viewer3D {
             material.needsUpdate = true;
         }
         return changed;
+    }
+
+    /**
+     * Janitor pass over a model's materials once its texture loads have settled:
+     * clears slots whose textures definitively failed (404/decode error), so the
+     * material falls back to its base color instead of sampling an unbound
+     * texture (renders black). Pending textures are never touched — see
+     * _isBrokenTexture for the pending-vs-broken distinction.
+     */
+    _sanitizeObjectTextures(object, settled = true) {
+        if (!object) return;
+        object.traverse((child) => {
+            if (!child.isMesh || !child.material) return;
+            const mats = Array.isArray(child.material) ? child.material : [child.material];
+            for (const m of mats) this._sanitizeMaterialTextureSlots(m, settled);
+        });
     }
 
     _isTextureFilePath(path) {

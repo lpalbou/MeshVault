@@ -45,8 +45,22 @@ import { ViewerControlAPI } from "./control_api.js";
 export function createViewer(container, options = {}) {
     if (!container) throw new Error("createViewer requires a container element");
 
-    // Client-only default resolver: return the reference unchanged (relative/absolute URL).
-    const resolveResource = options.resolveResource || ((ref) => ref);
+    // Client-only default resolver: absolute references (http(s)/data/blob/rooted
+    // paths) pass through unchanged; RELATIVE references resolve against the current
+    // MODEL's URL directory — the way the platform loaders treat multi-file assets
+    // (OBJ→MTL→textures, .gltf→.bin). Without this, a relative ref resolved against
+    // the HOST PAGE and multi-file models silently loaded untextured (the confirmed
+    // MCP bug). `viewer` is assigned below; the closure only runs during loads,
+    // long after construction.
+    const resolveResource = options.resolveResource || ((ref) => {
+        if (/^(https?:|data:|blob:|\/)/i.test(ref)) return ref;
+        const base = viewer && viewer.getModelBaseUrl();
+        try {
+            return base ? new URL(ref, new URL(base, window.location.href)).href : ref;
+        } catch {
+            return ref;
+        }
+    });
 
     const viewer = new Viewer3D(container, options.onInfoUpdate || (() => {}), {
         resolveResource,

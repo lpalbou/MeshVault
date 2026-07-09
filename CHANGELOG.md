@@ -4,6 +4,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · [Semantic Ve
 
 ---
 
+## [0.5.0] — 2026-07-09
+
+### Fixed
+- **Multi-file models now load TEXTURED in the headless/MCP runtimes** (confirmed defect from the adversarial review). Three coordinated root-cause fixes, none of them MCP-specific hacks: (1) the MCP loopback server now serves a registered model's **directory companions** under its unguessable token (`/models/<token>/<name>` — relative MTL/texture/`.bin` refs resolve like normal sibling URLs; confined to the model's directory, traversal-checked); (2) the standalone viewer's default resolver resolves relative resource refs against the **model's own URL directory** (the platform behavior) instead of the host page, and the control-API `load` command accepts `relatedFiles`; (3) `load_model` discovers companions server-side (OBJ→`mtllib` parsing with same-stem fallback, FBX→bounded texture scan). E2E-proven with a real MCP client: textured OBJ+MTL+PNG renders red (pixel-verified), external-buffer `.gltf`+`.bin` loads.
+- **Texture race stripped in-flight textures in ALL runtimes** (root cause of the above, and a live race in the app for small models): `_isUsableTexture` treated *still-loading* http(s) textures as unusable, so `_enhanceModel` dropped them whenever the mesh parsed before its textures decoded — always the case over loopback. Textures are now classified pending vs **definitively broken** (completed with zero natural size), pending ones are preserved, and a one-shot janitor pass after load settles clears only genuinely failed slots (404/decode) so those materials fall back to base color.
+
+### Added
+- **`GET /api/screenshot` — headless renders over plain HTTP** (the external FR's third ask). One authenticated GET returns a PNG of a local model: `view`/`azimuth`+`elevation`/`best_view` camera control, `preset=studio|neutral|dark|none` (full lighting/background pinning, shared with MCP), `width/height/transparent/hide_ground/fill`. Render metadata in the `X-MeshVault-Screenshot` header. Implementation per the adversarial review: harness on the app's own origin (PathGuard + multi-file resolution inherited from `/api/asset/*`), guard + 512 MB size cap BEFORE any browser work, single-flight lock (429 when busy), hard timeout (504, `MESHVAULT_SCREENSHOT_TIMEOUT`), per-request unload+reload+preset re-pin (no state bleed), distinct 503s for missing playwright vs missing Chromium, browser closed in app lifespan. Measured 8–17 s per call on software GL. New modules: `backend/headless_viewer.py` (shared Playwright runtime + `LocalModelServer` + presets + companion discovery — also the seam for a future batch-render CLI, backlog 024) and `backend/screenshot_api.py`; the MCP server now composes the same runtime.
+- **`get_app_state` MCP tool + `GET/POST /api/agent/state` — the reverse co-review bridge.** App tabs report what the human is looking at (asset path, name, camera; ~2 s cadence, deduplicated); an agent joining the session reads it back and continues headless (`load_model` the path, `set_camera` the pose). E2E-verified live: tab camera moves were reflected within one reporting tick, and a real MCP client reproduced the human's exact view.
+
 ## [0.4.0] — 2026-07-08
 
 ### Added

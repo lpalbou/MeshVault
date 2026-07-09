@@ -3,8 +3,10 @@
 Durable planning memory for MeshVault. Records what exists, what is next, what was
 considered, and why priorities are ordered as they are. Treat stale text here as a bug.
 
-Last update: 2026-07-08 (043 shared agent/app session: `open_in_app` MCP tool +
-`?path=`/`?dir=` deep links + `screenshot` render presets — external FR, E2E-verified).
+Last update: 2026-07-09 (044: multi-file texture defect fixed at the root, reverse
+co-review bridge `get_app_state`, and headless `GET /api/screenshot` on the new shared
+headless runtime — all E2E-verified. 043 the day before: `open_in_app`, deep links,
+render presets).
 
 ---
 
@@ -23,17 +25,24 @@ Next free ID: **0025**.
 
 | State | Count | IDs |
 |-------|------:|-----|
-| completed | 26 | 001–005, 009–014, 017–021, 025, 026, 027, 029, 030, 031, 036, 037, 039, 043 |
+| completed | 27 | 001–005, 009–014, 017–021, 025, 026, 027, 029, 030, 031, 036, 037, 039, 043, 044 |
 | planned | 3 | 006, 007, 008 |
-| proposed | 14 | 015, 016, 022, 023, 024, 028, 032, 033, 034, 035, 038 (partial), 040 (parked), 041 (v1 done; v2 proposed), 042 |
+| proposed | 14 | 015, 016, 022, 023, 024 (partial — endpoint slice shipped in 044, CLI remains), 028, 032, 033, 034, 035, 038 (partial), 040 (parked), 041 (v1 done; v2 proposed), 042 |
 
-Next free ID: **0044**.
+Next free ID: **0045**.
+
+Note: `044` (2026-07-09) fixed the untextured multi-file defect at the root (texture
+pending-vs-broken classification + directory-companion serving + model-relative
+resolver), added the REVERSE co-review bridge (`get_app_state` + `/api/agent/state`),
+and shipped `GET /api/screenshot` on the new shared headless runtime
+(`backend/headless_viewer.py`) — the seam `024`'s batch CLI will consume. The MCP now
+exposes 9 tools.
 
 Note: `043` (2026-07-08, external FR) shipped the agent bridge: `open_in_app` MCP tool
 (session-file discovery → `POST /api/agent/open` → SSE fan-out to app tabs, camera
 included), `?path=`/`?dir=` deep links with live URL sync (archive members via
-`archive!inner`), and `screenshot {preset}` reproducible render presets. The MCP now
-exposes 8 tools. Partially overlaps `032` (web-viewer URL state) — see the item file.
+`archive!inner`), and `screenshot {preset}` reproducible render presets. Partially
+overlaps `032` (web-viewer URL state) — see the item file.
 
 Note: `039` completed with `compare_models` (geometric shape comparison / registration —
 `sample_points` + `backend/mesh_compare.py`), 4-agent reviewed. `038` still partial

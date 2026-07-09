@@ -32,7 +32,7 @@ default = whole filesystem), `MESHVAULT_HOST` (bind host — non-loopback prints
 
 ---
 
-## Endpoints Overview (18 routes)
+## Endpoints Overview (22 routes)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -54,6 +54,10 @@ default = whole filesystem), `MESHVAULT_HOST` (bind host — non-loopback prints
 | `GET` | `/api/default_path` | Get the default browse path (allowed root) |
 | `POST` | `/api/agent/open` | Push a model (+ optional camera pose) into every connected app tab |
 | `GET` | `/api/events` | SSE stream of agent-bridge events for app tabs |
+| `POST` | `/api/agent/state` | App tabs report what the human is looking at (asset + camera) |
+| `GET` | `/api/agent/state` | Read the latest reported human-session state (reverse bridge) |
+| `GET` | `/api/screenshot` | Headless PNG render of a local model (no browser session needed) |
+| `GET` | `/api/screenshot/harness` | Internal viewer page the headless renderer drives |
 
 ---
 
@@ -432,6 +436,76 @@ subscribes on load via `EventSource` (the same-origin session cookie authenticat
 Frames are JSON: a `{"type": "connected"}` frame on subscribe, then one
 `{"type": "open_asset", "path": …, "camera": …, "source": …}` per push; heartbeat
 comments flow every 15 s.
+
+---
+
+## `POST /api/agent/state` · `GET /api/agent/state`
+
+App tabs periodically report what the human is looking at; agents read it back to
+pick up the human's session headless (MCP `get_app_state`). POST body:
+`{path, name, camera}` (camera validated like `/api/agent/open`; 422 on malformed).
+GET response:
+
+```json
+{
+    "ok": true,
+    "state": {
+        "path": "/abs/model.glb",
+        "name": "model.glb",
+        "camera": { "position": [2.8, 1.7, 2.6], "target": [0, 0, 0], "fov": 45 },
+        "age_seconds": 3.2
+    },
+    "clients": 1
+}
+```
+
+`state` is `null` until a tab reports; `age_seconds` is the report's freshness
+(tabs report on load and whenever the camera settles, ~2 s cadence).
+
+---
+
+## `GET /api/screenshot`
+
+Render a local model to PNG, headless — no browser session, no MCP client. The
+render happens in a lazily-started headless Chromium driving the standalone viewer
+on this app's own origin, so PathGuard confinement and multi-file resolution
+(OBJ+MTL+textures via `/api/asset/related`) apply exactly as in the interactive app.
+
+### Query Parameters
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `path` | string | required | Absolute path of the model file (PathGuard-confined) |
+| `view` | string | — | Camera preset: `front/back/left/right/top/bottom/iso` |
+| `azimuth` / `elevation` | float | — | Explicit camera angles in degrees (elevation defaults to 15) |
+| `best_view` | bool | false | Frame the model's most detailed angle first (adds `best_view` metadata) |
+| `preset` | string | `studio` | Render preset: `studio` / `neutral` / `dark` / `none` — pins ALL lighting/background state so renders are reproducible; `none` inherits session state |
+| `fill` | float 0.1–1 | — | Framing tightness |
+| `width` / `height` | int 16–8192 | 1024 | Output resolution |
+| `transparent` | bool | false | Alpha background |
+| `hide_ground` | bool | false | Hide the ground/shadow plane |
+
+### Response `200 OK`
+
+`image/png` bytes. Render facts (path, chosen view/best-view angles, preset) come
+back as compact JSON in the `X-MeshVault-Screenshot` header.
+
+```bash
+curl -H "X-MeshVault-Token: $TOKEN" \
+  "http://localhost:8420/api/screenshot?path=/abs/model.glb&best_view=true&width=512&height=512" \
+  -o shot.png
+```
+
+### Behavior & errors
+
+- Every request unloads, reloads, and re-pins the preset — nothing bleeds between
+  requests through the shared page. First call pays the browser start (~5 s);
+  renders take seconds on software GL (measured 8–17 s end-to-end per call).
+- Single-flight: one render at a time; concurrent callers wait briefly, then `429`.
+- `403/404` path confinement, `413` model over 512 MB, `422` bad view/preset,
+  `503` playwright/Chromium not installed (`pip install "meshvault[mcp]"` +
+  `playwright install chromium`), `504` render exceeded the timeout
+  (`MESHVAULT_SCREENSHOT_TIMEOUT`, default 240 s).
 
 ---
 

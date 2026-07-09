@@ -131,6 +131,32 @@ def sse_format(message: dict) -> str:
     return f"data: {json.dumps(message)}\n\n"
 
 
+class AppStateStore:
+    """Last human-session state reported by app tabs (the REVERSE co-review bridge).
+
+    open_in_app pushes agent → human; this store answers the opposite question —
+    "what is the human looking at?" — so an agent can pick up the human's subject
+    and continue headless. Tabs report {path, name, camera} on load and whenever
+    the camera settles; the store keeps the most recent report (last writer wins,
+    which matches the single-human co-review scenario the bridge exists for).
+    """
+
+    def __init__(self):
+        self._state: Optional[dict] = None
+        self._updated_at: Optional[float] = None
+
+    def report(self, state: dict) -> None:
+        self._state = state
+        self._updated_at = time.time()
+
+    def snapshot(self) -> Optional[dict]:
+        """The last report plus its age, or None when no tab reported yet."""
+        if self._state is None:
+            return None
+        return {**self._state,
+                "age_seconds": round(time.time() - self._updated_at, 1)}
+
+
 # ---------------------------------------------------------------------------
 # Agent side — discovery + push (stdlib only; used by the MCP server and scripts)
 # ---------------------------------------------------------------------------
@@ -244,6 +270,36 @@ def push_open_to_app(
                 "it looks like an older MeshVault (< 0.4) still running. Restart it "
                 "to pick up the agent bridge.") from e
         raise RuntimeError(f"MeshVault app returned {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(
+            f"Could not reach the MeshVault app at {session['url']} ({e.reason}). "
+            "Is it running? Start it with `meshvault`.") from e
+
+
+def fetch_app_state(session: dict, timeout: float = 10.0) -> dict[str, Any]:
+    """GET /api/agent/state on the running app (the reverse bridge read).
+
+    Returns the response JSON; raises RuntimeError with an actionable message on
+    connection/auth failures (same contract as push_open_to_app).
+    """
+    req = urllib.request.Request(
+        session["url"] + "/api/agent/state",
+        headers={"X-MeshVault-Token": session.get("token", "")},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            raise RuntimeError(
+                "MeshVault app rejected the token (401). The session file may be "
+                "stale — restart the app (`meshvault`) or set MESHVAULT_APP_URL/"
+                "MESHVAULT_TOKEN.") from e
+        if e.code == 404:
+            raise RuntimeError(
+                f"The server at {session['url']} has no /api/agent/state endpoint — "
+                "it looks like an older MeshVault still running. Restart it.") from e
+        raise RuntimeError(f"MeshVault app returned {e.code}") from e
     except urllib.error.URLError as e:
         raise RuntimeError(
             f"Could not reach the MeshVault app at {session['url']} ({e.reason}). "

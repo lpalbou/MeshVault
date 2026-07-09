@@ -28,7 +28,7 @@ path/URL:
 | `compare_shapes.py` | GEOMETRIC 1-vs-N comparison via shape registration (`compare_models`): classifies each candidate as identical / near-identical / modified / different, recovers scale + rotation, and ranks candidates by similarity — robust to pose and unit differences. |
 | `explore_parts.py` | Part-level exploration: stable mesh ids from `describe_scene`, `focus {id}` per part, plus focusing a defect location reported by `get_mesh_stats`. |
 | `hero_shots.py` | Multi-view capture in one call (`screenshot {views:[...]}`) and the `best_view` semantic-front shot with its metadata. |
-| `co_review.py` | Shared session with a human: inspect headless, then `open_in_app` pushes the model + the agent's exact camera into the running `meshvault` app (falls back to printing a `?path=` deep link when no tab is connected). |
+| `co_review.py` | Shared session with a human, both directions: `open_in_app` pushes the model + the agent's exact camera into the running `meshvault` app (falls back to a `?path=` deep link when no tab is connected), and `get_app_state` reads back what the human is looking at so the agent can pick up THEIR subject. |
 | `_client.py` | The ~40-line plumbing all examples share (session, JSON/text/image content helpers). |
 
 ## How an agent actually uses this — a real session

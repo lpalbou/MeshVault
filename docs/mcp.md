@@ -1,15 +1,21 @@
 # MeshVault MCP Server
 
 Drive the MeshVault 3D viewer from any MCP client (Claude Desktop, Claude Code, Cursor,
-VS Code, …). The server runs a headless, GPU-optional viewer and exposes **eight tools** —
+VS Code, …). The server runs a headless, GPU-optional viewer and exposes **nine tools** —
 a deliberately thin surface routed through the viewer's self-describing control API
 (one-tool-per-command surfaces measurably degrade agent performance).
 
-An agent can: load a model from a **URL or a local file path**, get a structured text
-description (no vision needed), discover and run any of the ~50 viewer commands (camera,
-render modes, lighting/IBL, transforms, cross-sections, measurement, animation), compare
-models geometrically, get PNG screenshots back as proper MCP image content, and push
-what it is looking at into a running MeshVault app so a human can co-review live.
+An agent can: load a model from a **URL or a local file path** (multi-file assets load
+textured), get a structured text description (no vision needed), discover and run any
+of the ~50 viewer commands (camera, render modes, lighting/IBL, transforms,
+cross-sections, measurement, animation), compare models geometrically, get PNG
+screenshots back as proper MCP image content, and share a session with a human both
+ways — push what it sees into the running app (`open_in_app`), or pick up what the
+human sees (`get_app_state`).
+
+> Not speaking MCP? The local server also exposes `GET /api/screenshot` — a plain
+> authenticated HTTP endpoint returning a PNG render (same presets, same confinement)
+> for curl/scripts. See [docs/api.md](api.md#get-apiscreenshot).
 
 > No install at all? Agents with plain browser automation can drive the hosted viewer at
 > <https://www.lpalbou.info/MeshVault/> via `window.mv` (URL-loaded models only, no
@@ -72,7 +78,7 @@ interpreter and working directory).
 
 | Tool | Purpose |
 |------|---------|
-| `load_model` | Load a model from an http(s) **URL** or an absolute **local file path**. Returns the load result *plus* a full scene description in one call. URLs are fetched by the browser first; on CORS failure the server downloads the file itself (512 MB cap) and serves it locally. |
+| `load_model` | Load a model from an http(s) **URL** or an absolute **local file path**. Returns the load result *plus* a full scene description in one call. Multi-file assets load **textured**: the model's directory companions (OBJ→MTL→textures via `mtllib` parsing, `.gltf`→`.bin`, FBX textures) are served alongside it and resolve like normal relative URLs. URLs are fetched by the browser first; on CORS failure the server downloads the file itself (512 MB cap) and serves it locally. |
 | `describe_scene` | Structured TEXT snapshot: summary sentence, live inventory, bounds + real-world size hint, hierarchy, materials, detected geometry issues (missing normals/UVs, degenerate faces, watertightness, flipped normals, scale sanity), current view. The recommended first observation — no vision needed. |
 | `viewer_execute` | Passthrough to any viewer command (`{action, params}`): camera presets/orbit, `find_best_view` (semantic front + auto-upright), render modes, lighting + IBL, clipping planes, rotate/center/ground/simplify, measurement, animation. Returns `{ok, result | error}`, never throws. Note: `get_camera` / `set_camera {position, target, fov}` are viewer **commands** invoked through this tool (`viewer_execute {action:"get_camera"}`), not top-level MCP tools. |
 | `list_viewer_commands` | Every action with its parameter schema (types, ranges, defaults). Call once, then use `viewer_execute`. |
@@ -80,6 +86,7 @@ interpreter and working directory).
 | `compare_models` | Compare ONE reference against N candidates (1–8) **geometrically**, via shape registration — not screenshots. Per candidate: `alignment` (uniform scale ratio, rotation angle, translation — how it had to be transformed to match; unit mismatches surface as the scale ratio), `distances` (symmetric chamfer mean/p95 + Hausdorff, normalized by the reference bbox diagonal, floor-corrected for sampling noise; `asymmetry` flags missing/extra regions), `classification` (identical / near_identical / same_shape_modified / different, with `borderline` + `warnings`), and `structural` count/inventory deltas. Returns `rankingBySimilarity`. Reference or candidates may be paths or URLs; `align:false` compares in place (detects pose changes). |
 | `screenshot` | Render the model as MCP **image content** (PNG, 16–8192 px), with a JSON metadata text block first. `best_view: true` moves to the model's most detailed angle (the chosen azimuth/elevation/score come back in the metadata). `views: ["front","left","45,20"]` captures several angles — presets or "azimuth,elevation" degrees — in ONE call, images returned in order. `preset: "studio"\|"neutral"\|"dark"` pins the **full** lighting/background state to a documented look first, so renders are comparable across sessions and agents (see below). |
 | `open_in_app` | Push the model you are inspecting — plus your current camera pose — into the **running MeshVault app** (`meshvault`), live, so a human co-reviews exactly what you see. Discovers the app via `~/.meshvault/app_session.json` (override: `MESHVAULT_APP_URL` + `MESHVAULT_TOKEN`). Returns `{clients, deep_link}`; when no tab is connected, hand the human the `deep_link` (the app honors `?path=`/`?dir=` deep links). |
+| `get_app_state` | The reverse of `open_in_app`: read **what the human is looking at** in the running app — current asset path, camera pose, and freshness (`age_seconds`). Continue their session headless: `load_model` the returned path, then `viewer_execute {action:"set_camera"}` with the returned camera. |
 
 Typical flow:
 
@@ -93,6 +100,7 @@ viewer_execute { action: "focus",
 compare_models { reference: "v1.glb",
                  candidates: ["v2.glb","v3.glb"] }  → geometric diff of iterations
 open_in_app {}                                      → human co-views your model + camera, live
+get_app_state {}                                    → what is the HUMAN looking at? (path+camera)
 ```
 
 ### Render presets (`screenshot { preset }`)
@@ -111,10 +119,10 @@ session afterwards (state, not a temporary override).
 | `neutral` | Even, low-contrast light on mid-gray — for color/texture comparison | env 1.0 · key 0.8 @ az 45°/el 55° · fill 0.6 · ambient 0.5 · exposure 1.0 · bg `#808080` |
 | `dark` | Presentation hero — stronger key on near-black | env 1.2 · key 1.5 @ az 45°/el 60° · fill 0.4 · ambient 0.2 · exposure 1.1 · bg `#0d0d1a` |
 
-### Sharing a session with a human (`open_in_app`)
+### Sharing a session with a human (`open_in_app` / `get_app_state`)
 
 The MCP viewer is headless; the human's `meshvault` app is a separate process. When
-both run on the same machine as the same user, `open_in_app` bridges them:
+both run on the same machine as the same user, the bridge works in both directions:
 
 1. The app publishes `{url, token}` to `~/.meshvault/app_session.json` (0600) at launch.
 2. `open_in_app` reads it and POSTs your current model path + camera to the app's
@@ -122,6 +130,9 @@ both run on the same machine as the same user, `open_in_app` bridges them:
 3. Every open app tab receives the push over `/api/events` (SSE) and loads the same
    file with your exact camera pose. If the same model is already on screen, only the
    camera moves.
+4. In the other direction, tabs report their asset + camera (~2 s cadence) to
+   `/api/agent/state`; `get_app_state` reads it so you can load the human's model and
+   reproduce their exact view headless.
 
 Notes: the pushed model must exist as a **local file** (URL-loaded models: the CORS
 fallback's temp download is pushable; direct browser loads are not — export first).

@@ -30,11 +30,17 @@ Key facts for agents:
   with `set_environment { enabled, intensity, asBackground }` / `get_environment`.
 
 - MCP: agents can drive MeshVault natively via the bundled MCP server (`meshvault-mcp`,
-  8 tools: load_model [URL or local path], describe_scene, viewer_execute,
-  list_viewer_commands, get_state, compare_models [geometric shape registration],
-  screenshot [supports preset:"studio"|"neutral"|"dark" for renders comparable across
-  sessions], open_in_app [push your model + camera into the running app so a human
-  co-views live]). See https://github.com/lpalbou/MeshVault/blob/main/docs/mcp.md.
+  9 tools: load_model [URL or local path; multi-file OBJ/FBX/gltf assets load
+  textured], describe_scene, viewer_execute, list_viewer_commands, get_state,
+  compare_models [geometric shape registration], screenshot [supports
+  preset:"studio"|"neutral"|"dark" for renders comparable across sessions],
+  open_in_app [push your model + camera into the running app so a human co-views
+  live], get_app_state [read what the HUMAN is looking at — path + camera — and
+  continue their session headless]).
+  See https://github.com/lpalbou/MeshVault/blob/main/docs/mcp.md.
+- REST screenshot (local server, no MCP needed): `GET /api/screenshot?path=/abs/
+  model.glb&best_view=true&preset=studio` returns a PNG (token header required;
+  metadata in the X-MeshVault-Screenshot header). Docs: docs/api.md.
 - Deep links (local app): `/?path=/abs/model.glb` selects + loads an asset;
   `/?dir=/abs/folder` opens a folder; `/?path=/abs/pack.zip!inner/model.obj` loads an
   archive member. URL params win over the remembered last directory, and the URL stays
