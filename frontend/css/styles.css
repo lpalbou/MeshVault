@@ -1912,3 +1912,11 @@ html, body {
 }
 .scene-object-btn:hover { color: #fff; background: rgba(255,255,255,0.08); }
 .scene-object-opacity { width: 54px; }
+
+/* ---- Scene timeline bar (backlog 046) ---- */
+.timeline-bar { gap: 10px; }
+.timeline-label { font-size: 12px; opacity: 0.75; white-space: nowrap; }
+.timeline-scrub-wrap { position: relative; flex: 1; display: flex; align-items: center; }
+.timeline-scrub-wrap .anim-scrub { width: 100%; }
+.timeline-ticks { position: absolute; left: 0; right: 0; top: -4px; height: 4px; pointer-events: none; }
+.timeline-tick { position: absolute; width: 2px; height: 4px; background: #e8b84a; border-radius: 1px; transform: translateX(-1px); }

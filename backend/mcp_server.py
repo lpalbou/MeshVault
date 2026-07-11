@@ -24,6 +24,7 @@ Deps: pip install "meshvault[mcp]"  then  playwright install chromium
 
 from __future__ import annotations
 
+import base64
 import json
 import secrets
 import tempfile
@@ -164,12 +165,17 @@ mcp = FastMCP(
     "meshvault",
     lifespan=_lifespan,
     instructions=(
-        "MeshVault: a headless 3D model viewer you can drive entirely through JSON. "
+        "MeshVault: a headless 3D studio you can drive entirely through JSON — "
+        "load, inspect, CREATE (primitives/sculpt/paint), repair (fix_mesh/"
+        "simplify_region/clone_paint), articulate (split_object/set_parent/"
+        "set_pivot), and ANIMATE (set_keyframe/play_timeline) 3D scenes. "
         "Typical flow: load_model (URL or local path; multi-file OBJ/FBX assets load "
         "with their MTL/textures) → describe_scene (understand WHAT loaded, no vision "
-        "needed) → viewer_execute for camera/render/transform commands (discover them "
+        "needed) → viewer_execute for every viewer command (discover them "
         "with list_viewer_commands) → screenshot to SEE the result "
-        "(pass preset:\"studio\" for renders comparable across sessions). "
+        "(pass preset:\"studio\" for renders comparable across sessions; "
+        "times:[...] for a motion contact sheet) → export_model to persist sculpt/"
+        "paint/animation as a GLB file. "
         "When a human is co-reviewing: open_in_app pushes your current model + camera "
         "into their running MeshVault app so they see what you see; get_app_state reads "
         "back what THEY are looking at so you can pick up their subject headless. "
@@ -603,6 +609,71 @@ async def _shot(width, height, transparent, hide_ground, ssao=True) -> Image:
     return Image(data=png, format="png")
 
 
+async def _timeline_sheet(times: list[float], width: int, height: int,
+                          ssao: bool) -> bytes:
+    """Seek → capture per time, composited into ONE contact-sheet PNG in the
+    browser (grid canvas with the time burned into each tile). One image ≈
+    hundreds of vision tokens versus thousands for N separate captures.
+    The camera AUTO-FRAMES the union of all requested poses first (keeping the
+    view direction) — animation must not walk out of frame (T1 finding)."""
+    page = await _runtime.page()
+    return base64.b64decode(await page.evaluate(
+        """async ([times, w, h, ssao]) => {
+            const v = window.mv.viewer;
+            // Swept framing: union the visible bounds across ALL requested times.
+            let union = null;
+            for (const t of times) {
+                await window.mv.execute({ action: 'seek_timeline', params: { time: t } });
+                const box = v._visibleUnionBox();
+                if (!box) continue;
+                union = union ? union.union(box) : box.clone();
+            }
+            if (union && !union.isEmpty()) v._frameToBox(union);
+            const cols = Math.ceil(Math.sqrt(times.length));
+            const rows = Math.ceil(times.length / cols);
+            const sheet = document.createElement('canvas');
+            sheet.width = cols * w; sheet.height = rows * h;
+            const ctx = sheet.getContext('2d');
+            ctx.fillStyle = '#181820'; ctx.fillRect(0, 0, sheet.width, sheet.height);
+            // Hatch unused tiles so they read as 'empty', not 'broken render'.
+            ctx.strokeStyle = '#2a2a35'; ctx.lineWidth = 2;
+            for (let i = times.length; i < cols * rows; i++) {
+                const x = (i % cols) * w, y = Math.floor(i / cols) * h;
+                for (let d = -h; d < w; d += 24) {
+                    ctx.beginPath();
+                    ctx.moveTo(x + d, y + h); ctx.lineTo(x + d + h, y);
+                    ctx.stroke();
+                }
+            }
+            for (let i = 0; i < times.length; i++) {
+                const r = await window.mv.execute({ action: 'seek_timeline',
+                                                    params: { time: times[i] } });
+                if (!r.ok) throw new Error('seek failed: ' + r.error);
+                const shot = await window.mv.execute({ action: 'screenshot',
+                    params: { width: w, height: h, ssao } });
+                if (!shot.ok) throw new Error('capture failed: ' + shot.error);
+                const img = new window.Image();
+                await new Promise((res, rej) => {
+                    img.onload = res; img.onerror = rej; img.src = shot.result;
+                });
+                const x = (i % cols) * w, y = Math.floor(i / cols) * h;
+                ctx.drawImage(img, x, y, w, h);
+                const label = 't=' + times[i].toFixed(2) + 's';
+                ctx.font = 'bold 16px monospace';
+                const tw = ctx.measureText(label).width + 14;
+                ctx.fillStyle = 'rgba(0,0,0,0.75)';
+                ctx.fillRect(x, y, tw, 26);
+                ctx.fillStyle = '#ffd75e';
+                ctx.fillText(label, x + 7, y + 18);
+                ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+            }
+            return sheet.toDataURL('image/png').split(',')[1];
+        }""",
+        [times, width, height, ssao]))
+
+
 @mcp.tool()
 async def screenshot(
     width: Annotated[int, Field(ge=16, le=8192)] = 1024,
@@ -613,6 +684,7 @@ async def screenshot(
     views: list[str] | None = None,
     preset: str | None = None,
     ssao: bool = True,
+    times: list[float] | None = None,
 ) -> list:
     """Render the model and return PNG image(s), with a JSON metadata text block first.
 
@@ -641,6 +713,12 @@ async def screenshot(
               for PROOF renders during sculpt/paint loops — combine with a small
               size (e.g. 192x192) for a cheap "did that land?" check, and save
               full-size composed captures for final verification.
+        times: MOTION CONTACT SHEET — seek the scene timeline to each time
+               (seconds, ≤12) and return ONE composite grid image with the time
+               burned into each tile. THE cheap animation preview: one image,
+               one round trip (e.g. times=[0, 0.5, 1, 1.5, 2] after keyframing).
+               width/height set the PER-TILE size (use ≤384 for proofs).
+               Ignores views/best_view.
 
     Hand-eye loop: when you spot a feature at pixel (px, py) in a returned image,
     convert it to a 3D surface point with viewer_execute pick
@@ -660,6 +738,19 @@ async def screenshot(
         await _runtime.viewer.apply_render_preset(preset)
         meta["preset"] = preset
 
+    if times is not None:
+        if len(times) == 0 or len(times) > 12:
+            raise RuntimeError("`times` takes 1-12 timeline seconds.")
+        tl_state = await page.evaluate("() => window.mv.getState().timeline")
+        if not tl_state or not tl_state.get("tracks"):
+            raise RuntimeError("The scene timeline is empty — set_keyframe first "
+                               "(times previews TIMELINE motion).")
+        sheet = await _timeline_sheet([float(t) for t in times],
+                                      min(width, 1024), min(height, 1024), ssao)
+        meta["times"] = times
+        meta["sheet"] = True
+        return [json.dumps(meta), Image(data=sheet, format="png")]
+
     if views is not None:
         if len(views) == 0:
             raise RuntimeError("`views` is an empty list — pass view specs or omit it.")
@@ -671,7 +762,7 @@ async def screenshot(
         for spec in views:
             spec = str(spec).strip().lower()
             if spec in VIEW_PRESETS:
-                r = await _mv_execute("set_view", {"preset": spec})
+                r = await _mv_execute("set_view", {"preset": spec, "scope": "scene"})
             else:
                 try:
                     az, el = (float(x) for x in spec.split(","))
@@ -679,7 +770,11 @@ async def screenshot(
                     raise RuntimeError(
                         f"Invalid view '{spec}'. Use a preset ({'/'.join(sorted(VIEW_PRESETS))}) "
                         f"or 'azimuth,elevation' degrees like '45,20'.")
-                r = await _mv_execute("orbit", {"azimuth": az, "elevation": el})
+                # scope:"scene" — framing the ACTIVE object alone can put the
+                # camera INSIDE another object of a composed scene (T2: a split
+                # wheel was active; 'right' rendered the car's interior).
+                r = await _mv_execute("orbit", {"azimuth": az, "elevation": el,
+                                                "scope": "scene"})
             if not r.get("ok"):
                 raise RuntimeError(f"View '{spec}' failed: {r.get('error')}")
             contents.append(await _shot(width, height, transparent, hide_ground, ssao))
@@ -759,6 +854,129 @@ async def save_scene(path: str, overwrite: bool = False) -> dict:
 
 
 @mcp.tool()
+async def get_texture(
+    size: Annotated[int, Field(ge=128, le=2048)] = 1024,
+    wireframe: bool = True,
+    markers: list[list[float]] | None = None,
+    outline_island_of: list[float] | None = None,
+    crop_center: list[float] | None = None,
+    crop_size: float | None = None,
+) -> list:
+    """SEE the active object's texture in TEXTURE SPACE — the texture image with
+    the mesh's UV wireframe overlaid (green) and optional crosshair markers.
+
+    THE texture-to-mesh misalignment diagnostic: `viewer_execute pick` returns
+    the surface point's `.uv`; pass it here as a marker. If the marker (where
+    the mesh SAMPLES) sits offset from the matching texture feature (where the
+    detail IS), the UVs are shifted/stretched — measure the delta in UV units
+    and repair with `viewer_execute transform_uv {offset|scale}`. Iterate:
+    small transform → get_texture + 3D screenshot → converge.
+
+    Args:
+        size: output resolution (128-2048).
+        wireframe: overlay the UV triangulation (where the mesh samples).
+        markers: [[u, v], ...] crosshairs (typically pick results' .uv).
+        outline_island_of: [u, v] — outline the UV ISLAND (chart) containing
+            this point in orange. Fragmented atlases: shows exactly which chart
+            a feature lives in (scope for transform_uv {island_of}).
+        crop_center/crop_size: zoom into a UV window (the measurement view for
+            tiny charts — e.g. crop_center=<pick uv>, crop_size=0.15).
+    """
+    page = await _runtime.page()
+    params = {"size": size, "wireframe": wireframe}
+    if markers:
+        params["markers"] = markers
+    if outline_island_of:
+        params["outline_island_of"] = outline_island_of
+    if crop_center:
+        params["crop_center"] = crop_center
+        params["crop_size"] = crop_size or 0.2
+    result = await page.evaluate(
+        "([p]) => window.mv.execute({ action: 'render_texture', params: p })",
+        [params])
+    if not result.get("ok"):
+        raise RuntimeError(result.get("error", "render_texture failed"))
+    png = base64.b64decode(result["result"].split(",", 1)[1])
+    meta = {"size": size, "wireframe": wireframe, "markers": markers or []}
+    if outline_island_of:
+        meta["outline_island_of"] = outline_island_of
+    if crop_center:
+        meta["crop"] = {"center": crop_center, "size": crop_size or 0.2}
+    return [json.dumps(meta), Image(data=png, format="png")]
+
+
+@mcp.tool()
+async def export_model(
+    path: str,
+    animation: bool | None = None,
+    texture_size: str | int | None = None,
+) -> dict:
+    """Export the visible scene as a GLB FILE — the persistence path for sculpted
+    geometry, painted textures, articulation and timeline animation (none of
+    which survive in .mvscene manifests).
+
+    Args:
+        path: absolute destination (.glb appended if missing; parent dirs created).
+        animation: include the scene timeline as a glTF animation (default: auto
+                   — included whenever the timeline has tracks). Exports 30 fps
+                   resampled TRS tracks; pivots are composed in (an off-origin
+                   rotation exports an arced position track — correct, glTF has
+                   no pivots). Verify by re-loading: get_state().animation.
+        texture_size: cap texture resolution on write — number or tier
+                      low(512)/medium(1024)/high(2048)/xhigh(4096). The
+                      non-destructive LoD path (re-export at any tier).
+    """
+    target = Path(path).expanduser()
+    if not target.is_absolute():
+        return {"ok": False, "error": f"Path must be absolute: {path}"}
+    if target.suffix.lower() != ".glb":
+        target = target.with_name(target.name + ".glb")
+
+    tiers = {"low": 512, "medium": 1024, "high": 2048, "xhigh": 4096}
+    tex: int | None = None
+    if texture_size is not None:
+        if isinstance(texture_size, str):
+            if texture_size not in tiers:
+                return {"ok": False,
+                        "error": f"texture_size must be a number or one of: {', '.join(tiers)}"}
+            tex = tiers[texture_size]
+        else:
+            tex = int(texture_size)
+            if not (64 <= tex <= 4096):
+                return {"ok": False, "error": "texture_size must be 64-4096"}
+
+    params: dict = {}
+    if animation is not None:
+        params["animation"] = animation
+    if tex is not None:
+        params["texture_size"] = tex
+
+    # Fetch the data URL DIRECTLY via the page (the viewer_execute tool path
+    # truncates strings >2 KB — a GLB is megabytes).
+    page = await _runtime.page()
+    result = await page.evaluate(
+        "([p]) => window.mv.execute({ action: 'export_glb', params: p })", [params])
+    if not result.get("ok"):
+        return {"ok": False, "error": result.get("error", "export failed")}
+    data_url = result.get("result")
+    if not data_url:
+        return {"ok": False, "error": "Nothing to export (no visible objects)."}
+
+    glb = base64.b64decode(data_url.split(",", 1)[1])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(glb)
+
+    out = {"ok": True, "path": str(target), "bytes": len(glb)}
+    tl_state = await page.evaluate("() => window.mv.getState().timeline")
+    if tl_state and tl_state.get("tracks") and params.get("animation") is not False:
+        out["animation"] = {"tracks": tl_state["tracks"],
+                            "duration": tl_state.get("duration")}
+        out["verify"] = ("load_model the exported path and check "
+                         "get_state().animation.clips == 1")
+    return out
+
+
+@mcp.tool()
 async def load_scene(path: str) -> dict:
     """Rebuild a composed scene from a .mvscene manifest file.
 
@@ -794,6 +1012,7 @@ async def load_scene(path: str) -> dict:
     async with await _get_load_lock():
         await _mv_execute("unload", {})
         loaded, failed = [], []
+        id_by_index: list = []   # manifest index -> new objectId (None on failure)
         for obj in manifest["objects"]:
             src = obj.get("source", {})
             if src.get("kind") == "primitive":
@@ -814,11 +1033,14 @@ async def load_scene(path: str) -> dict:
             else:
                 failed.append({"name": obj.get("name"),
                                "error": "archive-member sources are app-only"})
+                id_by_index.append(None)
                 continue
             if not result.get("ok"):
                 failed.append({"name": obj.get("name"), "error": result.get("error")})
+                id_by_index.append(None)
                 continue
             object_id = (result.get("result") or {}).get("objectId")
+            id_by_index.append(object_id)
             if object_id is not None:
                 if obj.get("visible") is False:
                     await _mv_execute("set_object_visible",
@@ -828,6 +1050,15 @@ async def load_scene(path: str) -> dict:
                     await _mv_execute("set_object_opacity",
                                       {"id": object_id, "opacity": opacity})
             loaded.append(obj.get("name"))
+
+        # Manifest v2: articulation (pivots + hierarchy) and the timeline —
+        # index-based references, tracks of failed objects dropped and reported.
+        articulation = None
+        if manifest.get("version", 1) >= 2:
+            page = await _runtime.page()
+            articulation = await page.evaluate(
+                "([m, ids]) => window.mv.viewer.applyManifestArticulation(m, ids)",
+                [manifest, id_by_index])
 
         # Scene-level looks: lighting, IBL, background.
         lighting = manifest.get("lighting")
@@ -851,12 +1082,15 @@ async def load_scene(path: str) -> dict:
             await _mv_execute("set_background", {"color": manifest["background"]})
         await _mv_execute("frame_all", {})
 
-    return _truncate_strings({
+    out = {
         "ok": len(loaded) > 0,
         "loaded": loaded,
         "failed": failed,
         "objectCount": len(loaded),
-    })
+    }
+    if articulation:
+        out["articulation"] = articulation
+    return _truncate_strings(out)
 
 
 @mcp.tool()

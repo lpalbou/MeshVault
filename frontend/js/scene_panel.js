@@ -80,7 +80,12 @@ export class ScenePanel {
         this._gizmo.addEventListener("dragging-changed", (e) => {
             v._controls.enabled = !e.value;
             if (!e.value) {
-                // Drag finished: re-size lights/shadows/grid to the new layout.
+                // Drag finished: the gizmo wrote RAW wrapper TRS — re-derive the
+                // logical placement (pivot-aware) so get_object_transform,
+                // manifests and keyframes stay truthful.
+                const entry = v._objects.find((o) => o.wrapper === this._gizmo.object);
+                if (entry) v._syncLogicalFromWrapper(entry);
+                // Re-size lights/shadows/grid to the new layout.
                 v._updateSceneRig(v._visibleUnionBox());
                 this._refreshTransforms();
             }

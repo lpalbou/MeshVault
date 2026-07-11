@@ -3,10 +3,16 @@
 Durable planning memory for MeshVault. Records what exists, what is next, what was
 considered, and why priorities are ordered as they are. Treat stale text here as a bug.
 
-Last update: 2026-07-11 (045 shipped: AI sculpting + texture painting + primitives +
-the agent hand-eye loop, plus the performance diet — demand-driven rendering to 0.0%
-idle CPU, idle browser shutdown, lazy snapshots. Designed against 3 adversarial
-reviews and validated by 3 live artist-agent MCP sessions).
+Last update: 2026-07-11 evening (planned intake 048–054 after the 047 proof
+cycles: E2E suites into the repo, morph targets, symmetry healing, cut-face
+capping, export quality knob, and the two user-confirmed directions — the
+abstract3d→MeshVault pipeline recipe (053) and the human UI for agent tools
+(054). Longer-term context recorded in 053/054: these capabilities are
+candidates for integration into blackpixel, the user's image+video app.
+Earlier same day: 046 shipped articulation + keyframe animation + regional
+repair + texture LoD + composition ergonomics; 047 shipped texture forensics
++ persistence proofs; 045 — AI sculpting + texture painting + primitives +
+the agent hand-eye loop, plus the performance diet to 0.0% idle CPU).
 
 ---
 
@@ -17,7 +23,7 @@ reviews and validated by 3 live artist-agent MCP sessions).
 - `completed/` — closed audit records (each carries a `## Completion` report).
 - Item files use a four-digit global prefix: `NNNN_slug.md`. Numbers are never reused.
 
-Next free ID: **0025**.
+Next free ID: **0055**.
 
 ---
 
@@ -25,11 +31,30 @@ Next free ID: **0025**.
 
 | State | Count | IDs |
 |-------|------:|-----|
-| completed | 29 | 001–005, 009–014, 017–021, 025, 026, 027, 029, 030, 031, 036, 037, 039, 042, 043, 044, 045 |
-| planned | 3 | 006, 007, 008 |
-| proposed | 13 | 015, 016, 022, 023, 024 (partial — endpoint slice shipped in 044, CLI remains), 028, 032, 033, 034, 035, 038 (partial), 040 (parked), 041 (v1 done; v2 rides on 042's set_object_transform) |
+| completed | 31 | 001–005, 009–014, 017–021, 025, 026, 027, 029, 030, 031, 036, 037, 039, 042, 043, 044, 045, 046, 047 |
+| planned | 10 | 006, 007, 008, 048 (E2E suites in repo), 049 (morph targets), 050 (symmetry heal), 051 (cut-face capping), 052 (export quality knob), 053 (abstract3d pipeline recipe), 054 (human UI for agent tools) |
+| proposed | 13 | 015, 016, 022 (urgency raised 2026-07-11), 023, 024 (partial — endpoint slice shipped in 044, CLI remains), 028, 032, 033, 034, 035, 038 (partial), 040 (parked), 041 (v1 done; v2 rides on 042's set_object_transform) |
 
-Next free ID: **0046**.
+Recommended order for the 048–054 wave: 048 first (it is the safety net for
+everything else), then 053 (integration test of the whole thesis, and the
+field report blackpixel needs), then 054; 049/050/051/052 slot in by demand.
+
+Note: `047` (2026-07-11) — texture forensics (pick.uv, get_texture UV views,
+get_uv_islands, transform_uv island scoping + bleed dry-runs), screen-space
+project_paint (the correct repair for fragmented atlases — proven by an honest
+falsification cycle), exploded-view articulation proofs with numeric separation,
+animation persistence proofs (.mvscene v2 + animated GLB + in-app play/pause),
+the critical GLB round-trip V-flip fix, and the assembled proof pack at
+~/MeshVault_assets/proofs/ (INDEX.md). 3 agents × 5 cycles.
+
+Note: `046` (2026-07-11) shipped the five-track mandate in 0.7.0 — composition
+ergonomics (bounds/clone/ground/place/look_at), regional inspect+repair
+(boundary-locked simplify_region, fix_mesh, heal/blur brushes, texel-density
+audit), texture LoD tiers to 4096, articulation (detect_parts/split_object with
+suggested pivots, set_parent/set_pivot via mathematical TRS composition), and
+the scene keyframe timeline (deterministic seeks, teaching notes incl. the
+360°-identity trap, motion contact sheets, animated GLB export, manifest v2,
+timeline UI). 3 design adversaries + 3 agent gauntlets; deferrals in the item.
 
 Note: `045` (2026-07-11) shipped AI dynamic sculpting/painting + the performance diet
 in 0.7.0 — 7 primitives with paint-safe UV atlases, 6 seam-safe world-space sculpt
@@ -83,8 +108,6 @@ issue localization — connectivity QA alone gives wrong quality verdicts), `038
 capture, best-view metadata, A/B compare). Fixed immediately: intra-session load→describe
 race (serialized), measurement overlay not clearable (`clear_measurement` +
 `set_measure_mode false` now clears).
-
-Next free ID: **0036**.
 
 Note: `015` (library index/search) and `016` (tags/collections) were **built then parked**
 (speculative; see `parked/` and each item's history). `021` (offline bundle) is **done**.
@@ -140,10 +163,20 @@ Parked (built, not wired): `parked/library_index.py`, `parked/library_search.js`
 
 ## Remaining planned
 
+Post-047 wave (planned 2026-07-11; see each item for design sketches):
+- `048` — Commit the browser E2E suites into the repo (68 checks currently in /tmp)
+- `049` — Morph targets via sculpt-pose capture (the talking face)
+- `050` — Texture restoration: symmetry-based healing (the portrait's left eye)
+- `051` — Cap split-object cut faces (kill the black gashes)
+- `052` — Export quality knob (texture format + JPEG quality)
+- `053` — abstract3d → MeshVault pipeline as one documented recipe (user-confirmed)
+- `054` — Human UI for the agent tools: sculpt/paint/keyframe (user-confirmed)
+
 Editing track — gated behind the shipped Phase 0 (confinement, `010`/`012`) and the
 `022` viewer refactor. Lower priority than trust + library-at-scale.
-- `006` — Material editor
-- `007` — Component picker (click-to-select mesh)
+- `006` — Material editor (054's paint/material panels will absorb part of this)
+- `007` — Component picker (click-to-select mesh; scene panel click-select shipped in 042 —
+  what remains is sub-mesh picking within one object)
 - `008` — MTL export with modified materials
 
 ## Remaining proposed (roadmap — Phase 3: hardening & differentiators)

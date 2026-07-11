@@ -130,11 +130,18 @@ def test_scene_save_caps_object_count(app_env):
 
 
 @pytest.mark.parametrize("mutate", [
-    lambda m: m.update(version=2),
+    # version 2 became valid with articulation/timeline manifests (backlog 046);
+    # version 3 remains unsupported.
+    lambda m: m.update(version=3),
     lambda m: m.update(objects=[]),
     lambda m: m["objects"].append({"source": {"kind": "exec", "path": "/x"}}),
     lambda m: m["objects"].append("not-an-object"),
     lambda m: m["objects"][0]["source"].update(path="x" * 5000),
+    # v2 bounds: hostile timeline floods and bad articulation refs must 422.
+    lambda m: m.update(version=2, timeline={"tracks": [{"object": 99, "channel": "position", "keys": []}]}),
+    lambda m: m.update(version=2, timeline={"tracks": [{"object": 0, "channel": "teleport", "keys": []}]}),
+    lambda m: m["objects"][0].update(parent=0),
+    lambda m: m["objects"][0].update(pivot=[1, 2]),
 ])
 def test_scene_save_rejects_malformed_manifests(app_env, mutate):
     _, client, root = app_env

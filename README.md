@@ -8,7 +8,7 @@ A professional, local web-based tool for rapidly browsing, previewing, and manag
 |---|---|---|
 | **Online, zero install** | [Open the live viewer](https://www.lpalbou.info/MeshVault/) — drag-drop a model or pass `?src=<url>`; nothing is uploaded | Drive `window.mv` on the live page via browser automation — see the site's [`llms.txt`](https://www.lpalbou.info/MeshVault/llms.txt) |
 | **Local app** | `pip install meshvault` → `meshvault` → browse your filesystem at `http://localhost:8420` | Same server also serves the JSON control API docs at `/llms.txt` |
-| **MCP server** | — | `pip install "meshvault[mcp]"` → `meshvault-mcp`: 11 tools (load by path/URL, describe, mesh stats, geometric compare, sculpt/paint/primitives, reproducible screenshots, scene persistence, two-way co-review with the app) for Claude/Cursor — [docs/mcp.md](docs/mcp.md) |
+| **MCP server** | — | `pip install "meshvault[mcp]"` → `meshvault-mcp`: 13 tools (load by path/URL, describe, mesh stats, geometric compare, sculpt/paint/primitives, texture forensics, reproducible screenshots + motion sheets, scene persistence, GLB export, two-way co-review with the app) for Claude/Cursor — [docs/mcp.md](docs/mcp.md) |
 
 [![CI](https://github.com/lpalbou/meshvault/actions/workflows/ci.yml/badge.svg)](https://github.com/lpalbou/meshvault/actions)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
@@ -40,6 +40,8 @@ Older FBX files (version < 7000) are auto-converted to OBJ by a built-in zero-de
 | **Animation** | Play/pause, scrub, speed, clip selector for animated GLB/FBX/Collada |
 | **Scene composition** | Co-load multiple objects, place them with a gizmo (move/rotate/scale), objects panel, save/load `.mvscene` scenes, export the composition as one GLB |
 | **Sculpt & paint (agents)** | 7 primitives with paint-safe UVs, 6 world-space sculpt brushes (seam-safe, quantified feedback), texture painting (round/square stamps, edge clamping, honest `meanAlpha`), screenshot-to-surface `pick` — the full create/observe/correct loop over MCP |
+| **Repair & adaptive LoD** | Region density survey (`inspect_region`), boundary-locked regional decimation (`simplify_region` — adaptive resolution by judgment), mesh fix passes, texel-density audit, heal/blur texture-repair brushes, texture tiers 512→4096 on paint and export |
+| **Articulation & animation** | Part detection + plane splitting with suggested pivots, parent hierarchies, rotation pivots, scene keyframe timeline (pose-capture keys, easing, deterministic seeks, teaching notes), timeline UI bar, motion contact sheets, animated GLB export |
 | **Transforms** | Reload, reset, center, ground, auto-orient (PCA), rotate ±90° per axis |
 | **Mesh Ops** | Simplify (edge collapse LOD, UV-preserving), recompute smooth normals (UV-preserving) |
 | **Textures** | Folder picker with smart matching (convention + fuzzy name) for separated texture packs |
@@ -79,7 +81,7 @@ lightest to most integrated:
    reference served at [`/llms.txt`](frontend/llms.txt) and
    [`/llms-full.txt`](frontend/llms-full.txt).
 2. **MCP server** — `meshvault-mcp` lets Claude Desktop / Claude Code / Cursor drive a
-   headless viewer natively through 11 tools: load a model by **URL or local file path**
+   headless viewer natively through 13 tools: load a model by **URL or local file path**
    (multi-file OBJ/FBX assets load textured), compose multi-object scenes
    (`add: true` + placement commands, persisted as `.mvscene` via
    `save_scene`/`load_scene`), **create and modify content** — primitives, sculpting
@@ -105,7 +107,7 @@ semantic front and uprights it) → `set_render_mode` / `set_clip` to inspect �
 
 - [Getting Started](docs/getting_started.md) — Installation, UI overview, complete feature guide
 - [Architecture](docs/architecture.md) — System design, components, rendering pipeline
-- [API Reference](docs/api.md) — REST API (22 routes, incl. headless `GET /api/screenshot`)
+- [API Reference](docs/api.md) — REST API (24 routes, incl. headless `GET /api/screenshot` and scene save/load)
 - [MCP Server](docs/mcp.md) — Drive the viewer from Claude/Cursor via Model Context Protocol
 - [FAQ](docs/faq.md) — Troubleshooting and tips
 

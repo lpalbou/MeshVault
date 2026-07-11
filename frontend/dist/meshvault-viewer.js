@@ -2289,11 +2289,11 @@ var Quaternion = class {
     const theta1 = 2 * Math.PI * Math.random();
     const theta2 = 2 * Math.PI * Math.random();
     const x0 = Math.random();
-    const r1 = Math.sqrt(1 - x0);
+    const r12 = Math.sqrt(1 - x0);
     const r22 = Math.sqrt(x0);
     return this.set(
-      r1 * Math.sin(theta1),
-      r1 * Math.cos(theta1),
+      r12 * Math.sin(theta1),
+      r12 * Math.cos(theta1),
       r22 * Math.sin(theta2),
       r22 * Math.cos(theta2)
     );
@@ -26764,9 +26764,9 @@ var inflt = function(dat, st, buf, dict) {
         lm = flrm, dm = fdrm, lbt = 9, dbt = 5;
       else if (type == 2) {
         var hLit = bits(dat, pos, 31) + 257, hcLen = bits(dat, pos + 10, 15) + 4;
-        var tl = hLit + bits(dat, pos + 5, 31) + 1;
+        var tl2 = hLit + bits(dat, pos + 5, 31) + 1;
         pos += 14;
-        var ldt = new u8(tl);
+        var ldt = new u8(tl2);
         var clt = new u8(19);
         for (var i = 0; i < hcLen; ++i) {
           clt[clim[i]] = bits(dat, pos + i * 3, 7);
@@ -26774,7 +26774,7 @@ var inflt = function(dat, st, buf, dict) {
         pos += hcLen * 3;
         var clb = max(clt), clbmsk = (1 << clb) - 1;
         var clm = hMap(clt, clb, 1);
-        for (var i = 0; i < tl; ) {
+        for (var i = 0; i < tl2; ) {
           var r = clm[bits(dat, pos, clbmsk)];
           pos += r & 15;
           var s = r >> 4;
@@ -42057,11 +42057,36 @@ function activeMeshes(viewer) {
   if (meshes.length === 0) throw new Error("Active object has no meshes.");
   return meshes;
 }
+function wrongObjectHint(viewer, worldPoint) {
+  if (!worldPoint || viewer._objects.length < 2) return "";
+  const p = new Vector3(...worldPoint);
+  const active = viewer._activeEntry();
+  let best = null, bestD = Infinity;
+  for (const entry of viewer._objects) {
+    if (entry === active) continue;
+    const box = new Box3().setFromObject(entry.wrapper);
+    if (box.isEmpty()) continue;
+    const d = box.distanceToPoint(p);
+    if (d < bestD) {
+      bestD = d;
+      best = entry;
+    }
+  }
+  if (best && bestD < 1e-3) {
+    return ` The point sits on object ${best.id} ('${best.name}') but the ACTIVE object is ${active.id} ('${active.name}') \u2014 set_active_object {id: ${best.id}} first.`;
+  }
+  return "";
+}
 function assertNotSkinned(viewer) {
   const entry = viewer._activeEntry();
   if (entry && entry.skinned) {
     throw new Error(
       "Sculpting/painting skinned (rigged) models is not supported \u2014 vertex edits corrupt the bind pose. Use set_object_transform to place it, or sculpt a primitive/static mesh instead."
+    );
+  }
+  if (viewer._timeline && viewer._timeline.playing) {
+    throw new Error(
+      "The timeline is PLAYING \u2014 sculpt/paint on a moving object would bake a transient pose into the geometry. pause_timeline (or seek_timeline) first, then edit."
     );
   }
 }
@@ -42270,6 +42295,7 @@ function finalizeSculpt(viewer, touchedGeometries) {
   if (entry) {
     entry.modified = true;
     entry.sculpted = true;
+    entry.geometryRev++;
     entry.stats = viewer._computeStats(entry.model);
     viewer._lastStats = entry.stats;
   }
@@ -42316,7 +42342,7 @@ function applyStamps(viewer, opts, points) {
   }
   if (touched.size === 0) {
     throw new Error(
-      "Brush touched no vertices. Check center (world coords \u2014 use pick, raycast or get_bounds) and radius (or radius_rel); or the mesh is too coarse here (primitives: raise segment params)."
+      "Brush touched no vertices. Check center (world coords \u2014 use pick, raycast or get_bounds) and radius (or radius_rel); or the mesh is too coarse here (primitives: raise segment params)." + wrongObjectHint(viewer, points[0])
     );
   }
   finalizeSculpt(viewer, touched);
@@ -42409,9 +42435,16 @@ function sculptStroke(viewer, opts) {
   return applyStamps(viewer, opts, strokePoints(viewer, opts, "sculpt_stroke"));
 }
 var PAINT_DEFAULT_SIZE = 1024;
-var PAINT_MAX_SIZE = 2048;
-var PAINT_TEXEL_BUDGET = 16 * 1024 * 1024;
+var PAINT_MAX_SIZE = 4096;
+var PAINT_TEXEL_BUDGET = 32 * 1024 * 1024;
 var paintTexelsAllocated = 0;
+function paintBudgetInfo() {
+  return {
+    texelsUsed: paintTexelsAllocated,
+    texelsBudget: PAINT_TEXEL_BUDGET,
+    usedFraction: Math.round(paintTexelsAllocated / PAINT_TEXEL_BUDGET * 1e3) / 1e3
+  };
+}
 function paintTargetMaterial(mesh) {
   const stash = mesh._mvOriginalMaterial || mesh.material;
   if (Array.isArray(stash)) {
@@ -42472,6 +42505,7 @@ function ensurePaintLayer(viewer, mesh, size) {
     texture.wrapS = prevMap.wrapS;
     texture.wrapT = prevMap.wrapT;
   }
+  applyLayerFiltering(texture, dim);
   material.map = texture;
   material.needsUpdate = true;
   paintTexelsAllocated += dim * dim;
@@ -42683,7 +42717,7 @@ function paintPoints(viewer, opts, points) {
   }
   if (pixels === 0) {
     throw new Error(
-      "Brush touched no surface. Check center (world coords \u2014 use pick, raycast or get_bounds) and radius (or radius_rel)."
+      "Brush touched no surface. Check center (world coords \u2014 use pick, raycast or get_bounds) and radius (or radius_rel)." + wrongObjectHint(viewer, points[0])
     );
   }
   for (const layer of paintedLayers) layer.texture.needsUpdate = true;
@@ -42704,6 +42738,18 @@ function paintPoints(viewer, opts, points) {
   const notes = [];
   if (meanAlpha < 0.05) {
     notes.push(`meanAlpha ${meanAlpha} \u2014 this paint is nearly invisible. Raise opacity and/or hardness (soft falloff scales alpha toward 0 at the rim).`);
+  }
+  const budget = paintBudgetInfo();
+  if (budget.usedFraction >= 0.75) {
+    notes.push(`Paint budget ${Math.round(budget.usedFraction * 100)}% used \u2014 prefer smaller texture_size tiers or clear_paint unused layers.`);
+  }
+  if (opts.texture_size) {
+    for (const layer of paintedLayers) {
+      if (layer.size !== opts.texture_size) {
+        notes.push(`texture_size ${opts.texture_size} ignored \u2014 the layer already exists at ${layer.size}. Use resize_texture to change it.`);
+        break;
+      }
+    }
   }
   const mode = viewer.getRenderMode && viewer.getRenderMode();
   if (mode === "solid" || mode === "normals") {
@@ -42733,6 +42779,345 @@ function fillPaint(viewer, opts) {
   viewer.invalidate();
   return { filledMeshes: filled, color: "#" + color.getHexString() };
 }
+function ensureRepairableLayer(viewer, mesh, size) {
+  const material = paintTargetMaterial(mesh);
+  const prev = material.map;
+  if (prev && !(material.userData && material.userData._mvPaint)) {
+    const img = prev.image;
+    const drawable = img && (typeof HTMLImageElement !== "undefined" && img instanceof HTMLImageElement || typeof HTMLCanvasElement !== "undefined" && img instanceof HTMLCanvasElement || typeof ImageBitmap !== "undefined" && img instanceof ImageBitmap);
+    if (!drawable) {
+      throw new Error(
+        "This material's texture is GPU-only (compressed KTX2 or unreadable) and cannot be read back for repair. Repaint the area with paint/fill_paint instead."
+      );
+    }
+  }
+  return ensurePaintLayer(viewer, mesh, size);
+}
+function brushFootprint(mesh, layer, center, radius, hardness, falloffFn) {
+  const geometry = mesh.geometry;
+  const uvAttr = geometry.getAttribute("uv");
+  if (!uvAttr) return null;
+  mesh.updateMatrixWorld(true);
+  const m = mesh.matrixWorld;
+  const pos = geometry.getAttribute("position");
+  const index = geometry.getIndex();
+  const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const p = new Vector3();
+  const r22 = radius * radius;
+  const dim = layer.size;
+  const acc = /* @__PURE__ */ new Map();
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const i0 = idxOf(t2, 0), i1 = idxOf(t2, 1), i2 = idxOf(t2, 2);
+    a.fromBufferAttribute(pos, i0).applyMatrix4(m);
+    b.fromBufferAttribute(pos, i1).applyMatrix4(m);
+    c.fromBufferAttribute(pos, i2).applyMatrix4(m);
+    p.copy(a).add(b).add(c).divideScalar(3);
+    const triR = Math.max(a.distanceTo(p), b.distanceTo(p), c.distanceTo(p));
+    if (p.distanceToSquared(center) > (radius + triR) ** 2) continue;
+    const [u0, v0] = uvToPixel(layer, uvAttr.getX(i0), uvAttr.getY(i0));
+    const [u1, v1] = uvToPixel(layer, uvAttr.getX(i1), uvAttr.getY(i1));
+    const [u2, v2] = uvToPixel(layer, uvAttr.getX(i2), uvAttr.getY(i2));
+    const minU = Math.max(0, Math.floor(Math.min(u0, u1, u2)));
+    const maxU = Math.min(dim - 1, Math.ceil(Math.max(u0, u1, u2)));
+    const minV = Math.max(0, Math.floor(Math.min(v0, v1, v2)));
+    const maxV = Math.min(dim - 1, Math.ceil(Math.max(v0, v1, v2)));
+    if (maxU < minU || maxV < minV) continue;
+    if ((maxU - minU) * (maxV - minV) > dim * dim) continue;
+    const denom = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2);
+    if (Math.abs(denom) < 1e-9) continue;
+    for (let py2 = minV; py2 <= maxV; py2++) {
+      for (let px2 = minU; px2 <= maxU; px2++) {
+        const l0 = ((v1 - v2) * (px2 + 0.5 - u2) + (u2 - u1) * (py2 + 0.5 - v2)) / denom;
+        const l1 = ((v2 - v0) * (px2 + 0.5 - u2) + (u0 - u2) * (py2 + 0.5 - v2)) / denom;
+        const l2 = 1 - l0 - l1;
+        if (l0 < -0.02 || l1 < -0.02 || l2 < -0.02) continue;
+        p.set(
+          a.x * l0 + b.x * l1 + c.x * l2,
+          a.y * l0 + b.y * l1 + c.y * l2,
+          a.z * l0 + b.z * l1 + c.z * l2
+        );
+        const d2 = p.distanceToSquared(center);
+        if (d2 > r22) continue;
+        const tN = Math.sqrt(d2) / radius;
+        const soft = tN <= hardness ? 1 : falloffFn((tN - hardness) / Math.max(1e-6, 1 - hardness));
+        if (soft <= 4e-3) continue;
+        const key = py2 * dim + px2;
+        const prev = acc.get(key);
+        if (!prev || soft > prev.alpha) {
+          acc.set(key, { alpha: soft, world: [p.x, p.y, p.z] });
+        }
+      }
+    }
+  }
+  return acc;
+}
+function blurPaint(viewer, opts = {}) {
+  assertNotSkinned(viewer);
+  const meshes = activeMeshes(viewer);
+  const radius = resolveRadius(viewer, opts, "blur_paint");
+  const strength = opts.strength !== void 0 ? Math.max(0, Math.min(1, opts.strength)) : 0.5;
+  const center = new Vector3(...opts.center || []);
+  if (!opts.center || opts.center.length !== 3) {
+    throw new Error("blur_paint requires center: [x,y,z] (world \u2014 use pick).");
+  }
+  let blurred = 0;
+  let blurAlphaSum = 0;
+  for (const mesh of meshes) {
+    if (!mesh.geometry.getAttribute("uv")) continue;
+    const layer = ensureRepairableLayer(viewer, mesh, opts.texture_size);
+    const foot = brushFootprint(mesh, layer, center, radius, 0.8, FALLOFFS.smooth);
+    if (!foot || foot.size === 0) continue;
+    const dim = layer.size;
+    let minX = dim, maxX = 0, minY = dim, maxY = 0;
+    for (const key of foot.keys()) {
+      const px2 = key % dim, py2 = (key - px2) / dim;
+      if (px2 < minX) minX = px2;
+      if (px2 > maxX) maxX = px2;
+      if (py2 < minY) minY = py2;
+      if (py2 > maxY) maxY = py2;
+    }
+    const pad = 4;
+    minX = Math.max(0, minX - pad);
+    minY = Math.max(0, minY - pad);
+    maxX = Math.min(dim - 1, maxX + pad);
+    maxY = Math.min(dim - 1, maxY + pad);
+    const w = maxX - minX + 1, h = maxY - minY + 1;
+    const srcImg = layer.ctx.getImageData(minX, minY, w, h);
+    const dstImg = layer.ctx.getImageData(minX, minY, w, h);
+    const src = srcImg.data, dst = dstImg.data;
+    const sigma = Math.max(1, Math.round(strength * 6));
+    const inFoot = (px2, py2) => foot.has(py2 * dim + px2);
+    for (const [key, rec] of foot) {
+      const px2 = key % dim, py2 = (key - px2) / dim;
+      let r = 0, g3 = 0, b22 = 0, wsum = 0;
+      for (let dy = -sigma; dy <= sigma; dy++) {
+        for (let dx = -sigma; dx <= sigma; dx++) {
+          const qx = px2 + dx, qy = py2 + dy;
+          if (qx < minX || qx > maxX || qy < minY || qy > maxY) continue;
+          if (!inFoot(qx, qy)) continue;
+          const g22 = Math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma));
+          const o2 = ((qy - minY) * w + (qx - minX)) * 4;
+          r += src[o2] * g22;
+          g3 += src[o2 + 1] * g22;
+          b22 += src[o2 + 2] * g22;
+          wsum += g22;
+        }
+      }
+      if (wsum <= 0) continue;
+      const o = ((py2 - minY) * w + (px2 - minX)) * 4;
+      const alpha = rec.alpha * strength;
+      dst[o] = Math.round(dst[o] * (1 - alpha) + r / wsum * alpha);
+      dst[o + 1] = Math.round(dst[o + 1] * (1 - alpha) + g3 / wsum * alpha);
+      dst[o + 2] = Math.round(dst[o + 2] * (1 - alpha) + b22 / wsum * alpha);
+      blurred++;
+      blurAlphaSum += alpha;
+    }
+    layer.ctx.putImageData(dstImg, minX, minY);
+    layer.texture.needsUpdate = true;
+  }
+  if (blurred === 0) {
+    throw new Error("Blur brush touched no painted surface \u2014 check center (world coords \u2014 use pick) and radius; the mesh needs UVs and a readable texture." + wrongObjectHint(viewer, opts.center));
+  }
+  const entry = viewer._activeEntry();
+  if (entry) entry.modified = true;
+  viewer.invalidate();
+  return {
+    blurred,
+    meanAlpha: Math.round(blurAlphaSum / blurred * 1e3) / 1e3,
+    strength
+  };
+}
+function clonePaint(viewer, opts = {}) {
+  assertNotSkinned(viewer);
+  const meshes = activeMeshes(viewer);
+  const radius = resolveRadius(viewer, opts, "clone_paint");
+  if (!opts.from || opts.from.length !== 3 || !opts.to || opts.to.length !== 3) {
+    throw new Error("clone_paint requires from:[x,y,z] and to:[x,y,z] (world \u2014 use pick on a clean area and on the defect).");
+  }
+  const from = new Vector3(...opts.from);
+  const to = new Vector3(...opts.to);
+  const offset = from.clone().sub(to);
+  const strength = opts.strength !== void 0 ? Math.max(0, Math.min(1, opts.strength)) : 1;
+  const falloffFn = FALLOFFS[opts.falloff || "smooth"] || FALLOFFS.smooth;
+  let cloned = 0;
+  let alphaSum = 0;
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const p = new Vector3();
+  for (const mesh of meshes) {
+    const geometry = mesh.geometry;
+    const uvAttr = geometry.getAttribute("uv");
+    if (!uvAttr) continue;
+    const layer = ensureRepairableLayer(viewer, mesh, opts.texture_size);
+    mesh.updateMatrixWorld(true);
+    const m = mesh.matrixWorld;
+    const pos = geometry.getAttribute("position");
+    const index = geometry.getIndex();
+    const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+    const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+    const srcTris = [];
+    let srcNormal = null, srcD2 = Infinity;
+    const e1 = new Vector3(), e2 = new Vector3();
+    for (let t2 = 0; t2 < triCount; t2++) {
+      a.fromBufferAttribute(pos, idxOf(t2, 0)).applyMatrix4(m);
+      b.fromBufferAttribute(pos, idxOf(t2, 1)).applyMatrix4(m);
+      c.fromBufferAttribute(pos, idxOf(t2, 2)).applyMatrix4(m);
+      p.copy(a).add(b).add(c).divideScalar(3);
+      const triR = Math.max(a.distanceTo(p), b.distanceTo(p), c.distanceTo(p));
+      const d2 = p.distanceToSquared(from);
+      if (d2 > (radius * 1.5 + triR) ** 2) continue;
+      srcTris.push(t2);
+      if (d2 < srcD2) {
+        srcD2 = d2;
+        e1.copy(b).sub(a);
+        e2.copy(c).sub(a);
+        srcNormal = e1.clone().cross(e2).normalize();
+      }
+    }
+    if (!srcTris.length) continue;
+    const foot = brushFootprint(
+      mesh,
+      layer,
+      to,
+      radius,
+      opts.hardness !== void 0 ? opts.hardness : 0.6,
+      falloffFn
+    );
+    if (!foot || foot.size === 0) continue;
+    let dstNormal = null, dstD2 = Infinity;
+    for (let t2 = 0; t2 < triCount; t2++) {
+      a.fromBufferAttribute(pos, idxOf(t2, 0)).applyMatrix4(m);
+      b.fromBufferAttribute(pos, idxOf(t2, 1)).applyMatrix4(m);
+      c.fromBufferAttribute(pos, idxOf(t2, 2)).applyMatrix4(m);
+      p.copy(a).add(b).add(c).divideScalar(3);
+      const d2 = p.distanceToSquared(to);
+      if (d2 < dstD2) {
+        dstD2 = d2;
+        e1.copy(b).sub(a);
+        e2.copy(c).sub(a);
+        dstNormal = e1.clone().cross(e2).normalize();
+      }
+    }
+    if (srcNormal && dstNormal && srcNormal.dot(dstNormal) < Math.cos(Math.PI / 4)) {
+      throw new Error("clone_paint: source and destination surfaces face different directions (> 45\xB0) \u2014 pure-translation cloning would smear unrelated texture. Pick a source on a similarly-oriented surface.");
+    }
+    const snapshot = layer.ctx.getImageData(0, 0, layer.size, layer.size);
+    const snap = snapshot.data;
+    const dim = layer.size;
+    const tri = { a: new Vector3(), b: new Vector3(), c: new Vector3() };
+    const bary = new Vector3();
+    const target = new Vector3();
+    const sampleSource = (world) => {
+      target.set(world[0] + offset.x, world[1] + offset.y, world[2] + offset.z);
+      let bestD = Infinity, bestUV = null;
+      const closest = new Vector3();
+      const triangle = new Triangle();
+      for (const t2 of srcTris) {
+        const i0 = idxOf(t2, 0), i1 = idxOf(t2, 1), i2 = idxOf(t2, 2);
+        tri.a.fromBufferAttribute(pos, i0).applyMatrix4(m);
+        tri.b.fromBufferAttribute(pos, i1).applyMatrix4(m);
+        tri.c.fromBufferAttribute(pos, i2).applyMatrix4(m);
+        triangle.set(tri.a, tri.b, tri.c);
+        triangle.closestPointToPoint(target, closest);
+        const d = closest.distanceToSquared(target);
+        if (d < bestD) {
+          bestD = d;
+          triangle.getBarycoord(closest, bary);
+          const u2 = uvAttr.getX(i0) * bary.x + uvAttr.getX(i1) * bary.y + uvAttr.getX(i2) * bary.z;
+          const vv = uvAttr.getY(i0) * bary.x + uvAttr.getY(i1) * bary.y + uvAttr.getY(i2) * bary.z;
+          bestUV = [u2, vv];
+        }
+      }
+      if (!bestUV || bestD > radius * radius) return null;
+      const [sx, sy] = uvToPixel(layer, bestUV[0], bestUV[1]);
+      const px2 = Math.max(0, Math.min(dim - 1, Math.round(sx)));
+      const py2 = Math.max(0, Math.min(dim - 1, Math.round(sy)));
+      const o = (py2 * dim + px2) * 4;
+      return [snap[o], snap[o + 1], snap[o + 2]];
+    };
+    let minX = dim, maxX = 0, minY = dim, maxY = 0;
+    for (const key of foot.keys()) {
+      const px2 = key % dim, py2 = (key - px2) / dim;
+      if (px2 < minX) minX = px2;
+      if (px2 > maxX) maxX = px2;
+      if (py2 < minY) minY = py2;
+      if (py2 > maxY) maxY = py2;
+    }
+    const w = maxX - minX + 1;
+    const img = layer.ctx.getImageData(minX, minY, w, maxY - minY + 1);
+    const data = img.data;
+    for (const [key, rec] of foot) {
+      const color = sampleSource(rec.world);
+      if (!color) continue;
+      const px2 = key % dim, py2 = (key - px2) / dim;
+      const o = ((py2 - minY) * w + (px2 - minX)) * 4;
+      const alpha = rec.alpha * strength;
+      data[o] = Math.round(data[o] * (1 - alpha) + color[0] * alpha);
+      data[o + 1] = Math.round(data[o + 1] * (1 - alpha) + color[1] * alpha);
+      data[o + 2] = Math.round(data[o + 2] * (1 - alpha) + color[2] * alpha);
+      data[o + 3] = 255;
+      cloned++;
+      alphaSum += alpha;
+    }
+    layer.ctx.putImageData(img, minX, minY);
+    layer.texture.needsUpdate = true;
+  }
+  if (cloned === 0) {
+    throw new Error("Clone brush landed nothing \u2014 check from/to (world coords \u2014 use pick on a clean source area and on the defect) and radius; clone_paint works within ONE object's texture." + wrongObjectHint(viewer, opts.to));
+  }
+  const entry = viewer._activeEntry();
+  if (entry) entry.modified = true;
+  viewer.invalidate();
+  return { cloned, meanAlpha: Math.round(alphaSum / cloned * 1e3) / 1e3 };
+}
+function resizeTexture(viewer, opts = {}) {
+  const meshes = activeMeshes(viewer);
+  const size = opts.size;
+  if (!(size >= 64 && size <= PAINT_MAX_SIZE)) {
+    throw new Error(`resize_texture requires size 64..${PAINT_MAX_SIZE} (or tiers low/medium/high/xhigh).`);
+  }
+  const filter = opts.filter || "smooth";
+  let resized = 0, before = null;
+  for (const mesh of meshes) {
+    const stash = mesh._mvOriginalMaterial || mesh.material;
+    const material = Array.isArray(stash) ? null : stash;
+    const layer = material && material.userData && material.userData._mvPaint;
+    if (!layer || layer.size === size) continue;
+    const delta = size * size - layer.size * layer.size;
+    if (delta > 0 && paintTexelsAllocated + delta > PAINT_TEXEL_BUDGET) {
+      throw new Error("Paint budget exceeded by the resize \u2014 clear_paint unused layers or choose a smaller size.");
+    }
+    before = before || layer.size;
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = filter !== "nearest";
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(layer.canvas, 0, 0, size, size);
+    paintTexelsAllocated = Math.max(0, paintTexelsAllocated + delta);
+    layer.texture.dispose();
+    const texture = new CanvasTexture(canvas);
+    texture.colorSpace = SRGBColorSpace;
+    texture.flipY = layer.flipY;
+    applyLayerFiltering(texture, size);
+    material.map = texture;
+    material.needsUpdate = true;
+    Object.assign(layer, { canvas, ctx, texture, size });
+    resized++;
+  }
+  if (resized === 0) {
+    throw new Error("No paint layers to resize on the active object (paint/fill_paint first; resize_texture only touches PAINT layers \u2014 authored textures are downsampled at export instead).");
+  }
+  viewer.invalidate();
+  return { resizedLayers: resized, from: before, to: size, ...paintBudgetInfo() };
+}
+function applyLayerFiltering(texture, size) {
+  if (size >= 2048) {
+    texture.generateMipmaps = false;
+    texture.minFilter = LinearFilter;
+  }
+}
 function paintedMeshNames(model) {
   const names = [];
   if (!model) return names;
@@ -42743,6 +43128,40 @@ function paintedMeshNames(model) {
     if (m && m.userData && m.userData._mvPaint) names.push(c.name || "(unnamed)");
   });
   return names;
+}
+function clonePaintLayer(material) {
+  const layer = material.userData && material.userData._mvPaint;
+  if (!layer) return;
+  if (paintTexelsAllocated + layer.size * layer.size > PAINT_TEXEL_BUDGET) {
+    delete material.userData._mvPaint;
+    material.map = layer.prevMap || null;
+    throw new Error(
+      "Paint memory budget exceeded while cloning paint layers \u2014 clear_paint unused layers or resize_texture down, then clone."
+    );
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = layer.size;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(layer.canvas, 0, 0);
+  const texture = new CanvasTexture(canvas);
+  texture.colorSpace = SRGBColorSpace;
+  texture.flipY = layer.flipY;
+  if (layer.texture) {
+    texture.wrapS = layer.texture.wrapS;
+    texture.wrapT = layer.texture.wrapT;
+  }
+  material.map = texture;
+  material.needsUpdate = true;
+  paintTexelsAllocated += layer.size * layer.size;
+  material.userData._mvPaint = {
+    canvas,
+    ctx,
+    texture,
+    size: layer.size,
+    flipY: layer.flipY,
+    prevMap: layer.prevMap,
+    prevColor: layer.prevColor
+  };
 }
 function releasePaintBudget(model) {
   if (!model) return;
@@ -42809,10 +43228,934 @@ function castInto(viewer, raycaster) {
     hit: true,
     point: [r42(h.point.x), r42(h.point.y), r42(h.point.z)],
     normal: n2 ? [r42(n2.x), r42(n2.y), r42(n2.z)] : null,
+    // UV at the hit — THE diagnostic for texture-to-mesh misalignment:
+    // pick a 3D feature, then render_texture {marker: this uv} to SEE where
+    // that surface point samples in texture space.
+    uv: h.uv ? [r42(h.uv.x), r42(h.uv.y)] : null,
     distance: r42(h.distance),
     objectId: entry ? entry.id : null,
     objectName: entry ? entry.name : null
   };
+}
+function renderTexture(viewer, opts = {}) {
+  const meshes = activeMeshes(viewer);
+  const size = Math.max(128, Math.min(2048, opts.size || 1024));
+  let mesh = null, material = null, image = null;
+  for (const m of meshes) {
+    const stash = m._mvOriginalMaterial || m.material;
+    const mat = Array.isArray(stash) ? stash[0] : stash;
+    const img = mat && mat.map && mat.map.image;
+    const drawable = img && (typeof HTMLImageElement !== "undefined" && img instanceof HTMLImageElement || typeof HTMLCanvasElement !== "undefined" && img instanceof HTMLCanvasElement || typeof ImageBitmap !== "undefined" && img instanceof ImageBitmap);
+    if (drawable) {
+      mesh = m;
+      material = mat;
+      image = img;
+      break;
+    }
+  }
+  if (!mesh) {
+    throw new Error("No drawable texture on the active object (compressed KTX2 or untextured). fill_paint first to create a readable layer.");
+  }
+  const flipY = material.map.flipY;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#222";
+  ctx.fillRect(0, 0, size, size);
+  ctx.drawImage(image, 0, 0, size, size);
+  const px2 = (u2) => u2 * size;
+  const py2 = (v) => (flipY ? 1 - v : v) * size;
+  if (opts.wireframe !== false) {
+    const uv = mesh.geometry.getAttribute("uv");
+    const index = mesh.geometry.getIndex();
+    const pos = mesh.geometry.getAttribute("position");
+    const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+    const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+    const step = Math.max(1, Math.ceil(triCount / 4e4));
+    ctx.strokeStyle = "rgba(0, 255, 140, 0.28)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let t2 = 0; t2 < triCount; t2 += step) {
+      const a = idxOf(t2, 0), b = idxOf(t2, 1), c = idxOf(t2, 2);
+      ctx.moveTo(px2(uv.getX(a)), py2(uv.getY(a)));
+      ctx.lineTo(px2(uv.getX(b)), py2(uv.getY(b)));
+      ctx.lineTo(px2(uv.getX(c)), py2(uv.getY(c)));
+      ctx.closePath();
+    }
+    ctx.stroke();
+  }
+  if (opts.outline_island_of) {
+    const hit = islandAtUV(mesh, opts.outline_island_of);
+    if (hit) {
+      const { ofVertex } = uvIslands(mesh.geometry);
+      const uv = mesh.geometry.getAttribute("uv");
+      const index = mesh.geometry.getIndex();
+      const pos = mesh.geometry.getAttribute("position");
+      const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+      const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+      ctx.strokeStyle = "rgba(255, 160, 0, 0.9)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let t2 = 0; t2 < triCount; t2++) {
+        const a = idxOf(t2, 0);
+        if (ofVertex[a] !== hit.island) continue;
+        const b22 = idxOf(t2, 1), c2 = idxOf(t2, 2);
+        ctx.moveTo(px2(uv.getX(a)), py2(uv.getY(a)));
+        ctx.lineTo(px2(uv.getX(b22)), py2(uv.getY(b22)));
+        ctx.lineTo(px2(uv.getX(c2)), py2(uv.getY(c2)));
+        ctx.closePath();
+      }
+      ctx.stroke();
+    }
+  }
+  const markers = opts.markers || (opts.marker ? [opts.marker] : []);
+  const mr = Math.max(4, Math.min(60, opts.marker_size || 14));
+  markers.forEach((m, i) => {
+    const x = px2(m[0]), y = py2(m[1]);
+    ctx.strokeStyle = "#ff3355";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x, y, mr, 0, Math.PI * 2);
+    ctx.moveTo(x - mr * 1.7, y);
+    ctx.lineTo(x - mr, y);
+    ctx.moveTo(x + mr, y);
+    ctx.lineTo(x + mr * 1.7, y);
+    ctx.moveTo(x, y - mr * 1.7);
+    ctx.lineTo(x, y - mr);
+    ctx.moveTo(x, y + mr);
+    ctx.lineTo(x, y + mr * 1.7);
+    ctx.stroke();
+    if (opts.labels !== false) {
+      ctx.fillStyle = "#ff3355";
+      ctx.font = "bold 15px monospace";
+      ctx.fillText(
+        `M${i} (${m[0].toFixed(3)}, ${m[1].toFixed(3)})`,
+        x + mr * 1.8,
+        y - mr * 1.2
+      );
+    }
+  });
+  if (opts.crop_center) {
+    const half = Math.max(0.01, Math.min(0.5, (opts.crop_size || 0.2) / 2));
+    const cx = opts.crop_center[0], cy = opts.crop_center[1];
+    const sxU = Math.max(0, Math.min(1 - 2 * half, cx - half));
+    const syV = Math.max(0, Math.min(1 - 2 * half, cy - half));
+    const sx = sxU * size;
+    const sy = (flipY ? 1 - syV - 2 * half : syV) * size;
+    const crop = document.createElement("canvas");
+    crop.width = crop.height = size;
+    const cctx = crop.getContext("2d");
+    cctx.imageSmoothingEnabled = false;
+    cctx.drawImage(canvas, sx, sy, 2 * half * size, 2 * half * size, 0, 0, size, size);
+    cctx.strokeStyle = "#ffd75e";
+    cctx.font = "bold 14px monospace";
+    cctx.fillStyle = "#ffd75e";
+    cctx.fillText(`crop u:[${sxU.toFixed(3)}..${(sxU + 2 * half).toFixed(3)}] v:[${syV.toFixed(3)}..${(syV + 2 * half).toFixed(3)}]`, 8, 18);
+    return crop.toDataURL("image/png");
+  }
+  return canvas.toDataURL("image/png");
+}
+function uvIslands(geometry) {
+  if (geometry.userData._mvUvIslands) return geometry.userData._mvUvIslands;
+  const pos = geometry.getAttribute("position");
+  const index = geometry.getIndex();
+  const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const parent = new Int32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) parent[i] = i;
+  const find = (x) => {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]];
+      x = parent[x];
+    }
+    return x;
+  };
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const a = find(idxOf(t2, 0));
+    const b = find(idxOf(t2, 1));
+    const c = find(idxOf(t2, 2));
+    parent[b] = a;
+    parent[c] = a;
+  }
+  const ofVertex = new Int32Array(pos.count);
+  const idOf = /* @__PURE__ */ new Map();
+  for (let i = 0; i < pos.count; i++) {
+    const root = find(i);
+    let id = idOf.get(root);
+    if (id === void 0) {
+      id = idOf.size;
+      idOf.set(root, id);
+    }
+    ofVertex[i] = id;
+  }
+  const islands = { ofVertex, count: idOf.size };
+  geometry.userData._mvUvIslands = islands;
+  return islands;
+}
+function islandAtUV(mesh, uvPoint) {
+  const geometry = mesh.geometry;
+  const uv = geometry.getAttribute("uv");
+  if (!uv) return null;
+  const { ofVertex } = uvIslands(geometry);
+  let best = -1, bestD = Infinity;
+  for (let i = 0; i < uv.count; i++) {
+    const du = uv.getX(i) - uvPoint[0];
+    const dv = uv.getY(i) - uvPoint[1];
+    const d = du * du + dv * dv;
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best >= 0 ? { island: ofVertex[best], distance: Math.sqrt(bestD) } : null;
+}
+function islandOccupancy(mesh, res = 256) {
+  const geometry = mesh.geometry;
+  const uv = geometry.getAttribute("uv");
+  const index = geometry.getIndex();
+  const pos = geometry.getAttribute("position");
+  const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const { ofVertex } = uvIslands(geometry);
+  const grid = new Int32Array(res * res).fill(-1);
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const i0 = idxOf(t2, 0), i1 = idxOf(t2, 1), i2 = idxOf(t2, 2);
+    const island = ofVertex[i0];
+    const xs = [uv.getX(i0) * res, uv.getX(i1) * res, uv.getX(i2) * res];
+    const ys = [uv.getY(i0) * res, uv.getY(i1) * res, uv.getY(i2) * res];
+    const minX = Math.max(0, Math.floor(Math.min(...xs)));
+    const maxX = Math.min(res - 1, Math.ceil(Math.max(...xs)));
+    const minY = Math.max(0, Math.floor(Math.min(...ys)));
+    const maxY = Math.min(res - 1, Math.ceil(Math.max(...ys)));
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        grid[y * res + x] = island;
+      }
+    }
+  }
+  return grid;
+}
+function transformUV(viewer, opts = {}) {
+  assertNotSkinned(viewer);
+  const meshes = activeMeshes(viewer);
+  const offset = opts.offset || [0, 0];
+  const scale = opts.scale || [1, 1];
+  const pivot = opts.pivot || [0.5, 0.5];
+  if (offset[0] === 0 && offset[1] === 0 && scale[0] === 1 && scale[1] === 1) {
+    throw new Error("transform_uv needs a non-identity offset and/or scale.");
+  }
+  let count = 0, meshCount = 0;
+  let islandInfo = null;
+  const seen = /* @__PURE__ */ new Set();
+  for (const mesh of meshes) {
+    if (seen.has(mesh.geometry)) continue;
+    seen.add(mesh.geometry);
+    const uv = mesh.geometry.getAttribute("uv");
+    if (!uv) continue;
+    let memberOf = null;
+    if (opts.island_of) {
+      const hit = islandAtUV(mesh, opts.island_of);
+      if (!hit) continue;
+      const { ofVertex, count: islandCount } = uvIslands(mesh.geometry);
+      memberOf = (i) => ofVertex[i] === hit.island;
+      let members = 0;
+      for (let i = 0; i < uv.count; i++) if (memberOf(i)) members++;
+      islandInfo = { island: hit.island, of: islandCount, vertices: members };
+    }
+    for (let i = 0; i < uv.count; i++) {
+      if (memberOf && !memberOf(i)) continue;
+      uv.setXY(
+        i,
+        pivot[0] + (uv.getX(i) - pivot[0]) * scale[0] + offset[0],
+        pivot[1] + (uv.getY(i) - pivot[1]) * scale[1] + offset[1]
+      );
+      count++;
+    }
+    uv.needsUpdate = true;
+    meshCount++;
+  }
+  if (meshCount === 0) throw new Error("Active object has no UV coordinates.");
+  if (opts.island_of && count === 0) {
+    throw new Error("No UV island found near island_of \u2014 pass a uv from pick.");
+  }
+  const entry = viewer._activeEntry();
+  if (entry) {
+    entry.modified = true;
+    entry.geometryRev++;
+  }
+  viewer.invalidate();
+  const result = {
+    meshes: meshCount,
+    uvsTransformed: count,
+    offset,
+    scale,
+    pivot,
+    note: "UV edits persist for the session and export with the model; `reset` does NOT undo them (reload the file to restore). Verify with render_texture/get_texture + a 3D screenshot."
+  };
+  if (islandInfo) result.island = islandInfo;
+  return result;
+}
+function previewUVTransform(viewer, opts = {}) {
+  const meshes = activeMeshes(viewer);
+  const offset = opts.offset || [0, 0];
+  const scale = opts.scale || [1, 1];
+  const pivot = opts.pivot || [0.5, 0.5];
+  const res = 256;
+  for (const mesh of meshes) {
+    const uv = mesh.geometry.getAttribute("uv");
+    if (!uv) continue;
+    const grid = islandOccupancy(mesh, res);
+    const { ofVertex } = uvIslands(mesh.geometry);
+    let scopeIsland = null;
+    if (opts.island_of) {
+      const hit = islandAtUV(mesh, opts.island_of);
+      if (!hit) continue;
+      scopeIsland = hit.island;
+    }
+    let inside = 0, bleed = 0, out = 0;
+    for (let i = 0; i < uv.count; i++) {
+      if (scopeIsland !== null && ofVertex[i] !== scopeIsland) continue;
+      const u2 = pivot[0] + (uv.getX(i) - pivot[0]) * scale[0] + offset[0];
+      const v2 = pivot[1] + (uv.getY(i) - pivot[1]) * scale[1] + offset[1];
+      if (u2 < 0 || u2 > 1 || v2 < 0 || v2 > 1) {
+        out++;
+        continue;
+      }
+      const cell = grid[Math.min(res - 1, Math.floor(v2 * res)) * res + Math.min(res - 1, Math.floor(u2 * res))];
+      const own = scopeIsland !== null ? scopeIsland : ofVertex[i];
+      if (cell !== -1 && cell !== own) bleed++;
+      else inside++;
+    }
+    const total = inside + bleed + out;
+    if (total === 0) continue;
+    const r3v = (x) => Math.round(x / total * 1e3) / 1e3;
+    return {
+      sampled: total,
+      island: scopeIsland,
+      clean: r3v(inside),
+      bleedFraction: r3v(bleed),
+      outOfBoundsFraction: r3v(out),
+      verdict: bleed / total >= 0.08 ? "HIGH bleed \u2014 this transform will visibly contaminate other charts" : bleed / total >= 0.02 ? "moderate bleed \u2014 visible on close inspection (faces: usually disqualifying)" : "low bleed \u2014 safe to apply"
+    };
+  }
+  throw new Error("Active object has no UV coordinates.");
+}
+function getUVIslands(viewer, opts = {}) {
+  const meshes = activeMeshes(viewer);
+  const max2 = Math.max(1, Math.min(32, opts.max || 12));
+  const r42 = (v) => Math.round(v * 1e4) / 1e4;
+  for (const mesh of meshes) {
+    const uv = mesh.geometry.getAttribute("uv");
+    if (!uv) continue;
+    const { ofVertex, count } = uvIslands(mesh.geometry);
+    const sizes = /* @__PURE__ */ new Map();
+    for (let i = 0; i < ofVertex.length; i++) {
+      sizes.set(ofVertex[i], (sizes.get(ofVertex[i]) || 0) + 1);
+    }
+    const stats = /* @__PURE__ */ new Map();
+    for (let i = 0; i < uv.count; i++) {
+      const id = ofVertex[i];
+      let s = stats.get(id);
+      if (!s) {
+        s = { n: 0, minU: 2, maxU: -1, minV: 2, maxV: -1 };
+        stats.set(id, s);
+      }
+      s.n++;
+      const u2 = uv.getX(i), v2 = uv.getY(i);
+      if (u2 < s.minU) s.minU = u2;
+      if (u2 > s.maxU) s.maxU = u2;
+      if (v2 < s.minV) s.minV = v2;
+      if (v2 > s.maxV) s.maxV = v2;
+    }
+    const largest = [...stats.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, max2).map(([id, s]) => ({
+      island: id,
+      vertices: s.n,
+      uvBbox: [r42(s.minU), r42(s.minV), r42(s.maxU), r42(s.maxV)]
+    }));
+    const result = { islandCount: count, totalVertices: ofVertex.length, largest };
+    if (opts.at) {
+      result.at = opts.at.map((uvPoint) => {
+        const hit = islandAtUV(mesh, uvPoint);
+        return hit ? {
+          uv: uvPoint,
+          island: hit.island,
+          vertices: sizes.get(hit.island) || 0
+        } : { uv: uvPoint, island: null };
+      });
+    }
+    if (count > 500) {
+      result.note = `FRAGMENTED atlas (${count} islands): features do not own islands \u2014 island-scoped transform_uv will trade alignment for seam blotches. Repair baked-in misalignment with project_paint (moves TEXELS through screen space) instead.`;
+    }
+    return result;
+  }
+  throw new Error("Active object has no UV coordinates.");
+}
+async function projectPaint(viewer, opts = {}) {
+  assertNotSkinned(viewer);
+  const meshes = activeMeshes(viewer);
+  const radius = resolveRadius(viewer, opts, "project_paint");
+  if (!opts.center || opts.center.length !== 3) {
+    throw new Error("project_paint requires center: [x,y,z] (world \u2014 use pick).");
+  }
+  const center = new Vector3(...opts.center);
+  let so = opts.screen_offset || [0, 0];
+  const hasSurface = Array.isArray(opts.surface_offset) && (opts.surface_offset[0] !== 0 || opts.surface_offset[1] !== 0);
+  if (!hasSurface && so[0] === 0 && so[1] === 0) {
+    throw new Error("project_paint needs a non-zero screen_offset [dx, dy] (pixels in the 1024\xD71024 projection view) OR surface_offset [right, down] (world units \u2014 camera-independent; +down slides content down the surface).");
+  }
+  const strength = opts.strength !== void 0 ? Math.max(0, Math.min(1, opts.strength)) : 1;
+  const falloffFn = FALLOFFS[opts.falloff || "smooth"] || FALLOFFS.smooth;
+  const S = 1024;
+  const dataUrl = viewer.captureImage({ width: S, height: S, hideGround: true });
+  const srcCanvas = document.createElement("canvas");
+  srcCanvas.width = srcCanvas.height = S;
+  const srcCtx = srcCanvas.getContext("2d");
+  await new Promise((resolve, reject) => {
+    const img = new window.Image();
+    img.onload = () => {
+      srcCtx.drawImage(img, 0, 0);
+      resolve();
+    };
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
+  const src = srcCtx.getImageData(0, 0, S, S).data;
+  const cam = viewer._camera;
+  const prevAspect = cam.aspect;
+  cam.aspect = 1;
+  cam.updateProjectionMatrix();
+  const view = cam.matrixWorldInverse.clone();
+  const proj = cam.projectionMatrix.clone();
+  cam.aspect = prevAspect;
+  cam.updateProjectionMatrix();
+  const toScreen = (world2, out) => {
+    out.copy(world2).applyMatrix4(view).applyMatrix4(proj);
+    return [(out.x * 0.5 + 0.5) * S, (1 - (out.y * 0.5 + 0.5)) * S];
+  };
+  let painted = 0, alphaSum = 0;
+  const tmp2 = new Vector3();
+  if (hasSurface) {
+    const camRight = new Vector3().setFromMatrixColumn(cam.matrixWorld, 0).normalize();
+    const [cx, cy] = toScreen(center, tmp2);
+    const [rx, ry] = toScreen(center.clone().add(camRight), tmp2);
+    const pxPerUnit = Math.hypot(rx - cx, ry - cy);
+    if (pxPerUnit < 1e-6) {
+      throw new Error("Cannot derive the pixel scale at this brush depth \u2014 is the brush center behind the camera?");
+    }
+    so = [opts.surface_offset[0] * pxPerUnit, opts.surface_offset[1] * pxPerUnit];
+  }
+  const world = new Vector3();
+  for (const mesh of meshes) {
+    if (!mesh.geometry.getAttribute("uv")) continue;
+    const layer = ensureRepairableLayer(viewer, mesh, opts.texture_size);
+    const foot = brushFootprint(
+      mesh,
+      layer,
+      center,
+      radius,
+      opts.hardness !== void 0 ? opts.hardness : 0.5,
+      falloffFn
+    );
+    if (!foot || foot.size === 0) continue;
+    const dim = layer.size;
+    let minX = dim, maxX = 0, minY = dim, maxY = 0;
+    for (const key of foot.keys()) {
+      const px2 = key % dim, py2 = (key - px2) / dim;
+      if (px2 < minX) minX = px2;
+      if (px2 > maxX) maxX = px2;
+      if (py2 < minY) minY = py2;
+      if (py2 > maxY) maxY = py2;
+    }
+    const w = maxX - minX + 1;
+    const img = layer.ctx.getImageData(minX, minY, w, maxY - minY + 1);
+    const data = img.data;
+    for (const [key, rec] of foot) {
+      world.set(rec.world[0], rec.world[1], rec.world[2]);
+      const [sx, sy] = toScreen(world, tmp2);
+      const qx = Math.round(sx + so[0]);
+      const qy = Math.round(sy + so[1]);
+      if (qx < 0 || qx >= S || qy < 0 || qy >= S) continue;
+      const o = ((key - key % dim) / dim - minY) * w + key % dim - minX;
+      const so4 = (qy * S + qx) * 4;
+      const alpha = rec.alpha * strength;
+      data[o * 4] = Math.round(data[o * 4] * (1 - alpha) + src[so4] * alpha);
+      data[o * 4 + 1] = Math.round(data[o * 4 + 1] * (1 - alpha) + src[so4 + 1] * alpha);
+      data[o * 4 + 2] = Math.round(data[o * 4 + 2] * (1 - alpha) + src[so4 + 2] * alpha);
+      data[o * 4 + 3] = 255;
+      painted++;
+      alphaSum += alpha;
+    }
+    layer.ctx.putImageData(img, minX, minY);
+    layer.texture.needsUpdate = true;
+  }
+  if (painted === 0) {
+    throw new Error("Projection brush landed nothing \u2014 check center/radius and make sure the region faces the CURRENT camera." + wrongObjectHint(viewer, opts.center));
+  }
+  const entry = viewer._activeEntry();
+  if (entry) entry.modified = true;
+  viewer.invalidate();
+  return {
+    painted,
+    meanAlpha: Math.round(alphaSum / painted * 1e3) / 1e3,
+    screenOffset: so,
+    note: "Copied texels include the CURRENT shading (capture under the 'neutral' preset to minimize baked lighting) and occlusion is ignored \u2014 verify with a fresh screenshot."
+  };
+}
+
+// frontend/js/viewer/timeline.js
+var TIMELINE_MAX_TRACKS = 64;
+var TIMELINE_MAX_KEYS = 256;
+var EASINGS = {
+  linear: (u2) => u2,
+  step: () => 0,
+  // hold the segment's start value
+  ease_in: (u2) => u2 * u2,
+  ease_out: (u2) => u2 * (2 - u2),
+  ease_in_out: (u2) => u2 < 0.5 ? 2 * u2 * u2 : 1 - (-2 * u2 + 2) ** 2 / 2
+};
+function createTimeline() {
+  return {
+    duration: 0,
+    // seconds; 0 = derived from max key time
+    time: 0,
+    playing: false,
+    loop: true,
+    // objectId -> { position:[{t,v:[3],easing}], rotation:[{t,v:quat[4],easing}],
+    //               scale:[{t,v:[3],easing}] } — keys sorted by t.
+    tracks: /* @__PURE__ */ new Map()
+  };
+}
+function effectiveDuration(tl2) {
+  if (tl2.duration > 0) return tl2.duration;
+  let max2 = 0;
+  for (const channels of tl2.tracks.values()) {
+    for (const keys of Object.values(channels)) {
+      if (keys.length) max2 = Math.max(max2, keys[keys.length - 1].t);
+    }
+  }
+  return max2;
+}
+function tl(viewer) {
+  if (!viewer._timeline) viewer._timeline = createTimeline();
+  return viewer._timeline;
+}
+function requireEntry(viewer, id) {
+  const entry = viewer._entryById(id);
+  if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+  return entry;
+}
+function quatAngleDeg(a, b) {
+  const qa = new Quaternion(...a);
+  const qb = new Quaternion(...b);
+  return MathUtils.radToDeg(qa.angleTo(qb));
+}
+function setKeyframe(viewer, opts) {
+  const timeline = tl(viewer);
+  const entry = requireEntry(viewer, opts.id);
+  if (timeline.playing) pauseTimeline(viewer);
+  const time = opts.time;
+  if (!(time >= 0)) throw new Error("set_keyframe requires time >= 0 (seconds)");
+  const hasExplicit = opts.position || opts.rotation || opts.quaternion || opts.scale !== void 0;
+  if (!hasExplicit && !opts.capture) {
+    throw new Error(
+      "set_keyframe: pass position/rotation/scale values, or capture:true to key the object's CURRENT pose (pose with set_object_transform or look_at first, then capture)."
+    );
+  }
+  if (!timeline.tracks.has(opts.id)) {
+    if (timeline.tracks.size >= TIMELINE_MAX_TRACKS) {
+      throw new Error(`Timeline cap: max ${TIMELINE_MAX_TRACKS} animated objects.`);
+    }
+    timeline.tracks.set(opts.id, { position: [], rotation: [], scale: [] });
+    entry.basePlacement = {
+      p: entry.logical.p.clone(),
+      q: entry.logical.q.clone(),
+      s: entry.logical.s.clone()
+    };
+  }
+  const channels = timeline.tracks.get(opts.id);
+  const easing = opts.easing || "linear";
+  if (!EASINGS[easing]) {
+    throw new Error(`Unknown easing '${easing}'. Use ${Object.keys(EASINGS).join("|")}.`);
+  }
+  const upsert = (keys, value) => {
+    if (keys.length >= TIMELINE_MAX_KEYS) {
+      throw new Error(`Timeline cap: max ${TIMELINE_MAX_KEYS} keys per channel.`);
+    }
+    const existing = keys.findIndex((k) => Math.abs(k.t - time) < 1e-6);
+    const key = { t: time, v: value, easing };
+    if (existing >= 0) keys[existing] = key;
+    else {
+      keys.push(key);
+      keys.sort((a, b) => a.t - b.t);
+    }
+  };
+  const written = [];
+  const L = entry.logical;
+  const d2r = Math.PI / 180;
+  let captureSet = null;
+  if (opts.capture && !hasExplicit) {
+    captureSet = new Set(opts.channels || ["position", "rotation", "scale"]);
+    for (const ch of captureSet) {
+      if (!["position", "rotation", "scale"].includes(ch)) {
+        throw new Error(`Unknown channel '${ch}'. Use position|rotation|scale.`);
+      }
+    }
+  }
+  if (opts.position || captureSet && captureSet.has("position")) {
+    const v = opts.position || [L.p.x, L.p.y, L.p.z];
+    upsert(channels.position, [v[0], v[1], v[2]]);
+    written.push("position");
+  }
+  let quatValue = null;
+  if (opts.quaternion) {
+    quatValue = new Quaternion(...opts.quaternion).normalize();
+  } else if (opts.rotation) {
+    quatValue = new Quaternion().setFromEuler(new Euler(
+      opts.rotation[0] * d2r,
+      opts.rotation[1] * d2r,
+      opts.rotation[2] * d2r,
+      "XYZ"
+    ));
+  } else if (captureSet && captureSet.has("rotation")) {
+    quatValue = L.q.clone();
+  }
+  let note;
+  if (quatValue) {
+    const arr = [quatValue.x, quatValue.y, quatValue.z, quatValue.w];
+    const eulerReq = opts.rotation ? [...opts.rotation] : null;
+    const keys = channels.rotation;
+    const idx = keys.findIndex((k) => k.t > time);
+    const neighbors = [];
+    if (keys.length) {
+      const before = idx === -1 ? keys[keys.length - 1] : keys[idx - 1];
+      const after = idx === -1 ? null : keys[idx];
+      if (before && Math.abs(before.t - time) > 1e-6) neighbors.push(before);
+      if (after) neighbors.push(after);
+    }
+    for (const n2 of neighbors) {
+      const quatDeg = quatAngleDeg(n2.v, arr);
+      if (eulerReq && n2.e) {
+        const axisDelta = Math.max(
+          Math.abs(eulerReq[0] - n2.e[0]),
+          Math.abs(eulerReq[1] - n2.e[1]),
+          Math.abs(eulerReq[2] - n2.e[2])
+        );
+        if (axisDelta >= 90 && quatDeg < 5) {
+          note = `WARNING: the keys at t=${n2.t} and t=${time} differ by ${Math.round(axisDelta)}\xB0 in requested angles but are IDENTICAL in rotation space (360\xB0 = 0\xB0) \u2014 this segment will NOT move. Key full turns in steps \u2264120\xB0: e.g. a 720\xB0 spin as 0/90/180/.../720.`;
+          continue;
+        }
+        if (axisDelta > 120) {
+          note = `rotation step to the key at t=${n2.t} is ${Math.round(axisDelta)}\xB0 as requested \u2014 interpolation takes the SHORT arc and cannot exceed 180\xB0/segment. Use steps \u2264120\xB0 (e.g. 0/90/180/270/360 for a full spin).`;
+          continue;
+        }
+      }
+      if (quatDeg > 120) {
+        note = `rotation delta to the key at t=${n2.t} is ${Math.round(quatDeg)}\xB0 \u2014 interpolation takes the SHORT arc (a 270\xB0 turn plays as \u221290\xB0). Use steps \u2264120\xB0 (e.g. 0/90/180/270/360 for a full spin).`;
+      }
+    }
+    const key = { t: time, v: arr, easing };
+    if (eulerReq) key.e = eulerReq;
+    if (keys.length >= TIMELINE_MAX_KEYS) {
+      throw new Error(`Timeline cap: max ${TIMELINE_MAX_KEYS} keys per channel.`);
+    }
+    const existing = keys.findIndex((k) => Math.abs(k.t - time) < 1e-6);
+    if (existing >= 0) keys[existing] = key;
+    else {
+      keys.push(key);
+      keys.sort((a, b) => a.t - b.t);
+    }
+    written.push("rotation");
+  }
+  if (opts.scale !== void 0 || captureSet && captureSet.has("scale")) {
+    let v;
+    if (typeof opts.scale === "number") v = [opts.scale, opts.scale, opts.scale];
+    else if (Array.isArray(opts.scale)) v = [opts.scale[0], opts.scale[1], opts.scale[2]];
+    else v = [L.s.x, L.s.y, L.s.z];
+    upsert(channels.scale, v);
+    written.push("scale");
+  }
+  const keyCount = channels.position.length + channels.rotation.length + channels.scale.length;
+  const result = {
+    objectId: opts.id,
+    time,
+    channels: written,
+    keyCount,
+    duration: Math.round(effectiveDuration(timeline) * 1e3) / 1e3
+  };
+  if (note) result.note = note;
+  return result;
+}
+function deleteKeyframe(viewer, { id, time, channel } = {}) {
+  const timeline = tl(viewer);
+  requireEntry(viewer, id);
+  const channels = timeline.tracks.get(id);
+  if (!channels) throw new Error(`Object ${id} has no timeline tracks.`);
+  const names = channel ? [channel] : ["position", "rotation", "scale"];
+  let removed = 0;
+  for (const name of names) {
+    if (!channels[name]) throw new Error(`Unknown channel '${name}'. Use position|rotation|scale.`);
+    if (time === void 0) {
+      removed += channels[name].length;
+      channels[name] = [];
+    } else {
+      const before = channels[name].length;
+      channels[name] = channels[name].filter((k) => Math.abs(k.t - time) > 1e-6);
+      removed += before - channels[name].length;
+    }
+  }
+  if (!channels.position.length && !channels.rotation.length && !channels.scale.length) {
+    timeline.tracks.delete(id);
+  }
+  return { objectId: id, removed };
+}
+function getTimeline(viewer) {
+  const timeline = tl(viewer);
+  const r34 = (v) => Math.round(v * 1e3) / 1e3;
+  const tracks = [];
+  for (const [objectId, channels] of timeline.tracks) {
+    const entry = viewer._entryById(objectId);
+    const track = { objectId, name: entry ? entry.name : "(removed)" };
+    for (const [name, keys] of Object.entries(channels)) {
+      if (!keys.length) continue;
+      track[name] = keys.map((k) => {
+        const out = { t: r34(k.t) };
+        if (name === "rotation") {
+          if (k.e) {
+            out.v = k.e.map(r34);
+          } else {
+            const e = new Euler().setFromQuaternion(
+              new Quaternion(...k.v),
+              "XYZ"
+            );
+            const r2d = 180 / Math.PI;
+            out.v = [r34(e.x * r2d), r34(e.y * r2d), r34(e.z * r2d)];
+            out.derived = true;
+          }
+        } else {
+          out.v = k.v.map(r34);
+        }
+        if (k.easing !== "linear") out.easing = k.easing;
+        return out;
+      });
+    }
+    tracks.push(track);
+  }
+  return {
+    duration: r34(effectiveDuration(timeline)),
+    time: r34(timeline.time),
+    playing: timeline.playing,
+    loop: timeline.loop,
+    tracks,
+    // Rotations converted from stored quaternions for readability.
+    rotationDerived: true
+  };
+}
+function clearTimeline(viewer, { id } = {}) {
+  const timeline = tl(viewer);
+  timeline.playing = false;
+  const ids = id !== void 0 ? [id] : [...timeline.tracks.keys()];
+  let cleared = 0;
+  for (const objectId of ids) {
+    if (!timeline.tracks.has(objectId)) continue;
+    timeline.tracks.delete(objectId);
+    cleared++;
+    const entry = viewer._entryById(objectId);
+    if (entry && entry.basePlacement) {
+      entry.logical.p.copy(entry.basePlacement.p);
+      entry.logical.q.copy(entry.basePlacement.q);
+      entry.logical.s.copy(entry.basePlacement.s);
+      viewer._composeWrapper(entry);
+      entry.basePlacement = null;
+    }
+  }
+  if (timeline.tracks.size === 0) timeline.time = 0;
+  viewer._updateSceneRig(viewer._visibleUnionBox());
+  viewer.invalidate();
+  return { clearedTracks: cleared, remaining: timeline.tracks.size };
+}
+function sampleChannel(keys, t2, interpolate) {
+  if (!keys.length) return null;
+  if (t2 <= keys[0].t) return keys[0].v;
+  if (t2 >= keys[keys.length - 1].t) return keys[keys.length - 1].v;
+  let i = 0;
+  while (i < keys.length - 1 && keys[i + 1].t <= t2) i++;
+  const a = keys[i], b = keys[i + 1];
+  const span = b.t - a.t;
+  let u2 = span > 1e-9 ? (t2 - a.t) / span : 1;
+  u2 = (EASINGS[a.easing] || EASINGS.linear)(u2);
+  return interpolate(a.v, b.v, u2);
+}
+var lerp3 = (a, b, u2) => [
+  a[0] + (b[0] - a[0]) * u2,
+  a[1] + (b[1] - a[1]) * u2,
+  a[2] + (b[2] - a[2]) * u2
+];
+var _qa = new Quaternion();
+var _qb = new Quaternion();
+var slerp4 = (a, b, u2) => {
+  _qa.set(a[0], a[1], a[2], a[3]);
+  _qb.set(b[0], b[1], b[2], b[3]);
+  _qa.slerp(_qb, u2).normalize();
+  return [_qa.x, _qa.y, _qa.z, _qa.w];
+};
+function sampleTimeline(viewer, t2) {
+  const timeline = tl(viewer);
+  for (const [objectId, channels] of timeline.tracks) {
+    const entry = viewer._entryById(objectId);
+    if (!entry) continue;
+    const p = sampleChannel(channels.position, t2, lerp3);
+    const q = sampleChannel(channels.rotation, t2, slerp4);
+    const s = sampleChannel(channels.scale, t2, lerp3);
+    if (p) entry.logical.p.set(p[0], p[1], p[2]);
+    if (q) entry.logical.q.set(q[0], q[1], q[2], q[3]);
+    if (s) entry.logical.s.set(s[0], s[1], s[2]);
+    viewer._composeWrapper(entry);
+  }
+}
+function playTimeline(viewer, { loop } = {}) {
+  const timeline = tl(viewer);
+  if (timeline.tracks.size === 0) {
+    throw new Error("Timeline is empty \u2014 set_keyframe first.");
+  }
+  if (loop !== void 0) timeline.loop = !!loop;
+  const swept = sweptBox(viewer);
+  if (swept && !swept.isEmpty()) viewer._updateSceneRig(swept);
+  timeline.playing = true;
+  viewer.invalidate();
+  return {
+    playing: true,
+    time: Math.round(timeline.time * 1e3) / 1e3,
+    duration: Math.round(effectiveDuration(timeline) * 1e3) / 1e3,
+    loop: timeline.loop
+  };
+}
+function pauseTimeline(viewer) {
+  const timeline = tl(viewer);
+  timeline.playing = false;
+  viewer.invalidate();
+  return { playing: false, time: Math.round(timeline.time * 1e3) / 1e3 };
+}
+function seekTimeline(viewer, { time } = {}) {
+  const timeline = tl(viewer);
+  if (!(time >= 0)) throw new Error("seek_timeline requires time >= 0 (seconds)");
+  timeline.time = time;
+  sampleTimeline(viewer, time);
+  viewer.invalidate();
+  return { time: Math.round(time * 1e3) / 1e3 };
+}
+function setTimelineDuration(viewer, { duration } = {}) {
+  const timeline = tl(viewer);
+  if (duration !== void 0) {
+    if (!(duration > 0)) throw new Error("duration must be > 0 seconds");
+    timeline.duration = duration;
+  }
+  return { duration: Math.round(effectiveDuration(timeline) * 1e3) / 1e3 };
+}
+function tickTimeline(viewer, delta) {
+  const timeline = viewer._timeline;
+  if (!timeline || !timeline.playing) return false;
+  const dur = effectiveDuration(timeline);
+  if (dur <= 0) {
+    timeline.playing = false;
+    return false;
+  }
+  timeline.time += delta;
+  if (timeline.time > dur) {
+    if (timeline.loop) timeline.time %= dur;
+    else {
+      timeline.time = dur;
+      timeline.playing = false;
+    }
+  }
+  sampleTimeline(viewer, timeline.time);
+  return timeline.playing;
+}
+function sweptBox(viewer) {
+  const timeline = viewer._timeline;
+  const union = viewer._visibleUnionBox() || new Box3();
+  if (!timeline) return union;
+  for (const [objectId, channels] of timeline.tracks) {
+    const entry = viewer._entryById(objectId);
+    if (!entry) continue;
+    const box = new Box3().setFromObject(entry.wrapper);
+    if (box.isEmpty()) continue;
+    const sphere = box.getBoundingSphere(new Sphere());
+    for (const k of channels.position) {
+      const c = new Vector3(k.v[0], k.v[1], k.v[2]);
+      union.union(new Box3(
+        c.clone().subScalar(sphere.radius),
+        c.clone().addScalar(sphere.radius)
+      ));
+    }
+  }
+  return union;
+}
+function timelineState(viewer) {
+  const timeline = viewer._timeline;
+  if (!timeline || timeline.tracks.size === 0) return { tracks: 0 };
+  const r34 = (v) => Math.round(v * 1e3) / 1e3;
+  return {
+    tracks: timeline.tracks.size,
+    playing: timeline.playing,
+    time: r34(timeline.time),
+    duration: r34(effectiveDuration(timeline)),
+    loop: timeline.loop
+  };
+}
+function serializeTimeline(viewer) {
+  const timeline = viewer._timeline;
+  if (!timeline || timeline.tracks.size === 0) return null;
+  const r42 = (v) => Math.round(v * 1e4) / 1e4;
+  const tracks = [];
+  for (const [objectId, channels] of timeline.tracks) {
+    for (const [channel, keys] of Object.entries(channels)) {
+      if (!keys.length) continue;
+      tracks.push({
+        objectId,
+        channel,
+        keys: keys.map((k) => ({
+          t: r42(k.t),
+          v: k.v.map(r42),
+          // Requested Euler degrees round-trip through manifests so
+          // get_timeline after load_scene shows the AUTHORED angles
+          // (a stored 120° yaw otherwise reads [-180, 60, -180]).
+          ...k.e ? { e: k.e.map(r42) } : {},
+          ...k.easing !== "linear" ? { easing: k.easing } : {}
+        }))
+      });
+    }
+  }
+  return { duration: r42(timeline.duration), tracks };
+}
+function restoreTimeline(viewer, data) {
+  const timeline = tl(viewer);
+  timeline.tracks.clear();
+  timeline.duration = data.duration || 0;
+  timeline.time = 0;
+  timeline.playing = false;
+  let restored = 0;
+  for (const track of data.tracks || []) {
+    const entry = viewer._entryById(track.objectId);
+    if (!entry) continue;
+    if (!timeline.tracks.has(track.objectId)) {
+      timeline.tracks.set(track.objectId, { position: [], rotation: [], scale: [] });
+      entry.basePlacement = {
+        p: entry.logical.p.clone(),
+        q: entry.logical.q.clone(),
+        s: entry.logical.s.clone()
+      };
+    }
+    const channels = timeline.tracks.get(track.objectId);
+    if (!channels[track.channel]) continue;
+    channels[track.channel] = track.keys.map((k) => ({
+      t: k.t,
+      v: k.v,
+      easing: k.easing || "linear",
+      ...k.e ? { e: k.e } : {}
+    })).sort((a, b) => a.t - b.t).slice(0, TIMELINE_MAX_KEYS);
+    restored++;
+  }
+  return restored;
 }
 
 // frontend/js/viewer_3d.js
@@ -42914,8 +44257,22 @@ var _Viewer3D = class _Viewer3D {
   _entryById(id) {
     return this._objects.find((e) => e.id === id) || null;
   }
+  /** Effective visibility: an entry is visible only if it AND all its
+   *  articulation ancestors are (three cascades wrapper.visible for rendering;
+   *  raycast/union-box consumers must agree or picks hit invisible geometry). */
+  _effectiveVisible(entry) {
+    let e = entry;
+    const seen = /* @__PURE__ */ new Set();
+    while (e) {
+      if (!e.visible) return false;
+      if (e.parentId == null || seen.has(e.id)) return true;
+      seen.add(e.id);
+      e = this._entryById(e.parentId);
+    }
+    return true;
+  }
   _visibleEntries() {
-    return this._objects.filter((e) => e.visible);
+    return this._objects.filter((e) => this._effectiveVisible(e));
   }
   /** Union world-space box of all VISIBLE objects (null when empty/none visible). */
   _visibleUnionBox() {
@@ -43262,7 +44619,25 @@ var _Viewer3D = class _Viewer3D {
       skinned,
       originalState: null,
       animation: null,
-      stats: null
+      stats: null,
+      // Articulation state (backlog 046). The LOGICAL placement {p,q,s} is
+      // the source of truth; the wrapper's actual TRS is always the
+      // composition T(p)·T(pivot)·R·S·T(−pivot) — plain TRS, no extra
+      // nodes, so bakes/exports/sculpt see only the composed matrix and
+      // stay untouched (pivot-sub-group designs corrupt bakes).
+      logical: {
+        p: new Vector3(),
+        q: new Quaternion(),
+        s: new Vector3(1, 1, 1)
+      },
+      pivot: new Vector3(),
+      // wrapper-local rotation origin
+      parentId: null,
+      // articulation hierarchy
+      geometryRev: 0,
+      // bumped by every geometry mutation
+      basePlacement: null
+      // pre-timeline pose (restored on stop)
     };
     this._objects.push(entry);
     this._activeObjectId = id;
@@ -43302,7 +44677,7 @@ var _Viewer3D = class _Viewer3D {
         }
       }
     });
-    this._scene.remove(entry.wrapper);
+    entry.wrapper.removeFromParent();
     this._disposeObject(entry.model);
     entry.originalState = null;
     entry.animation = null;
@@ -43315,6 +44690,12 @@ var _Viewer3D = class _Viewer3D {
     this._objects = [];
     this._activeObjectId = null;
     this._sceneGeneration++;
+    if (this._timeline) {
+      this._timeline.tracks.clear();
+      this._timeline.time = 0;
+      this._timeline.playing = false;
+      this._timeline.duration = 0;
+    }
     this._clearNormalsHelpers();
     if (this._measureGroup) this._clearMeasurement();
     if (this._renderer) {
@@ -43332,8 +44713,15 @@ var _Viewer3D = class _Viewer3D {
   // ---- registry public surface (control API + app UI) ----------------------
   /** Summaries of every object (id, name, active, visibility, opacity, source). */
   listObjects() {
+    const r34 = (v) => Math.round(v * 1e3) / 1e3;
     return this._objects.map((e) => {
       const painted = paintedMeshNames(e.model);
+      e.wrapper.updateMatrixWorld(true);
+      const box = new Box3().setFromObject(e.wrapper);
+      const bounds = box.isEmpty() ? null : {
+        min: [r34(box.min.x), r34(box.min.y), r34(box.min.z)],
+        max: [r34(box.max.x), r34(box.max.y), r34(box.max.z)]
+      };
       return {
         id: e.id,
         name: e.name,
@@ -43344,12 +44732,15 @@ var _Viewer3D = class _Viewer3D {
         source: e.source,
         vertices: e.stats ? e.stats.vertices : 0,
         faces: e.stats ? e.stats.faces : 0,
+        bounds,
         // Delta flags: which objects carry unexported work, introspectable
         // without a screenshot. painted = paint layers; sculpted =
         // geometry edits (sculpt/bakes); modified = the union (export-dirty).
         painted: painted.length > 0 || void 0,
         sculpted: e.sculpted || void 0,
         modified: e.modified || void 0,
+        parentId: e.parentId != null ? e.parentId : void 0,
+        pivot: e.pivot.lengthSq() > 0 ? [e.pivot.x, e.pivot.y, e.pivot.z].map((v) => Math.round(v * 1e4) / 1e4) : void 0,
         transform: this._transformOf(e)
       };
     });
@@ -43370,10 +44761,18 @@ var _Viewer3D = class _Viewer3D {
   /**
    * Remove ONE object. If it was active, the most recently added remaining
    * object becomes active (invariant: non-empty registry ⇒ active entry).
+   * Articulation children are RE-PARENTED to the removed node's parent with
+   * world pose preserved (deleting a shoulder must not vaporize the arm).
    */
   removeObject(id) {
     const entry = this._entryById(id);
     if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    for (const child of this._objects) {
+      if (child.parentId === id) {
+        this.setParent(child.id, entry.parentId, true);
+      }
+    }
+    if (this._timeline) this._timeline.tracks.delete(id);
     this._disposeEntry(entry);
     this._objects = this._objects.filter((e) => e.id !== id);
     if (this._activeObjectId === id) {
@@ -43449,49 +44848,172 @@ var _Viewer3D = class _Viewer3D {
       if (entry.opacity < 1) this._applyEntryOpacity(entry);
     }
   }
-  /** Placement transform of an object's wrapper (TRS, world = scene space). */
-  _transformOf(entry) {
+  /**
+   * Compose an entry's wrapper TRS from its LOGICAL placement {p,q,s} and its
+   * pivot (wrapper-local rotation origin). The composition
+   * M = T(p)·T(pivot)·R·S·T(−pivot) folds to plain TRS:
+   *   wrapper.quaternion = q ; wrapper.scale = s ;
+   *   wrapper.position   = p + pivot − R·S·pivot
+   * With pivot = 0 this degenerates to identity bookkeeping (backward compat).
+   * NO extra scene-graph nodes: bakes, exports and sculpt only ever see the
+   * composed matrix (a pivot sub-group corrupts _bakeWorldTransforms).
+   */
+  _composeWrapper(entry) {
+    const { p, q, s } = entry.logical;
     const w = entry.wrapper;
-    const r32 = (v) => Math.round(v * 1e4) / 1e4;
+    w.quaternion.copy(q);
+    w.scale.copy(s);
+    const rsPivot = entry.pivot.clone().multiply(s).applyQuaternion(q);
+    w.position.copy(p).add(entry.pivot).sub(rsPivot);
+    w.updateMatrixWorld(true);
+  }
+  /** Re-derive the LOGICAL placement from raw wrapper TRS (gizmo drags write
+   *  the wrapper directly): p = wrapper.position + R·S·pivot − pivot. */
+  _syncLogicalFromWrapper(entry) {
+    const w = entry.wrapper;
+    entry.logical.q.copy(w.quaternion);
+    entry.logical.s.copy(w.scale);
+    const rsPivot = entry.pivot.clone().multiply(w.scale).applyQuaternion(w.quaternion);
+    entry.logical.p.copy(w.position).add(rsPivot).sub(entry.pivot);
+  }
+  /** Placement transform of an object (LOGICAL TRS — parent-relative, which
+   *  equals world space for unparented objects; pivot-independent). */
+  _transformOf(entry) {
+    const r34 = (v) => Math.round(v * 1e4) / 1e4;
+    const { p, q, s } = entry.logical;
     return {
-      position: [r32(w.position.x), r32(w.position.y), r32(w.position.z)],
-      quaternion: [
-        r32(w.quaternion.x),
-        r32(w.quaternion.y),
-        r32(w.quaternion.z),
-        r32(w.quaternion.w)
-      ],
-      scale: [r32(w.scale.x), r32(w.scale.y), r32(w.scale.z)]
+      position: [r34(p.x), r34(p.y), r34(p.z)],
+      quaternion: [r34(q.x), r34(q.y), r34(q.z), r34(q.w)],
+      scale: [r34(s.x), r34(s.y), r34(s.z)]
     };
   }
   getObjectTransform(id) {
     const entry = this._entryById(id);
     if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
-    return this._transformOf(entry);
+    const out = this._transformOf(entry);
+    const r42 = (v) => Math.round(v * 1e4) / 1e4;
+    entry.wrapper.updateMatrixWorld(true);
+    const wp = entry.wrapper.getWorldPosition(new Vector3());
+    const wq = entry.wrapper.getWorldQuaternion(new Quaternion());
+    out.world = {
+      position: [r42(wp.x), r42(wp.y), r42(wp.z)],
+      quaternion: [r42(wq.x), r42(wq.y), r42(wq.z), r42(wq.w)]
+    };
+    const pv = entry.pivot;
+    if (pv.lengthSq() > 0) out.pivot = [r42(pv.x), r42(pv.y), r42(pv.z)];
+    if (entry.parentId != null) out.parentId = entry.parentId;
+    return out;
   }
   /**
-   * Set an object's PLACEMENT (wrapper transform — never baked into vertices).
+   * Set an object's PLACEMENT (logical transform — never baked into vertices).
    * Accepts position [x,y,z], quaternion [x,y,z,w] OR rotation (Euler degrees
    * [x,y,z]), scale [x,y,z] or a uniform number. Omitted parts are unchanged.
+   * Parent-relative once the object is parented (= world when unparented).
+   * Rotation happens about the object's PIVOT (set_pivot; default: origin).
    */
   setObjectTransform(id, { position, quaternion, rotation, scale } = {}) {
     const entry = this._entryById(id);
     if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
-    const w = entry.wrapper;
-    if (position) w.position.set(position[0], position[1], position[2]);
+    const L = entry.logical;
+    if (position) L.p.set(position[0], position[1], position[2]);
     if (quaternion) {
-      w.quaternion.set(quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
+      L.q.set(quaternion[0], quaternion[1], quaternion[2], quaternion[3]).normalize();
     } else if (rotation) {
       const d2r = Math.PI / 180;
-      w.rotation.set(rotation[0] * d2r, rotation[1] * d2r, rotation[2] * d2r);
+      L.q.setFromEuler(new Euler(
+        rotation[0] * d2r,
+        rotation[1] * d2r,
+        rotation[2] * d2r,
+        "XYZ"
+      ));
     }
     if (scale !== void 0) {
-      if (typeof scale === "number") w.scale.setScalar(scale);
-      else if (scale) w.scale.set(scale[0], scale[1], scale[2]);
+      if (typeof scale === "number") L.s.setScalar(scale);
+      else if (scale) L.s.set(scale[0], scale[1], scale[2]);
     }
-    w.updateMatrixWorld(true);
+    this._composeWrapper(entry);
     this._updateSceneRig(this._visibleUnionBox());
+    this.invalidate();
     return this._transformOf(entry);
+  }
+  /**
+   * Set the rotation ORIGIN for an object (world-space input, stored
+   * wrapper-local). Never moves the object: the logical position is re-derived
+   * so the composed matrix is unchanged. After this, `rotation` in
+   * set_object_transform and keyframes swings about the pivot (wing root,
+   * elbow, neck base...). Pivot is authored data — no reset clears it.
+   */
+  setPivot(id, worldPoint) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    entry.wrapper.updateMatrixWorld(true);
+    const local = entry.wrapper.worldToLocal(
+      new Vector3(worldPoint[0], worldPoint[1], worldPoint[2])
+    );
+    entry.pivot.copy(local);
+    this._syncLogicalFromWrapper(entry);
+    const r42 = (v) => Math.round(v * 1e4) / 1e4;
+    return {
+      pivot: [r42(local.x), r42(local.y), r42(local.z)],
+      pivotWorld: worldPoint.map(r42),
+      note: "rotation in set_object_transform / keyframes now swings about this pivot"
+    };
+  }
+  /**
+   * Articulation hierarchy: re-parent `id`'s wrapper under `parentId`'s
+   * wrapper (or back to the scene with null). keepWorld preserves the world
+   * pose across the change. Transform semantics after parenting:
+   * set/get_object_transform are PARENT-relative (unchanged for unparented).
+   */
+  setParent(id, parentId, keepWorld = true) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    if (parentId != null && parentId === id) {
+      throw new Error("An object cannot be its own parent.");
+    }
+    let parent = null;
+    if (parentId != null) {
+      parent = this._entryById(parentId);
+      if (!parent) throw new Error(`No object with id ${parentId} (parent). Use list_objects.`);
+      const chain = [];
+      let e = parent;
+      while (e) {
+        chain.push(e.id);
+        if (e.id === id) {
+          throw new Error(
+            `Parenting ${id} under ${parentId} creates a cycle (${chain.reverse().join(" -> ")} -> ${id}).`
+          );
+        }
+        e = e.parentId != null ? this._entryById(e.parentId) : null;
+      }
+      e = parent;
+      while (e) {
+        const s = e.logical.s;
+        if (Math.abs(s.x - s.y) > 1e-9 || Math.abs(s.y - s.z) > 1e-9) {
+          throw new Error(
+            `Ancestor object ${e.id} has non-uniform scale [${s.x}, ${s.y}, ${s.z}] \u2014 parenting under it would shear children. Use uniform scale on parents, or scale the child instead.`
+          );
+        }
+        e = e.parentId != null ? this._entryById(e.parentId) : null;
+      }
+    }
+    const w = entry.wrapper;
+    const newContainer = parent ? parent.wrapper : this._scene;
+    if (keepWorld) {
+      newContainer.attach(w);
+    } else {
+      w.removeFromParent();
+      newContainer.add(w);
+    }
+    entry.parentId = parentId != null ? parentId : null;
+    this._syncLogicalFromWrapper(entry);
+    this._updateSceneRig(this._visibleUnionBox());
+    this.invalidate();
+    return {
+      objectId: id,
+      parentId: entry.parentId,
+      transform: this._transformOf(entry)
+    };
   }
   /** Reset an object's placement to identity (the non-destructive "undo"). */
   resetObjectTransform(id) {
@@ -43500,6 +45022,283 @@ var _Viewer3D = class _Viewer3D {
       quaternion: [0, 0, 0, 1],
       scale: [1, 1, 1]
     });
+  }
+  /** World AABB of one registry entry's wrapper (placement included).
+   *  NOT _worldBoxOf — that existing helper takes an Object3D (focus path). */
+  _entryWorldBox(entry) {
+    entry.wrapper.updateMatrixWorld(true);
+    return new Box3().setFromObject(entry.wrapper);
+  }
+  /** Bounds + position summary for composition command returns (terse). */
+  _placementSummary(entry) {
+    const r34 = (v) => Math.round(v * 1e3) / 1e3;
+    const box = this._entryWorldBox(entry);
+    return {
+      position: this._transformOf(entry).position,
+      bounds: box.isEmpty() ? null : {
+        min: [r34(box.min.x), r34(box.min.y), r34(box.min.z)],
+        max: [r34(box.max.x), r34(box.max.y), r34(box.max.z)]
+      }
+    };
+  }
+  /**
+   * Drop an object so it rests on the scene floor (world Y=0) — a WRAPPER
+   * operation (placement), never a vertex bake: works on skinned models,
+   * works after rotation, undoable via set_object_transform. Contrast with
+   * `ground` (bakes the active object's vertices in its LOCAL frame).
+   */
+  groundObject(id) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    const box = this._entryWorldBox(entry);
+    if (box.isEmpty()) throw new Error("Object has no measurable geometry.");
+    entry.wrapper.position.y -= box.min.y;
+    entry.wrapper.updateMatrixWorld(true);
+    this._updateSceneRig(this._visibleUnionBox());
+    this.invalidate();
+    return this._placementSummary(entry);
+  }
+  /**
+   * Duplicate an object as a NEW scene object. Geometry is DEEP-COPIED
+   * (sculpting the clone must never displace the original — the shared-geometry
+   * rule) and paint layers are cloned canvases (painting one never repaints the
+   * other; the texel budget is charged for the copy).
+   */
+  cloneObject(id, options = {}) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    if (entry.skinned) {
+      throw new Error(
+        "Cloning skinned (rigged) models is not supported \u2014 skeletons cannot be safely duplicated in-session. export_glb and add_model the exported file instead."
+      );
+    }
+    const cloneRoot = entry.model.clone(true);
+    const src = [];
+    entry.model.traverse((n2) => {
+      if (n2.isMesh) src.push(n2);
+    });
+    let i = 0;
+    cloneRoot.traverse((n2) => {
+      if (!n2.isMesh) return;
+      const from = src[i++];
+      if (!from) return;
+      n2.geometry = from.geometry.clone();
+      delete n2.geometry.userData._mvSculpt;
+      const stash = from._mvOriginalMaterial || from.material;
+      const cloneMat = (m) => {
+        const c = m.clone();
+        c.userData = { ...m.userData };
+        clonePaintLayer(c);
+        return c;
+      };
+      delete n2._mvOriginalMaterial;
+      n2.material = Array.isArray(stash) ? stash.map(cloneMat) : cloneMat(stash);
+    });
+    const newEntry = this._insertEntry(cloneRoot, "", "", {
+      name: options.name || `${entry.name}_copy`,
+      source: entry.source && entry.source.kind !== "volatile" ? JSON.parse(JSON.stringify(entry.source)) : { kind: "volatile" }
+    });
+    newEntry.sculpted = entry.sculpted;
+    newEntry.modified = entry.modified;
+    newEntry.pivot.copy(entry.pivot);
+    this.setObjectTransform(newEntry.id, this._transformOf(entry));
+    if (options.transform) this.setObjectTransform(newEntry.id, options.transform);
+    this._updateSceneRig(this._visibleUnionBox());
+    return {
+      objectId: newEntry.id,
+      name: newEntry.name,
+      ...this._placementSummary(newEntry)
+    };
+  }
+  /**
+   * Move an object so its AABB rests against another object's AABB face.
+   * side: which face of `relativeTo` to attach to, in WORLD axes ("+y" = on
+   * top of). align: how the two cross axes line up. offset applies last (an
+   * escape hatch — deliberate overlaps are a real composition need).
+   */
+  placeObject(id, {
+    relativeTo,
+    side = "+y",
+    gap = 0,
+    align = "center",
+    offset
+  } = {}) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    const target = this._entryById(relativeTo);
+    if (!target) {
+      throw new Error(`No object with id ${relativeTo} (relative_to). Use list_objects.`);
+    }
+    if (target === entry) throw new Error("Cannot place an object relative to itself.");
+    const m = /^([+-])([xyz])$/.exec(String(side));
+    if (!m) {
+      throw new Error(`Unknown side '${side}'. Use one of: +x, -x, +y, -y, +z, -z (world axes; +y = on top of the target).`);
+    }
+    const sign2 = m[1] === "+" ? 1 : -1;
+    const axis = m[2];
+    const a = this._entryWorldBox(entry);
+    const b = this._entryWorldBox(target);
+    if (a.isEmpty() || b.isEmpty()) throw new Error("Objects have no measurable geometry.");
+    const delta = new Vector3();
+    delta[axis] = sign2 > 0 ? b.max[axis] + gap - a.min[axis] : b.min[axis] - gap - a.max[axis];
+    for (const c of ["x", "y", "z"]) {
+      if (c === axis) continue;
+      if (align === "center") {
+        delta[c] = (b.min[c] + b.max[c]) / 2 - (a.min[c] + a.max[c]) / 2;
+      } else if (align === "min") {
+        delta[c] = b.min[c] - a.min[c];
+      } else if (align === "max") {
+        delta[c] = b.max[c] - a.max[c];
+      } else {
+        throw new Error(`Unknown align '${align}'. Use center|min|max.`);
+      }
+    }
+    if (offset) delta.add(new Vector3(offset[0], offset[1], offset[2]));
+    entry.wrapper.position.add(delta);
+    entry.wrapper.updateMatrixWorld(true);
+    this._updateSceneRig(this._visibleUnionBox());
+    this.invalidate();
+    return this._placementSummary(entry);
+  }
+  /**
+   * Exploded view — the articulation PROOF shot: offset every object outward
+   * from the scene centroid so separate parts read as separate parts.
+   * factor > 0 explodes (1 ≈ one scene-radius apart); factor 0 restores the
+   * saved placements exactly. Display state: manifests/exports are unaffected
+   * only if you restore first — the return says so.
+   */
+  explodeView(factor = 1) {
+    if (this._objects.length === 0) throw new Error("No objects loaded.");
+    if (this._timeline && this._timeline.playing) {
+      throw new Error("The timeline is PLAYING \u2014 pause_timeline before exploding.");
+    }
+    if (factor > 0 && this._objects.length < 2) {
+      throw new Error("Exploded view needs at least 2 objects (use detect_parts + split_object to separate parts first).");
+    }
+    const r34 = (v) => Math.round(v * 1e3) / 1e3;
+    if (factor <= 0) {
+      let restored = 0;
+      for (const e of this._objects) {
+        if (e._explodeBase) {
+          e.logical.p.copy(e._explodeBase);
+          e._explodeBase = null;
+          this._composeWrapper(e);
+          restored++;
+        }
+      }
+      this._updateSceneRig(this._visibleUnionBox());
+      this.invalidate();
+      return { exploded: false, restored };
+    }
+    const sceneBox = this._visibleUnionBox();
+    if (!sceneBox) throw new Error("Nothing visible to explode.");
+    const sceneCenter = sceneBox.getCenter(new Vector3());
+    const sceneRadius = sceneBox.getSize(new Vector3()).length() / 2 || 1;
+    const preCenters = /* @__PURE__ */ new Map();
+    for (const e of this._objects) {
+      const box = this._entryWorldBox(e);
+      if (!box.isEmpty()) preCenters.set(e.id, box.getCenter(new Vector3()));
+    }
+    const moved = [];
+    for (const e of this._objects) {
+      if (!e._explodeBase) e._explodeBase = e.logical.p.clone();
+      const box = this._entryWorldBox(e);
+      if (box.isEmpty()) continue;
+      const dir = box.getCenter(new Vector3()).sub(sceneCenter);
+      if (dir.lengthSq() < 1e-9) dir.set(0, 1, 0);
+      dir.normalize();
+      e.logical.p.copy(e._explodeBase).addScaledVector(dir, sceneRadius * factor * 0.6);
+      this._composeWrapper(e);
+      moved.push({ entry: e, dir });
+    }
+    const post = [];
+    for (const { entry: e, dir } of moved) {
+      const box = this._entryWorldBox(e);
+      const c = box.getCenter(new Vector3());
+      const before = preCenters.get(e.id);
+      post.push({ e, box });
+      const d = before ? c.clone().sub(before) : dir;
+      e._lastExplodeReport = {
+        id: e.id,
+        name: e.name,
+        worldOffset: [r34(d.x), r34(d.y), r34(d.z)]
+      };
+    }
+    let minGap = Infinity;
+    const overlapping = [];
+    for (let i = 0; i < post.length; i++) {
+      for (let j = i + 1; j < post.length; j++) {
+        const a = post[i], b = post[j];
+        const gapAxis = Math.max(
+          Math.max(a.box.min.x - b.box.max.x, b.box.min.x - a.box.max.x),
+          Math.max(a.box.min.y - b.box.max.y, b.box.min.y - a.box.max.y),
+          Math.max(a.box.min.z - b.box.max.z, b.box.min.z - a.box.max.z)
+        );
+        if (gapAxis < minGap) minGap = gapAxis;
+        if (gapAxis < 0) {
+          overlapping.push([`${a.e.id}:${a.e.name}`, `${b.e.id}:${b.e.name}`]);
+        }
+      }
+    }
+    this._updateSceneRig(this._visibleUnionBox());
+    this.invalidate();
+    const result = {
+      exploded: true,
+      factor,
+      objects: moved.map(({ entry: e }) => e._lastExplodeReport),
+      minGapWorld: Number.isFinite(minGap) ? r34(minGap) : null,
+      note: "explode_view {factor: 0} restores placements \u2014 do it BEFORE save_scene/export or the offsets persist."
+    };
+    if (overlapping.length) {
+      result.overlapping = overlapping;
+      result.note = `minGapWorld < 0: ${overlapping.length} pair(s) still overlap (AABB) \u2014 raise the factor and re-shoot. ` + result.note;
+    }
+    return result;
+  }
+  /**
+   * Rotate an object so a chosen LOCAL axis points at a world target (or at
+   * another object's AABB center). Replaces the wrapper rotation. Returns both
+   * quaternion and Euler degrees so callers learn the pose for keyframing.
+   */
+  lookAtObject(id, { target, targetId, axis = [0, 0, 1] } = {}) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    if (target && targetId !== void 0 || !target && targetId === void 0) {
+      throw new Error("look_at needs exactly ONE of target:[x,y,z] or target_id.");
+    }
+    let point;
+    if (targetId !== void 0) {
+      const other = this._entryById(targetId);
+      if (!other) throw new Error(`No object with id ${targetId} (target_id).`);
+      point = this._entryWorldBox(other).getCenter(new Vector3());
+    } else {
+      point = new Vector3(target[0], target[1], target[2]);
+    }
+    const w = entry.wrapper;
+    w.updateMatrixWorld(true);
+    const origin = w.getWorldPosition(new Vector3());
+    const dir = point.clone().sub(origin);
+    if (dir.lengthSq() < 1e-12) {
+      throw new Error("Target coincides with the object's origin \u2014 nothing to aim.");
+    }
+    const local = new Vector3(axis[0], axis[1], axis[2]);
+    if (local.lengthSq() < 1e-12) throw new Error("axis must be non-zero.");
+    w.quaternion.setFromUnitVectors(local.normalize(), dir.normalize());
+    w.updateMatrixWorld(true);
+    this._updateSceneRig(this._visibleUnionBox());
+    this.invalidate();
+    const r42 = (v) => Math.round(v * 1e4) / 1e4;
+    const e = new Euler().setFromQuaternion(w.quaternion, "XYZ");
+    const r2d = 180 / Math.PI;
+    return {
+      quaternion: [
+        r42(w.quaternion.x),
+        r42(w.quaternion.y),
+        r42(w.quaternion.z),
+        r42(w.quaternion.w)
+      ],
+      rotation: [r42(e.x * r2d), r42(e.y * r2d), r42(e.z * r2d)]
+    };
   }
   /** Frame the union of all visible objects (the whole composed scene). */
   frameAll() {
@@ -43518,6 +45317,7 @@ var _Viewer3D = class _Viewer3D {
     const skipped = [];
     const unsavedPaint = [];
     const unsavedEdits = [];
+    const included = [];
     for (const e of this._objects) {
       if (paintedMeshNames(e.model).length > 0) unsavedPaint.push(e.name);
       if (e.modified) unsavedEdits.push(e.name);
@@ -43525,16 +45325,43 @@ var _Viewer3D = class _Viewer3D {
         skipped.push(e.name);
         continue;
       }
-      objects.push({
+      included.push(e);
+      const obj = {
         source: e.source,
         name: e.name,
-        transform: this._transformOf(e),
+        // Tracked objects persist their BASE placement, never a transient
+        // animation pose (the playhead must not leak into files).
+        transform: e.basePlacement ? this._logicalToTransform(e.basePlacement) : this._transformOf(e),
         visible: e.visible,
         opacity: e.opacity
-      });
+      };
+      if (e.pivot.lengthSq() > 0) {
+        const r42 = (v) => Math.round(v * 1e4) / 1e4;
+        obj.pivot = [r42(e.pivot.x), r42(e.pivot.y), r42(e.pivot.z)];
+      }
+      objects.push(obj);
     }
-    return {
-      version: 1,
+    const indexOf = new Map(included.map((e, i) => [e.id, i]));
+    let hasV2 = false;
+    included.forEach((e, i) => {
+      if (e.parentId != null && indexOf.has(e.parentId)) {
+        objects[i].parent = indexOf.get(e.parentId);
+        hasV2 = true;
+      }
+      if (objects[i].pivot) hasV2 = true;
+    });
+    let timeline = null;
+    const serialized = serializeTimeline(this);
+    if (serialized) {
+      timeline = {
+        duration: serialized.duration,
+        tracks: serialized.tracks.filter((t2) => indexOf.has(t2.objectId)).map(({ objectId, ...t2 }) => ({ object: indexOf.get(objectId), ...t2 }))
+      };
+      if (timeline.tracks.length) hasV2 = true;
+      else timeline = null;
+    }
+    const manifest = {
+      version: hasV2 ? 2 : 1,
       objects,
       skippedVolatile: skipped,
       unsavedPaint,
@@ -43543,6 +45370,56 @@ var _Viewer3D = class _Viewer3D {
       environment: this.getEnvironment(),
       background: this._background
     };
+    if (timeline) manifest.timeline = timeline;
+    return manifest;
+  }
+  _logicalToTransform(L) {
+    const r42 = (v) => Math.round(v * 1e4) / 1e4;
+    return {
+      position: [r42(L.p.x), r42(L.p.y), r42(L.p.z)],
+      quaternion: [r42(L.q.x), r42(L.q.y), r42(L.q.z), r42(L.q.w)],
+      scale: [r42(L.s.x), r42(L.s.y), r42(L.s.z)]
+    };
+  }
+  /**
+   * Apply manifest-v2 articulation to freshly loaded objects: pivots, then
+   * parents (two-pass — manifest order can't guarantee parents-first; the
+   * stored transforms are LOCAL so keepWorld=false), then the timeline
+   * (index → new id map; tracks of failed objects were never mapped).
+   * `idByIndex`: manifest object index → new object id (null for failures).
+   */
+  applyManifestArticulation(manifest, idByIndex) {
+    const objs = manifest.objects || [];
+    objs.forEach((obj, i) => {
+      const id = idByIndex[i];
+      if (id == null) return;
+      const entry = this._entryById(id);
+      if (!entry) return;
+      if (Array.isArray(obj.pivot) && obj.pivot.length === 3) {
+        entry.pivot.set(obj.pivot[0], obj.pivot[1], obj.pivot[2]);
+        this._composeWrapper(entry);
+      }
+    });
+    objs.forEach((obj, i) => {
+      const id = idByIndex[i];
+      if (id == null || obj.parent === void 0) return;
+      const parentId = idByIndex[obj.parent];
+      if (parentId == null) return;
+      try {
+        this.setParent(id, parentId, false);
+        if (obj.transform) this.setObjectTransform(id, obj.transform);
+      } catch {
+      }
+    });
+    let restoredTracks = 0;
+    if (manifest.timeline && manifest.timeline.tracks) {
+      const tracks = manifest.timeline.tracks.filter((t2) => idByIndex[t2.object] != null).map(({ object, ...t2 }) => ({ objectId: idByIndex[object], ...t2 }));
+      restoredTracks = restoreTimeline(this, {
+        duration: manifest.timeline.duration,
+        tracks
+      });
+    }
+    return { restoredTracks };
   }
   // ==========================================================
   // Animation playback (017) — single source of truth for clips
@@ -44496,15 +46373,15 @@ var _Viewer3D = class _Viewer3D {
     this._controls.maxDistance = Math.max(this._preFocusClip.maxDistance, modelSpan * 4);
     this._controls.update();
     this._refreshCameraClip && this._refreshCameraClip();
-    const r32 = (v) => Math.round(v * 1e3) / 1e3;
+    const r34 = (v) => Math.round(v * 1e3) / 1e3;
     return {
       target,
-      center: [r32(center.x), r32(center.y), r32(center.z)],
-      size: [r32(size.x), r32(size.y), r32(size.z)],
-      distance: r32(distance),
+      center: [r34(center.x), r34(center.y), r34(center.z)],
+      size: [r34(size.x), r34(size.y), r34(size.z)],
+      distance: r34(distance),
       camera: {
-        position: [r32(this._camera.position.x), r32(this._camera.position.y), r32(this._camera.position.z)],
-        target: [r32(center.x), r32(center.y), r32(center.z)]
+        position: [r34(this._camera.position.x), r34(this._camera.position.y), r34(this._camera.position.z)],
+        target: [r34(center.x), r34(center.y), r34(center.z)]
       },
       note: "View direction kept. The part may be occluded by surrounding geometry \u2014 use set_clip or set_render_mode wireframe to see through. reset_camera restores the whole-model view."
     };
@@ -45140,6 +47017,11 @@ var _Viewer3D = class _Viewer3D {
         time: round(this.getAnimationTime()),
         duration: round(this.getAnimationDuration())
       },
+      // Scene timeline (keyframe authoring) — distinct from the loaded-clip
+      // animation above, so agents can tell WHY the scene is moving.
+      timeline: timelineState(this),
+      // Paint memory budget — visible before it bites.
+      paint: paintBudgetInfo(),
       lighting: this.getLightSettings()
     };
   }
@@ -47263,8 +49145,10 @@ var _Viewer3D = class _Viewer3D {
    * We flip V (v→1-v) and set textures to flipY=false so the exporter
    * writes pixel data without implicit flips.
    */
-  async exportAsGLB() {
+  async exportAsGLB(options = {}) {
     if (this._objects.length === 0) return null;
+    const wantAnimation = options.animation === true || options.animation !== false && this._timeline && this._timeline.tracks.size > 0;
+    if (wantAnimation) return this._exportAnimatedGLB(options);
     const exportScene = new Scene();
     exportScene.name = "MeshVault";
     for (const entry of this._visibleEntries()) {
@@ -47280,9 +49164,157 @@ var _Viewer3D = class _Viewer3D {
         exportScene,
         (result) => resolve(result),
         (error) => reject(error),
-        { binary: true, maxTextureSize: 4096 }
+        { binary: true, maxTextureSize: options.maxTextureSize || 4096 }
       );
     });
+  }
+  /**
+   * Animated GLB export (timeline tracks → glTF animations).
+   *
+   * GLTFExporter FORCES trs:true when clips are present and then reads node
+   * position/quaternion/scale — the static path's matrix-only flat meshes
+   * would all export collapsed at the origin. So the animated path builds a
+   * DIFFERENT export scene:
+   *   objNode "mv_obj_<id>" (TRS = composed wrapper transform, exact by
+   *   construction) → mesh children with (objNodeWorld⁻¹ × meshWorld) BAKED
+   *   into cloned geometry (identity mesh nodes — TRS-safe throughout).
+   * Tracks resample the LOGICAL TRS at 30 fps with the pivot composed into
+   * every sample (glTF has no pivots — an off-origin rotation legitimately
+   * exports a non-constant position track: the arc). Track names target the
+   * unique objNode names so PropertyBinding can never misbind.
+   */
+  async _exportAnimatedGLB(options = {}) {
+    const timeline = this._timeline;
+    const fps = options.fps || 30;
+    const exportScene = new Scene();
+    exportScene.name = "MeshVault";
+    const savedTime = timeline ? timeline.time : 0;
+    const nodeByEntry = /* @__PURE__ */ new Map();
+    for (const entry of this._visibleEntries()) {
+      if (entry.basePlacement) {
+        entry.logical.p.copy(entry.basePlacement.p);
+        entry.logical.q.copy(entry.basePlacement.q);
+        entry.logical.s.copy(entry.basePlacement.s);
+        this._composeWrapper(entry);
+      }
+      const node = new Group();
+      node.name = `mv_obj_${entry.id}`;
+      nodeByEntry.set(entry.id, node);
+    }
+    for (const entry of this._visibleEntries()) {
+      const node = nodeByEntry.get(entry.id);
+      const parentNode = entry.parentId != null ? nodeByEntry.get(entry.parentId) : null;
+      (parentNode || exportScene).add(node);
+      node.position.copy(entry.wrapper.position);
+      node.quaternion.copy(entry.wrapper.quaternion);
+      node.scale.copy(entry.wrapper.scale);
+    }
+    exportScene.updateMatrixWorld(true);
+    for (const entry of this._visibleEntries()) {
+      const node = nodeByEntry.get(entry.id);
+      const nodeInv = new Matrix4().copy(node.matrixWorld).invert();
+      entry.wrapper.updateMatrixWorld(true);
+      entry.model.traverse((child) => {
+        const staging = new Scene();
+        this._appendExportMesh(staging, child);
+        for (const mesh of [...staging.children]) {
+          const bake = new Matrix4().multiplyMatrices(nodeInv, child.matrixWorld);
+          mesh.geometry.applyMatrix4(bake);
+          mesh.geometry.computeBoundingBox();
+          mesh.geometry.computeBoundingSphere();
+          mesh.matrixAutoUpdate = true;
+          mesh.matrix.identity();
+          mesh.position.set(0, 0, 0);
+          mesh.quaternion.identity();
+          mesh.scale.set(1, 1, 1);
+          node.add(mesh);
+        }
+      });
+    }
+    const clips = [];
+    if (timeline && timeline.tracks.size > 0) {
+      const duration = (() => {
+        let max2 = timeline.duration || 0;
+        for (const channels of timeline.tracks.values()) {
+          for (const keys of Object.values(channels)) {
+            if (keys.length) max2 = Math.max(max2, keys[keys.length - 1].t);
+          }
+        }
+        return max2;
+      })();
+      const steps = Math.max(2, Math.round(duration * fps) + 1);
+      const times = new Float32Array(steps);
+      const samples = /* @__PURE__ */ new Map();
+      for (const id of timeline.tracks.keys()) {
+        samples.set(id, { pos: [], quat: [], scale: [] });
+      }
+      for (let i = 0; i < steps; i++) {
+        const t2 = i / (steps - 1) * duration;
+        times[i] = t2;
+        sampleTimeline(this, t2);
+        for (const id of timeline.tracks.keys()) {
+          const entry = this._entryById(id);
+          if (!entry) continue;
+          const w = entry.wrapper;
+          const s = samples.get(id);
+          s.pos.push(w.position.x, w.position.y, w.position.z);
+          s.quat.push(w.quaternion.x, w.quaternion.y, w.quaternion.z, w.quaternion.w);
+          s.scale.push(w.scale.x, w.scale.y, w.scale.z);
+        }
+      }
+      const tracks = [];
+      for (const [id, s] of samples) {
+        if (!nodeByEntry.has(id)) continue;
+        const name = `mv_obj_${id}`;
+        tracks.push(new VectorKeyframeTrack(`${name}.position`, times, s.pos));
+        tracks.push(new QuaternionKeyframeTrack(`${name}.quaternion`, times, s.quat));
+        tracks.push(new VectorKeyframeTrack(`${name}.scale`, times, s.scale));
+      }
+      if (tracks.length) {
+        clips.push(new AnimationClip("timeline", duration, tracks));
+      }
+      sampleTimeline(this, savedTime);
+    }
+    const exporter = new GLTFExporter();
+    const expectedChannels = clips.length ? clips[0].tracks.length : 0;
+    const glb = await new Promise((resolve, reject) => {
+      exporter.parse(
+        exportScene,
+        (result) => resolve(result),
+        (error) => reject(error),
+        {
+          binary: true,
+          maxTextureSize: options.maxTextureSize || 4096,
+          animations: clips,
+          trs: true
+        }
+      );
+    });
+    if (expectedChannels > 0) {
+      const emitted = this._glbAnimationChannelCount(glb);
+      if (emitted < expectedChannels) {
+        throw new Error(
+          `Animated export dropped channels (${emitted}/${expectedChannels} emitted) \u2014 this is a bug; report it.`
+        );
+      }
+    }
+    return glb;
+  }
+  /** Parse a GLB ArrayBuffer's JSON chunk and count animation channels. */
+  _glbAnimationChannelCount(glb) {
+    try {
+      const view = new DataView(glb);
+      const jsonLength = view.getUint32(12, true);
+      const jsonBytes = new Uint8Array(glb, 20, jsonLength);
+      const json = JSON.parse(new TextDecoder().decode(jsonBytes));
+      let channels = 0;
+      for (const anim of json.animations || []) {
+        channels += (anim.channels || []).length;
+      }
+      return channels;
+    } catch {
+      return -1;
+    }
   }
   /** Clone one mesh into the export scene with glTF-safe geometry + material. */
   _appendExportMesh(exportScene, child) {
@@ -47294,19 +49326,26 @@ var _Viewer3D = class _Viewer3D {
       if (srcPos) geo.setAttribute("position", srcPos.clone());
       const srcNorm = srcGeo.attributes.normal;
       if (srcNorm) geo.setAttribute("normal", srcNorm.clone());
+      const stashForUV = child._mvOriginalMaterial || child.material;
+      const matForUV = Array.isArray(stashForUV) ? stashForUV[0] : stashForUV;
+      const uvInGlConvention = !(matForUV && matForUV.map) || matForUV.map.flipY !== false;
       const srcUV = srcGeo.attributes.uv;
       if (srcUV) {
         const uvArr = new Float32Array(srcUV.array);
-        for (let i = 0; i < uvArr.length; i += 2) {
-          uvArr[i + 1] = 1 - uvArr[i + 1];
+        if (uvInGlConvention) {
+          for (let i = 0; i < uvArr.length; i += 2) {
+            uvArr[i + 1] = 1 - uvArr[i + 1];
+          }
         }
         geo.setAttribute("uv", new BufferAttribute(uvArr, 2));
       }
       const srcTan = srcGeo.attributes.tangent;
       if (srcTan && srcTan.itemSize === 4) {
         const tanArr = new Float32Array(srcTan.array);
-        for (let i = 0; i < srcTan.count; i++) {
-          tanArr[i * 4 + 3] = -tanArr[i * 4 + 3];
+        if (uvInGlConvention) {
+          for (let i = 0; i < srcTan.count; i++) {
+            tanArr[i * 4 + 3] = -tanArr[i * 4 + 3];
+          }
         }
         geo.setAttribute("tangent", new BufferAttribute(tanArr, 4));
       }
@@ -47335,8 +49374,10 @@ var _Viewer3D = class _Viewer3D {
         matParams.aoMap = this._prepTextureForGLB(srcMat.aoMap);
         if (srcUV) {
           const uv2Arr = new Float32Array(srcUV.array);
-          for (let i = 0; i < uv2Arr.length; i += 2) {
-            uv2Arr[i + 1] = 1 - uv2Arr[i + 1];
+          if (uvInGlConvention) {
+            for (let i = 0; i < uv2Arr.length; i += 2) {
+              uv2Arr[i + 1] = 1 - uv2Arr[i + 1];
+            }
           }
           geo.setAttribute("uv2", new BufferAttribute(uv2Arr, 2));
         }
@@ -47458,7 +49499,8 @@ var _Viewer3D = class _Viewer3D {
       const activeAnim = this._activeAnimation;
       const animating = !!(activeAnim && activeAnim.mixer && activeAnim.playing);
       const fpvActive = this._navMode === "fpv" && (this._keysPressed.size > 0 || this._fpvMouseDown);
-      if (!this._renderRequested && !animating && !fpvActive) {
+      const timelinePlaying = !!(this._timeline && this._timeline.playing);
+      if (!this._renderRequested && !animating && !fpvActive && !timelinePlaying) {
         if (++this._idleFrames > 45) {
           this._renderLoopActive = false;
           if (this._animationId) {
@@ -47471,6 +49513,12 @@ var _Viewer3D = class _Viewer3D {
       this._idleFrames = 0;
       this._renderRequested = false;
       const delta = this._clock.getDelta();
+      if (timelinePlaying) {
+        tickTimeline(this, delta);
+        if (this._renderer && this._renderer.shadowMap) {
+          this._renderer.shadowMap.needsUpdate = true;
+        }
+      }
       this._applyFPVMovement(delta);
       if (this._controls.enabled) {
         this._controls.update();
@@ -48333,6 +50381,1257 @@ function triArea(a, b, c) {
   return _cr.crossVectors(_ab3, _ac).length() / 2;
 }
 
+// frontend/js/viewer/articulation.js
+var DETECT_TRIANGLE_BUDGET = 3e5;
+var MAX_PARTS = 24;
+var MIN_COMPONENT_TRIS = 20;
+function requireActive(viewer) {
+  const entry = viewer._activeEntry();
+  if (!entry) throw new Error("No object loaded. load / add_model / add_primitive first.");
+  return entry;
+}
+function meshesOf(entry) {
+  const meshes = [];
+  entry.model.traverse((c) => {
+    if (c.isMesh && c.geometry) meshes.push(c);
+  });
+  return meshes;
+}
+function triCountOf(geometry) {
+  const index = geometry.getIndex();
+  const pos = geometry.getAttribute("position");
+  return Math.floor(index ? index.count / 3 : pos ? pos.count / 3 : 0);
+}
+var r32 = (v) => Math.round(v * 1e3) / 1e3;
+var vec3 = (v) => [r32(v.x), r32(v.y), r32(v.z)];
+function triangleBox(mesh, tris) {
+  const pos = mesh.geometry.getAttribute("position");
+  const index = mesh.geometry.getIndex();
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const box = new Box3();
+  const v = new Vector3();
+  for (const t2 of tris) {
+    for (let k = 0; k < 3; k++) {
+      v.fromBufferAttribute(pos, idxOf(t2, k)).applyMatrix4(mesh.matrixWorld);
+      box.expandByPoint(v);
+    }
+  }
+  return box;
+}
+function connectedComponents(mesh) {
+  const geometry = mesh.geometry;
+  const pos = geometry.getAttribute("position");
+  const index = geometry.getIndex();
+  const triCount = triCountOf(geometry);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  geometry.computeBoundingBox();
+  const diag = geometry.boundingBox ? geometry.boundingBox.getSize(new Vector3()).length() || 1 : 1;
+  const quant = diag * 1e-6;
+  const byKey = /* @__PURE__ */ new Map();
+  const canonical = new Int32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) {
+    const k = `${Math.round(pos.getX(i) / quant)}_${Math.round(pos.getY(i) / quant)}_${Math.round(pos.getZ(i) / quant)}`;
+    const seen = byKey.get(k);
+    if (seen !== void 0) canonical[i] = seen;
+    else {
+      byKey.set(k, i);
+      canonical[i] = i;
+    }
+  }
+  const parent = new Int32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) parent[i] = i;
+  const find = (x) => {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]];
+      x = parent[x];
+    }
+    return x;
+  };
+  const union = (a, b) => {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent[rb] = ra;
+  };
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const a = canonical[idxOf(t2, 0)];
+    union(a, canonical[idxOf(t2, 1)]);
+    union(a, canonical[idxOf(t2, 2)]);
+  }
+  const byRoot = /* @__PURE__ */ new Map();
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const root = find(canonical[idxOf(t2, 0)]);
+    let list = byRoot.get(root);
+    if (!list) {
+      list = [];
+      byRoot.set(root, list);
+    }
+    list.push(t2);
+  }
+  return [...byRoot.values()];
+}
+function detectParts(viewer) {
+  const entry = requireActive(viewer);
+  const meshes = meshesOf(entry);
+  entry.model.updateMatrixWorld(true);
+  const totalTris = meshes.reduce((sum, m) => sum + triCountOf(m.geometry), 0);
+  if (totalTris > DETECT_TRIANGLE_BUDGET) {
+    return {
+      parts: [],
+      partitionId: entry.geometryRev,
+      skipped: true,
+      note: `Object exceeds the ${DETECT_TRIANGLE_BUDGET.toLocaleString()}-triangle detection budget \u2014 simplify first (simplify / simplify_region).`
+    };
+  }
+  const parts = [];
+  let kind;
+  if (meshes.length > 1) {
+    kind = "mesh";
+    meshes.forEach((mesh, mi) => {
+      const tris = [...Array(triCountOf(mesh.geometry)).keys()];
+      const box = triangleBox(mesh, tris);
+      parts.push({
+        partId: parts.length,
+        kind,
+        meshIndex: mi,
+        name: mesh.name || void 0,
+        triangles: tris.length,
+        center: vec3(box.getCenter(new Vector3())),
+        size: vec3(box.getSize(new Vector3())),
+        suggestedPivot: vec3(box.getCenter(new Vector3())),
+        _tris: tris
+      });
+    });
+  } else if (meshes.length === 1 && meshes[0].geometry.groups && meshes[0].geometry.groups.length > 1) {
+    kind = "group";
+    const mesh = meshes[0];
+    const index = mesh.geometry.getIndex();
+    meshes[0].geometry.groups.forEach((g3, gi) => {
+      const count = g3.count === Infinity ? (index ? index.count : mesh.geometry.getAttribute("position").count) - g3.start : g3.count;
+      const tris = [];
+      for (let i = g3.start / 3; i < (g3.start + count) / 3; i++) tris.push(i);
+      if (!tris.length) return;
+      const box = triangleBox(mesh, tris);
+      parts.push({
+        partId: parts.length,
+        kind,
+        meshIndex: 0,
+        groupIndex: gi,
+        triangles: tris.length,
+        center: vec3(box.getCenter(new Vector3())),
+        size: vec3(box.getSize(new Vector3())),
+        suggestedPivot: vec3(box.getCenter(new Vector3())),
+        _tris: tris
+      });
+    });
+  } else if (meshes.length === 1) {
+    kind = "component";
+    const comps = connectedComponents(meshes[0]).filter((tris) => tris.length >= MIN_COMPONENT_TRIS).sort((a, b) => b.length - a.length);
+    comps.forEach((tris) => {
+      const box = triangleBox(meshes[0], tris);
+      parts.push({
+        partId: parts.length,
+        kind,
+        meshIndex: 0,
+        triangles: tris.length,
+        center: vec3(box.getCenter(new Vector3())),
+        size: vec3(box.getSize(new Vector3())),
+        suggestedPivot: vec3(box.getCenter(new Vector3())),
+        _tris: tris
+      });
+    });
+  }
+  entry._partition = { rev: entry.geometryRev, parts, meshes };
+  const omitted = Math.max(0, parts.length - MAX_PARTS);
+  const publicParts = parts.slice(0, MAX_PARTS).map(({ _tris, ...p }) => p);
+  let note;
+  if (parts.length <= 1) {
+    note = "Single fused component \u2014 image-to-3D outputs usually are. Articulation requires split_object with a plane cut ({axis, at} or {plane}), which is a REAL geometry cut.";
+  } else {
+    note = "Partial detection is NORMAL on generated meshes (most parts fuse during generation) \u2014 verify candidates with focus + screenshot before splitting.";
+  }
+  return {
+    parts: publicParts,
+    omitted: omitted || void 0,
+    partitionId: entry.geometryRev,
+    note
+  };
+}
+function extractSubGeometry(mesh, tris) {
+  const src = mesh.geometry;
+  const index = src.getIndex();
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const names = Object.keys(src.attributes);
+  const remap = /* @__PURE__ */ new Map();
+  const newIndex = [];
+  for (const t2 of tris) {
+    for (let k = 0; k < 3; k++) {
+      const vi = idxOf(t2, k);
+      let ni = remap.get(vi);
+      if (ni === void 0) {
+        ni = remap.size;
+        remap.set(vi, ni);
+      }
+      newIndex.push(ni);
+    }
+  }
+  const geo = new BufferGeometry();
+  for (const name of names) {
+    const attr = src.getAttribute(name);
+    const size = attr.itemSize;
+    const out = new Float32Array(remap.size * size);
+    for (const [vi, ni] of remap) {
+      for (let c = 0; c < size; c++) {
+        out[ni * size + c] = attr.getComponent(vi, c);
+      }
+    }
+    geo.setAttribute(name, new BufferAttribute(out, size));
+  }
+  geo.setIndex(newIndex);
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
+  return geo;
+}
+function cutEdgeCount(mesh, selected) {
+  const geometry = mesh.geometry;
+  const pos = geometry.getAttribute("position");
+  const index = geometry.getIndex();
+  const triCount = triCountOf(geometry);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  geometry.computeBoundingBox();
+  const diag = geometry.boundingBox ? geometry.boundingBox.getSize(new Vector3()).length() || 1 : 1;
+  const quant = diag * 1e-6;
+  const canon = /* @__PURE__ */ new Map();
+  const canonOf = (vi) => {
+    const k = `${Math.round(pos.getX(vi) / quant)}_${Math.round(pos.getY(vi) / quant)}_${Math.round(pos.getZ(vi) / quant)}`;
+    let c = canon.get(k);
+    if (c === void 0) {
+      c = canon.size;
+      canon.set(k, c);
+    }
+    return c;
+  };
+  const inSel = new Uint8Array(triCount);
+  for (const t2 of selected) inSel[t2] = 1;
+  const edges = /* @__PURE__ */ new Map();
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const cs = [canonOf(idxOf(t2, 0)), canonOf(idxOf(t2, 1)), canonOf(idxOf(t2, 2))];
+    for (let k = 0; k < 3; k++) {
+      const a = Math.min(cs[k], cs[(k + 1) % 3]);
+      const b = Math.max(cs[k], cs[(k + 1) % 3]);
+      const key = a * 16777216 + b;
+      let e = edges.get(key);
+      if (!e) {
+        e = { sel: 0, out: 0 };
+        edges.set(key, e);
+      }
+      if (inSel[t2]) e.sel++;
+      else e.out++;
+    }
+  }
+  let cut = 0;
+  for (const e of edges.values()) {
+    if (e.sel > 0 && e.out > 0) cut++;
+  }
+  return cut;
+}
+function splitObject(viewer, opts = {}) {
+  const entry = requireActive(viewer);
+  if (entry.skinned) {
+    throw new Error("Splitting skinned (rigged) models is not supported \u2014 the skeleton cannot be safely torn apart.");
+  }
+  if (entry.animation && entry.animation.clips && entry.animation.clips.length) {
+    throw new Error("This object carries loaded animation clips that bind to its node tree \u2014 splitting would break them. Split a static copy (export_glb without animation, reload) instead.");
+  }
+  if (viewer._timeline && viewer._timeline.tracks.has(entry.id)) {
+    throw new Error(`This object has timeline tracks \u2014 clear_timeline {id: ${entry.id}} first (split changes what the track animates).`);
+  }
+  const meshes = meshesOf(entry);
+  entry.model.updateMatrixWorld(true);
+  const geometryUse = /* @__PURE__ */ new Map();
+  for (const e of viewer._objects) {
+    e.model.traverse((c) => {
+      if (c.isMesh && c.geometry) {
+        geometryUse.set(c.geometry, (geometryUse.get(c.geometry) || 0) + 1);
+      }
+    });
+  }
+  for (const mesh of meshes) {
+    if (geometryUse.get(mesh.geometry) > 1) {
+      throw new Error("This object shares geometry with other meshes (glTF instancing) \u2014 splitting would mutate every instance. clone_object first, then split the clone.");
+    }
+  }
+  const selections = /* @__PURE__ */ new Map();
+  let suggestedPivot = null;
+  let mode;
+  if (opts.parts && opts.parts.length) {
+    mode = "parts";
+    const partition = entry._partition;
+    if (!partition || partition.rev !== entry.geometryRev || opts.partitionId !== partition.rev) {
+      throw new Error(
+        `Stale or missing partition \u2014 geometry changed since detect_parts (or partitionId mismatch). Re-run detect_parts and pass its partitionId (current rev: ${entry.geometryRev}).`
+      );
+    }
+    for (const pid of opts.parts) {
+      const part = partition.parts[pid];
+      if (!part) throw new Error(`No part ${pid}. detect_parts returned ${partition.parts.length} parts.`);
+      const mesh = partition.meshes[part.meshIndex];
+      let set = selections.get(mesh);
+      if (!set) {
+        set = /* @__PURE__ */ new Set();
+        selections.set(mesh, set);
+      }
+      for (const t2 of part._tris) set.add(t2);
+    }
+  } else if (opts.plane || opts.axis) {
+    mode = "plane";
+    let point, normal;
+    if (opts.axis) {
+      if (!["x", "y", "z"].includes(opts.axis)) {
+        throw new Error("axis must be x|y|z (with `at` = world coordinate).");
+      }
+      if (typeof opts.at !== "number") {
+        throw new Error("Plane cut by axis requires `at` (world coordinate).");
+      }
+      const sign2 = opts.side === "-" ? -1 : 1;
+      if (opts.side !== void 0 && opts.side !== "+" && opts.side !== "-") {
+        throw new Error("side must be '+' (extract the +axis half, default) or '-'.");
+      }
+      normal = new Vector3(
+        (opts.axis === "x" ? 1 : 0) * sign2,
+        (opts.axis === "y" ? 1 : 0) * sign2,
+        (opts.axis === "z" ? 1 : 0) * sign2
+      );
+      point = new Vector3(
+        opts.axis === "x" ? opts.at : 0,
+        opts.axis === "y" ? opts.at : 0,
+        opts.axis === "z" ? opts.at : 0
+      );
+    } else {
+      const pl = opts.plane;
+      if (!Array.isArray(pl.point) || !Array.isArray(pl.normal)) {
+        throw new Error("plane needs {point:[x,y,z], normal:[x,y,z]}.");
+      }
+      point = new Vector3(...pl.point);
+      normal = new Vector3(...pl.normal).normalize();
+      if (normal.lengthSq() < 1e-12) throw new Error("plane.normal must be non-zero.");
+    }
+    const v = new Vector3();
+    const centroid = new Vector3();
+    for (const mesh of meshes) {
+      const pos = mesh.geometry.getAttribute("position");
+      const index = mesh.geometry.getIndex();
+      const triCount = triCountOf(mesh.geometry);
+      const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+      const set = /* @__PURE__ */ new Set();
+      for (let t2 = 0; t2 < triCount; t2++) {
+        centroid.set(0, 0, 0);
+        for (let k = 0; k < 3; k++) {
+          centroid.add(v.fromBufferAttribute(pos, idxOf(t2, k)).applyMatrix4(mesh.matrixWorld));
+        }
+        centroid.divideScalar(3);
+        if (centroid.clone().sub(point).dot(normal) > 0) set.add(t2);
+      }
+      if (set.size) selections.set(mesh, set);
+    }
+    if (![...selections.values()].some((s) => s.size)) {
+      throw new Error("The plane selects no triangles on the positive side \u2014 check `at`/plane against get_bounds (nothing was split).");
+    }
+  } else {
+    throw new Error("split_object needs `parts` (from detect_parts, with partitionId) OR a plane cut: {axis:'x'|'y'|'z', at:<world coord>} or {plane:{point,normal}}.");
+  }
+  const built = [];
+  let selectedTotal = 0;
+  let openEdgesAdded = 0;
+  const pivotAccum = new Vector3();
+  let pivotCount = 0;
+  for (const mesh of meshes) {
+    const set = selections.get(mesh);
+    if (!set || set.size === 0) continue;
+    const triCount = triCountOf(mesh.geometry);
+    const selected = [...set];
+    selectedTotal += selected.length;
+    openEdgesAdded += mode === "plane" ? cutEdgeCount(mesh, selected) : 0;
+    const box = triangleBox(mesh, selected);
+    pivotAccum.add(box.getCenter(new Vector3()));
+    pivotCount++;
+    const rest = [];
+    for (let t2 = 0; t2 < triCount; t2++) if (!set.has(t2)) rest.push(t2);
+    built.push({
+      mesh,
+      extracted: extractSubGeometry(mesh, selected),
+      remainder: rest.length ? extractSubGeometry(mesh, rest) : null
+    });
+  }
+  if (!built.length) throw new Error("Selection resolved to no triangles.");
+  if (pivotCount) {
+    suggestedPivot = pivotAccum.divideScalar(pivotCount);
+    if (mode === "plane") {
+      const normal = opts.axis ? new Vector3(
+        opts.axis === "x" ? 1 : 0,
+        opts.axis === "y" ? 1 : 0,
+        opts.axis === "z" ? 1 : 0
+      ) : new Vector3(...opts.plane.normal).normalize();
+      const point = opts.axis ? new Vector3(
+        opts.axis === "x" ? opts.at : 0,
+        opts.axis === "y" ? opts.at : 0,
+        opts.axis === "z" ? opts.at : 0
+      ) : new Vector3(...opts.plane.point);
+      const dist = suggestedPivot.clone().sub(point).dot(normal);
+      suggestedPivot.addScaledVector(normal, -dist);
+    }
+  }
+  const newRoot = new Group();
+  newRoot.name = opts.name || `${entry.name}_part`;
+  for (const b of built) {
+    const stash = b.mesh._mvOriginalMaterial || b.mesh.material;
+    const material = clonePaintedMaterial(stash);
+    const newMesh = new Mesh(b.extracted, material);
+    newMesh.name = `${b.mesh.name || "mesh"}_part`;
+    const rel = new Matrix4().copy(entry.wrapper.matrixWorld).invert().multiply(b.mesh.matrixWorld);
+    newMesh.applyMatrix4(rel);
+    newRoot.add(newMesh);
+  }
+  const newEntry = viewer._insertEntry(newRoot, "", "", {
+    name: opts.name || `${entry.name}_part`,
+    source: { kind: "volatile" }
+    // derived geometry has no file identity
+  });
+  newEntry.pivot.copy(entry.pivot);
+  viewer.setObjectTransform(newEntry.id, viewer._transformOf(entry));
+  if (opts.keep_active && viewer._entryById(entry.id)) {
+    viewer.setActiveObject(entry.id);
+  }
+  let remaining = null;
+  let sourceRemoved = false;
+  for (const b of built) {
+    if (b.remainder) {
+      b.mesh.geometry.dispose();
+      b.mesh.geometry = b.remainder;
+    } else {
+      b.mesh.removeFromParent();
+      b.mesh.geometry.dispose();
+    }
+  }
+  const leftMeshes = meshesOf(entry);
+  if (leftMeshes.length === 0) {
+    viewer.removeObject(entry.id);
+    sourceRemoved = true;
+  } else {
+    entry.originalState = null;
+    entry.geometryRev++;
+    entry._partition = null;
+    entry.modified = true;
+    entry.sculpted = true;
+    entry.stats = viewer._computeStats(entry.model);
+    remaining = {
+      objectId: entry.id,
+      triangles: leftMeshes.reduce((s, m) => s + triCountOf(m.geometry), 0)
+    };
+  }
+  viewer._updateSceneRig(viewer._visibleUnionBox());
+  viewer.invalidate();
+  viewer._container.dispatchEvent(new CustomEvent("objectschange", {
+    detail: { objects: viewer.listObjects(), activeId: viewer._activeObjectId }
+  }));
+  const created = [{
+    objectId: newEntry.id,
+    name: newEntry.name,
+    triangles: selectedTotal,
+    suggestedPivot: suggestedPivot ? vec3(suggestedPivot) : null,
+    bounds: viewer._placementSummary(newEntry).bounds
+  }];
+  const result = { created, remaining, mode };
+  if (mode === "plane") {
+    result.openEdgesAdded = openEdgesAdded;
+    result.note = "Cut faces are HOLLOW (capping would invent wrong UVs). Keep articulation sweeps small (\u227230\xB0) or orient cuts away from the camera. suggestedPivot = the cut region centroid \u2014 set_pivot there, then rotate. Old describe_scene mesh ids are void; reset now restores the SPLIT state, not the pre-split mesh.";
+  } else {
+    result.note = "Old detect_parts partIds and describe_scene mesh ids are void after a split. reset restores the SPLIT state.";
+  }
+  return result;
+}
+function clonePaintedMaterial(stash) {
+  const cloneOne = (m) => {
+    const c = m.clone();
+    c.userData = { ...m.userData };
+    clonePaintLayer(c);
+    return c;
+  };
+  return Array.isArray(stash) ? stash.map(cloneOne) : cloneOne(stash);
+}
+
+// frontend/js/viewer/repair.js
+var REGION_VERTEX_CAP = 5e4;
+var INSPECT_TRIANGLE_BUDGET = 3e5;
+var r33 = (v) => Math.round(v * 1e3) / 1e3;
+var r1 = (v) => Math.round(v * 10) / 10;
+function requireActive2(viewer) {
+  const entry = viewer._activeEntry();
+  if (!entry) throw new Error("No object loaded. load / add_model / add_primitive first.");
+  if (entry.skinned) {
+    throw new Error("Mesh repair on skinned (rigged) models is not supported \u2014 vertex/topology edits corrupt the bind pose.");
+  }
+  if (viewer._timeline && viewer._timeline.playing) {
+    throw new Error("The timeline is PLAYING \u2014 pause_timeline before mesh edits.");
+  }
+  return entry;
+}
+function meshesOf2(entry) {
+  const meshes = [];
+  entry.model.traverse((c) => {
+    if (c.isMesh && c.geometry) meshes.push(c);
+  });
+  return meshes;
+}
+function triCountOf2(geometry) {
+  const index = geometry.getIndex();
+  const pos = geometry.getAttribute("position");
+  return Math.floor(index ? index.count / 3 : pos ? pos.count / 3 : 0);
+}
+function resolveRadius2(viewer, opts, command) {
+  if (opts.radius > 0) return opts.radius;
+  if (opts.radius_rel > 0) {
+    const box = new Box3().setFromObject(viewer._currentModel);
+    const sphereR = box.isEmpty() ? 0 : box.getSize(new Vector3()).length() / 2;
+    if (sphereR > 0) return opts.radius_rel * sphereR;
+  }
+  throw new Error(`${command} requires radius > 0 (world units) or radius_rel > 0.`);
+}
+function weldMap(geometry) {
+  const pos = geometry.getAttribute("position");
+  geometry.computeBoundingBox();
+  const diag = geometry.boundingBox ? geometry.boundingBox.getSize(new Vector3()).length() || 1 : 1;
+  const quant = diag * 1e-6;
+  const byKey = /* @__PURE__ */ new Map();
+  const canonical = new Int32Array(pos.count);
+  const members = /* @__PURE__ */ new Map();
+  for (let i = 0; i < pos.count; i++) {
+    const k = `${Math.round(pos.getX(i) / quant)}_${Math.round(pos.getY(i) / quant)}_${Math.round(pos.getZ(i) / quant)}`;
+    const seen = byKey.get(k);
+    canonical[i] = seen !== void 0 ? seen : (byKey.set(k, i), i);
+    let list = members.get(canonical[i]);
+    if (!list) {
+      list = [];
+      members.set(canonical[i], list);
+    }
+    list.push(i);
+  }
+  return { canonical, members };
+}
+function collapseRegion(posAttr, tris, locked, keepRatio) {
+  const faces = tris.map((t2, i) => ({ v: [t2[0], t2[1], t2[2]], alive: true, id: i }));
+  const vertFaces = /* @__PURE__ */ new Map();
+  const neighbors = /* @__PURE__ */ new Map();
+  const link = (a, b) => {
+    let s = neighbors.get(a);
+    if (!s) {
+      s = /* @__PURE__ */ new Set();
+      neighbors.set(a, s);
+    }
+    s.add(b);
+  };
+  for (const f of faces) {
+    for (let k = 0; k < 3; k++) {
+      const a = f.v[k], b = f.v[(k + 1) % 3];
+      link(a, b);
+      link(b, a);
+      let list = vertFaces.get(a);
+      if (!list) {
+        list = [];
+        vertFaces.set(a, list);
+      }
+      list.push(f);
+    }
+  }
+  const vp = (i, out) => out.fromBufferAttribute(posAttr, i);
+  const _a2 = new Vector3(), _b2 = new Vector3(), _c = new Vector3();
+  const _ab4 = new Vector3(), _cb3 = new Vector3();
+  const faceNormal = (f, out) => {
+    vp(f.v[0], _a2);
+    vp(f.v[1], _b2);
+    vp(f.v[2], _c);
+    _cb3.subVectors(_c, _b2);
+    _ab4.subVectors(_a2, _b2);
+    return out.copy(_cb3.cross(_ab4)).normalize();
+  };
+  const nu = new Vector3(), nf = new Vector3();
+  const edgeCost = (u2, v) => {
+    const len = vp(u2, _a2).distanceTo(vp(v, _b2));
+    let curvature = 0;
+    const uFaces = (vertFaces.get(u2) || []).filter((f) => f.alive);
+    const sideFaces = uFaces.filter((f) => f.v.includes(v));
+    for (const f of uFaces) {
+      let minCurv = 1;
+      faceNormal(f, nf);
+      for (const sf of sideFaces) {
+        const dot = nf.dot(faceNormal(sf, nu));
+        minCurv = Math.min(minCurv, (1 - dot) / 2);
+      }
+      curvature = Math.max(curvature, minCurv);
+    }
+    if (sideFaces.length < 2) curvature = 1;
+    return len * curvature;
+  };
+  const best = /* @__PURE__ */ new Map();
+  const computeVertexCost = (u2) => {
+    if (locked.has(u2)) {
+      best.delete(u2);
+      return;
+    }
+    const ns = neighbors.get(u2);
+    if (!ns || ns.size === 0) {
+      best.set(u2, { v: null, cost: -0.01 });
+      return;
+    }
+    let bv = null, bc = Infinity;
+    for (const v of ns) {
+      const c = edgeCost(u2, v);
+      if (c < bc) {
+        bc = c;
+        bv = v;
+      }
+    }
+    best.set(u2, { v: bv, cost: bc });
+  };
+  const unlocked = [...neighbors.keys()].filter((v) => !locked.has(v));
+  for (const u2 of unlocked) computeVertexCost(u2);
+  const targetRemovals = Math.floor(unlocked.length * (1 - keepRatio));
+  let removed = 0;
+  while (removed < targetRemovals) {
+    let u2 = null, rec = null;
+    for (const [cu, crec] of best) {
+      if (!rec || crec.cost < rec.cost) {
+        u2 = cu;
+        rec = crec;
+      }
+    }
+    if (u2 === null || !Number.isFinite(rec.cost)) break;
+    const v = rec.v;
+    best.delete(u2);
+    if (v === null) {
+      removed++;
+      continue;
+    }
+    const uFaces = (vertFaces.get(u2) || []).filter((f) => f.alive);
+    const affected = /* @__PURE__ */ new Set([v]);
+    for (const f of uFaces) {
+      if (f.v.includes(v)) {
+        f.alive = false;
+      } else {
+        for (let k = 0; k < 3; k++) if (f.v[k] === u2) f.v[k] = v;
+        let list = vertFaces.get(v);
+        if (!list) {
+          list = [];
+          vertFaces.set(v, list);
+        }
+        list.push(f);
+      }
+      for (const w of f.v) affected.add(w);
+    }
+    const uN = neighbors.get(u2) || /* @__PURE__ */ new Set();
+    for (const w of uN) {
+      neighbors.get(w).delete(u2);
+      if (w !== v) {
+        link(v, w);
+        link(w, v);
+      }
+      affected.add(w);
+    }
+    neighbors.delete(u2);
+    vertFaces.delete(u2);
+    removed++;
+    for (const w of affected) {
+      if (!locked.has(w) && neighbors.has(w)) computeVertexCost(w);
+    }
+  }
+  return { tris: faces.filter((f) => f.alive).map((f) => f.v), removed };
+}
+function simplifyRegion(viewer, opts = {}) {
+  const entry = requireActive2(viewer);
+  const radius = resolveRadius2(viewer, opts, "simplify_region");
+  const ratio = opts.ratio;
+  if (!(ratio > 0 && ratio < 1)) {
+    throw new Error("simplify_region requires ratio in (0,1) \u2014 the fraction of region vertices to KEEP (0.25 \u2248 4\xD7 coarser).");
+  }
+  const center = new Vector3(...opts.center || []);
+  if (!opts.center || opts.center.length !== 3) {
+    throw new Error("simplify_region requires center: [x,y,z] (world \u2014 use pick, raycast, inspect_region or get_bounds).");
+  }
+  const meshes = meshesOf2(entry);
+  entry.model.updateMatrixWorld(true);
+  const r22 = radius * radius;
+  let before = 0, after = 0, removedVerts = 0;
+  let lockedRing = 0, lockedSeams = 0, lockedBorders = 0;
+  const seenGeometries = /* @__PURE__ */ new Set();
+  const v = new Vector3();
+  for (const mesh of meshes) {
+    if (seenGeometries.has(mesh.geometry)) continue;
+    seenGeometries.add(mesh.geometry);
+    ensureMutable(mesh.geometry);
+    const geometry = mesh.geometry;
+    const pos = geometry.getAttribute("position");
+    const index = geometry.getIndex();
+    const triCount = triCountOf2(geometry);
+    const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+    const m = mesh.matrixWorld;
+    const inside = new Uint8Array(pos.count);
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(m);
+      if (v.distanceToSquared(center) <= r22) inside[i] = 1;
+    }
+    const selected = [];
+    const rest = [];
+    for (let t2 = 0; t2 < triCount; t2++) {
+      const a = idxOf(t2, 0), b = idxOf(t2, 1), c = idxOf(t2, 2);
+      if (inside[a] && inside[b] && inside[c]) selected.push([a, b, c]);
+      else rest.push([a, b, c]);
+    }
+    if (selected.length < 8) continue;
+    const regionVerts = /* @__PURE__ */ new Set();
+    for (const t2 of selected) for (const vi of t2) regionVerts.add(vi);
+    if (regionVerts.size > REGION_VERTEX_CAP) {
+      throw new Error(`Region covers ${regionVerts.size.toLocaleString()} vertices (> ${REGION_VERTEX_CAP.toLocaleString()} cap) \u2014 reduce the radius, or use \`simplify\` for whole-model decimation.`);
+    }
+    const locked = /* @__PURE__ */ new Set();
+    for (const t2 of rest) {
+      for (const vi of t2) if (regionVerts.has(vi)) {
+        locked.add(vi);
+      }
+    }
+    lockedRing += locked.size;
+    const { canonical, members } = weldMap(geometry);
+    for (const list of members.values()) {
+      if (list.length > 1) {
+        for (const vi of list) {
+          if (regionVerts.has(vi) && !locked.has(vi)) {
+            locked.add(vi);
+            lockedSeams++;
+          }
+        }
+      }
+    }
+    const { edgeCount } = meshTopology(geometry, /* @__PURE__ */ new Map());
+    const openCanon = /* @__PURE__ */ new Set();
+    for (const [key, count] of edgeCount) {
+      if (count !== 1) continue;
+      openCanon.add(Math.floor(key / 16777216));
+      openCanon.add(key % 16777216);
+    }
+    for (const vi of regionVerts) {
+      if (!locked.has(vi) && openCanon.has(canonical[vi])) {
+        locked.add(vi);
+        lockedBorders++;
+      }
+    }
+    before += selected.length;
+    const { tris: survivors, removed } = collapseRegion(pos, selected, locked, ratio);
+    after += survivors.length;
+    removedVerts += removed;
+    const newIndex = [];
+    for (const t2 of rest) newIndex.push(t2[0], t2[1], t2[2]);
+    for (const t2 of survivors) newIndex.push(t2[0], t2[1], t2[2]);
+    const remap = /* @__PURE__ */ new Map();
+    const compact = new Array(newIndex.length);
+    for (let i = 0; i < newIndex.length; i++) {
+      const vi = newIndex[i];
+      let ni = remap.get(vi);
+      if (ni === void 0) {
+        ni = remap.size;
+        remap.set(vi, ni);
+      }
+      compact[i] = ni;
+    }
+    const geo = new BufferGeometry();
+    for (const name of Object.keys(geometry.attributes)) {
+      const attr = geometry.getAttribute(name);
+      const out = new Float32Array(remap.size * attr.itemSize);
+      for (const [vi, ni] of remap) {
+        for (let c = 0; c < attr.itemSize; c++) {
+          out[ni * attr.itemSize + c] = attr.getComponent(vi, c);
+        }
+      }
+      geo.setAttribute(name, new BufferAttribute(out, attr.itemSize));
+    }
+    geo.setIndex(compact);
+    if (geo.getAttribute("normal")) {
+      recomputeInteriorNormals(geo, remap, locked);
+    }
+    geo.computeBoundingBox();
+    geo.computeBoundingSphere();
+    mesh.geometry.dispose();
+    mesh.geometry = geo;
+  }
+  if (before === 0) {
+    throw new Error("Brush region contains no fully-inside triangles \u2014 check center (world coords \u2014 use pick or inspect_region) and radius, or enlarge the radius (straddling triangles don't count).");
+  }
+  const hadEdits = !!entry.originalState;
+  entry.originalState = null;
+  entry.geometryRev++;
+  entry._partition = null;
+  entry.modified = true;
+  entry.sculpted = true;
+  entry.stats = viewer._computeStats(entry.model);
+  viewer._lastStats = entry.stats;
+  viewer.invalidate();
+  let note = "Boundary ring locked \u2014 no cracks; seam welds and open rims (cut edges) locked (hard-edged/seam-dense regions decimate less than requested).";
+  if (hadEdits) {
+    note = "reset baseline moved: earlier sculpt/bake edits are now permanent. " + note;
+  }
+  return {
+    region: { trianglesBefore: before, trianglesAfter: after },
+    object: { triangles: entry.stats.faces },
+    requestedRatio: ratio,
+    achievedRatio: before ? r33(after / before) : 1,
+    locked: { ring: lockedRing, seams: lockedSeams, borders: lockedBorders },
+    verticesRemoved: removedVerts,
+    note
+  };
+}
+function recomputeInteriorNormals(geo, remap, lockedRaw) {
+  const lockedNew = /* @__PURE__ */ new Set();
+  for (const [vi, ni] of remap) if (lockedRaw.has(vi)) lockedNew.add(ni);
+  const pos = geo.getAttribute("position");
+  const nor = geo.getAttribute("normal");
+  const index = geo.getIndex();
+  const acc = new Float32Array(pos.count * 3);
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const cb = new Vector3(), ab = new Vector3();
+  for (let i = 0; i < index.count; i += 3) {
+    const ia = index.getX(i), ib = index.getX(i + 1), ic = index.getX(i + 2);
+    a.fromBufferAttribute(pos, ia);
+    b.fromBufferAttribute(pos, ib);
+    c.fromBufferAttribute(pos, ic);
+    cb.subVectors(c, b);
+    ab.subVectors(a, b);
+    cb.cross(ab);
+    for (const vi of [ia, ib, ic]) {
+      acc[vi * 3] += cb.x;
+      acc[vi * 3 + 1] += cb.y;
+      acc[vi * 3 + 2] += cb.z;
+    }
+  }
+  const n2 = new Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    if (lockedNew.has(i)) continue;
+    n2.set(acc[i * 3], acc[i * 3 + 1], acc[i * 3 + 2]);
+    if (n2.lengthSq() > 1e-12) {
+      n2.normalize();
+      nor.setXYZ(i, n2.x, n2.y, n2.z);
+    }
+  }
+  nor.needsUpdate = true;
+}
+function meshIssueCounts(geometry) {
+  const pos = geometry.getAttribute("position");
+  const index = geometry.getIndex();
+  const triCount = triCountOf2(geometry);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const { canonical } = weldMap(geometry);
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const cb = new Vector3(), ab = new Vector3();
+  geometry.computeBoundingBox();
+  const diag = geometry.boundingBox.getSize(new Vector3()).length() || 1;
+  const minArea = (diag * 1e-7) ** 2;
+  let degenerate = 0;
+  const edges = /* @__PURE__ */ new Map();
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const raw = [idxOf(t2, 0), idxOf(t2, 1), idxOf(t2, 2)];
+    const cs = raw.map((vi) => canonical[vi]);
+    let isDegenerate = cs[0] === cs[1] || cs[1] === cs[2] || cs[0] === cs[2];
+    if (!isDegenerate) {
+      a.fromBufferAttribute(pos, raw[0]);
+      b.fromBufferAttribute(pos, raw[1]);
+      c.fromBufferAttribute(pos, raw[2]);
+      cb.subVectors(c, b);
+      ab.subVectors(a, b);
+      isDegenerate = cb.cross(ab).lengthSq() / 4 < minArea;
+    }
+    if (isDegenerate) degenerate++;
+    for (let k = 0; k < 3; k++) {
+      const e1 = Math.min(cs[k], cs[(k + 1) % 3]);
+      const e2 = Math.max(cs[k], cs[(k + 1) % 3]);
+      if (e1 === e2) continue;
+      const key = e1 * 16777216 + e2;
+      edges.set(key, (edges.get(key) || 0) + 1);
+    }
+  }
+  let openEdges = 0;
+  for (const n2 of edges.values()) if (n2 === 1) openEdges++;
+  return { degenerate, openEdges };
+}
+function signedVolume(geometry) {
+  const pos = geometry.getAttribute("position");
+  const index = geometry.getIndex();
+  const triCount = triCountOf2(geometry);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  let vol = 0;
+  for (let t2 = 0; t2 < triCount; t2++) {
+    a.fromBufferAttribute(pos, idxOf(t2, 0));
+    b.fromBufferAttribute(pos, idxOf(t2, 1));
+    c.fromBufferAttribute(pos, idxOf(t2, 2));
+    vol += a.dot(b.clone().cross(c)) / 6;
+  }
+  return vol;
+}
+function fixMesh(viewer, opts = {}) {
+  const entry = requireActive2(viewer);
+  const requested = opts.operations || ["degenerate", "normals"];
+  const valid = ["degenerate", "normals", "flipped_faces"];
+  for (const op of requested) {
+    if (!valid.includes(op)) {
+      throw new Error(`Unknown operation '${op}'. Use: ${valid.join(", ")} (flipped_faces is opt-in \u2014 per-mesh winding reversal on closed meshes with negative signed volume).`);
+    }
+  }
+  const meshes = meshesOf2(entry);
+  const beforeCounts = meshes.map((m) => meshIssueCounts(m.geometry));
+  const operations = [];
+  let changed = false;
+  if (requested.includes("degenerate")) {
+    let dropped = 0;
+    for (const mesh of meshes) {
+      ensureMutable(mesh.geometry);
+      const geometry = mesh.geometry;
+      const pos = geometry.getAttribute("position");
+      const index = geometry.getIndex();
+      const triCount = triCountOf2(geometry);
+      const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+      const { canonical } = weldMap(geometry);
+      geometry.computeBoundingBox();
+      const diag = geometry.boundingBox.getSize(new Vector3()).length() || 1;
+      const minArea = (diag * 1e-7) ** 2;
+      const a = new Vector3(), b = new Vector3(), c = new Vector3();
+      const cb = new Vector3(), ab = new Vector3();
+      const keep = [];
+      for (let t2 = 0; t2 < triCount; t2++) {
+        const raw = [idxOf(t2, 0), idxOf(t2, 1), idxOf(t2, 2)];
+        const cs = raw.map((vi) => canonical[vi]);
+        let bad = cs[0] === cs[1] || cs[1] === cs[2] || cs[0] === cs[2];
+        if (!bad) {
+          a.fromBufferAttribute(pos, raw[0]);
+          b.fromBufferAttribute(pos, raw[1]);
+          c.fromBufferAttribute(pos, raw[2]);
+          cb.subVectors(c, b);
+          ab.subVectors(a, b);
+          bad = cb.cross(ab).lengthSq() / 4 < minArea;
+        }
+        if (bad) dropped++;
+        else keep.push(raw[0], raw[1], raw[2]);
+      }
+      if (keep.length / 3 !== triCount) {
+        geometry.setIndex(keep);
+        changed = true;
+      }
+    }
+    operations.push({ op: "degenerate", trianglesDropped: dropped });
+  }
+  if (requested.includes("flipped_faces")) {
+    let flippedMeshes = 0;
+    for (const mesh of meshes) {
+      const counts = meshIssueCounts(mesh.geometry);
+      if (counts.openEdges > 0) continue;
+      if (signedVolume(mesh.geometry) < 0) {
+        const geometry = mesh.geometry;
+        const index = geometry.getIndex();
+        if (index) {
+          for (let i = 0; i < index.count; i += 3) {
+            const tmp2 = index.getX(i + 1);
+            index.setX(i + 1, index.getX(i + 2));
+            index.setX(i + 2, tmp2);
+          }
+          index.needsUpdate = true;
+          geometry.computeVertexNormals();
+          flippedMeshes++;
+          changed = true;
+        }
+      }
+    }
+    operations.push({ op: "flipped_faces", meshesFlipped: flippedMeshes });
+  }
+  if (requested.includes("normals")) {
+    for (const mesh of meshes) {
+      mesh.geometry.computeVertexNormals();
+    }
+    operations.push({ op: "normals", meshes: meshes.length });
+    changed = true;
+  }
+  const afterCounts = meshes.map((m) => meshIssueCounts(m.geometry));
+  const sum = (arr, k) => arr.reduce((s, x) => s + x[k], 0);
+  if (changed) {
+    entry.originalState = null;
+    entry.geometryRev++;
+    entry._partition = null;
+    entry.modified = true;
+    entry.sculpted = true;
+    entry.stats = viewer._computeStats(entry.model);
+    viewer._lastStats = entry.stats;
+    viewer.invalidate();
+  }
+  return {
+    operations,
+    issues: {
+      openEdges: { before: sum(beforeCounts, "openEdges"), after: sum(afterCounts, "openEdges") },
+      degenerate: { before: sum(beforeCounts, "degenerate"), after: sum(afterCounts, "degenerate") }
+    }
+  };
+}
+function meshTopology(geometry, cache) {
+  let topo = cache.get(geometry);
+  if (topo) return topo;
+  const { canonical } = weldMap(geometry);
+  const index = geometry.getIndex();
+  const triCount = triCountOf2(geometry);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const edgeCount = /* @__PURE__ */ new Map();
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const cs = [canonical[idxOf(t2, 0)], canonical[idxOf(t2, 1)], canonical[idxOf(t2, 2)]];
+    for (let k = 0; k < 3; k++) {
+      const e1 = Math.min(cs[k], cs[(k + 1) % 3]);
+      const e2 = Math.max(cs[k], cs[(k + 1) % 3]);
+      if (e1 === e2) continue;
+      const key = e1 * 16777216 + e2;
+      edgeCount.set(key, (edgeCount.get(key) || 0) + 1);
+    }
+  }
+  topo = { canonical, edgeCount };
+  cache.set(geometry, topo);
+  return topo;
+}
+function regionStats(viewer, entry, center, radius, topoCache = /* @__PURE__ */ new Map()) {
+  const meshes = meshesOf2(entry);
+  entry.model.updateMatrixWorld(true);
+  const r22 = radius * radius;
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const centroid = new Vector3();
+  const cb = new Vector3(), ab = new Vector3();
+  let triangles = 0, area2 = 0;
+  const openEdgeKeys = /* @__PURE__ */ new Set();
+  const edgeLens = [];
+  const dihedrals = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const mesh of meshes) {
+    if (seen.has(mesh.geometry)) continue;
+    seen.add(mesh.geometry);
+    const geometry = mesh.geometry;
+    const pos = geometry.getAttribute("position");
+    const index = geometry.getIndex();
+    const triCount = triCountOf2(geometry);
+    const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+    const m = mesh.matrixWorld;
+    const normals = /* @__PURE__ */ new Map();
+    const { canonical, edgeCount } = meshTopology(geometry, topoCache);
+    for (let t2 = 0; t2 < triCount; t2++) {
+      const ia = idxOf(t2, 0), ib = idxOf(t2, 1), ic = idxOf(t2, 2);
+      a.fromBufferAttribute(pos, ia).applyMatrix4(m);
+      b.fromBufferAttribute(pos, ib).applyMatrix4(m);
+      c.fromBufferAttribute(pos, ic).applyMatrix4(m);
+      centroid.copy(a).add(b).add(c).divideScalar(3);
+      if (centroid.distanceToSquared(center) > r22) continue;
+      triangles++;
+      cb.subVectors(c, b);
+      ab.subVectors(a, b);
+      const cross = cb.clone().cross(ab);
+      area2 += cross.length() / 2;
+      edgeLens.push(a.distanceTo(b), b.distanceTo(c), c.distanceTo(a));
+      const n2 = cross.normalize().clone();
+      const cs = [canonical[ia], canonical[ib], canonical[ic]];
+      for (let k = 0; k < 3; k++) {
+        const e1 = Math.min(cs[k], cs[(k + 1) % 3]);
+        const e2 = Math.max(cs[k], cs[(k + 1) % 3]);
+        if (e1 === e2) continue;
+        const key = e1 * 16777216 + e2;
+        if (edgeCount.get(key) === 1) openEdgeKeys.add(key);
+        let list = normals.get(key);
+        if (!list) {
+          list = [];
+          normals.set(key, list);
+        }
+        list.push(n2);
+      }
+    }
+    for (const list of normals.values()) {
+      if (list.length === 2) {
+        const dot = Math.max(-1, Math.min(1, list[0].dot(list[1])));
+        dihedrals.push(Math.acos(dot) * 180 / Math.PI);
+      }
+    }
+  }
+  edgeLens.sort((x, y) => x - y);
+  const pct = (arr, p) => arr.length ? arr[Math.min(arr.length - 1, Math.floor(arr.length * p))] : 0;
+  const dihedralMean = dihedrals.length ? dihedrals.reduce((s, x) => s + x, 0) / dihedrals.length : 0;
+  return {
+    triangles,
+    surfaceArea: r33(area2),
+    triPerUnit2: area2 > 0 ? Math.round(triangles / area2) : 0,
+    edgeLength: { min: r33(pct(edgeLens, 0)), median: r33(pct(edgeLens, 0.5)), p95: r33(pct(edgeLens, 0.95)) },
+    dihedralMeanDeg: r1(dihedralMean),
+    // TRUE welded cracks touching this region (same basis as get_mesh_stats
+    // and fix_mesh) — NOT the region perimeter.
+    openEdges: openEdgeKeys.size
+  };
+}
+function inspectRegion(viewer, opts = {}) {
+  const entry = viewer._activeEntry();
+  if (!entry) throw new Error("No object loaded.");
+  const totalTris = entry.stats ? entry.stats.faces : 0;
+  if (totalTris > INSPECT_TRIANGLE_BUDGET) {
+    return {
+      skipped: true,
+      note: `Object exceeds the ${INSPECT_TRIANGLE_BUDGET.toLocaleString()}-triangle inspection budget.`
+    };
+  }
+  if (opts.grid) {
+    const n2 = Math.max(2, Math.min(5, Math.round(opts.grid)));
+    const box = new Box3().setFromObject(entry.wrapper);
+    if (box.isEmpty()) throw new Error("Object has no measurable geometry.");
+    const size = box.getSize(new Vector3());
+    const cellR = Math.max(size.x, size.y, size.z) / n2 * 0.75;
+    const cells = [];
+    const c = new Vector3();
+    const topoCache = /* @__PURE__ */ new Map();
+    for (let i = 0; i < n2; i++) {
+      for (let j = 0; j < n2; j++) {
+        for (let k = 0; k < n2; k++) {
+          c.set(
+            box.min.x + (i + 0.5) * size.x / n2,
+            box.min.y + (j + 0.5) * size.y / n2,
+            box.min.z + (k + 0.5) * size.z / n2
+          );
+          const stats2 = regionStats(viewer, entry, c, cellR, topoCache);
+          if (stats2.triangles < 8) continue;
+          const flatness = Math.max(0, 1 - stats2.dihedralMeanDeg / 30);
+          cells.push({
+            center: [r33(c.x), r33(c.y), r33(c.z)],
+            radius: r33(cellR),
+            ...stats2,
+            opportunity: r33(flatness * Math.log10(1 + stats2.triPerUnit2))
+          });
+        }
+      }
+    }
+    cells.sort((x, y) => y.opportunity - x.opportunity);
+    const capped = cells.slice(0, 24);
+    return {
+      mode: "grid",
+      grid: n2,
+      cells: capped,
+      omitted: Math.max(0, cells.length - capped.length) || void 0,
+      note: "cells sorted by simplification opportunity (flat \xD7 dense = unjustified density). Feed a cell's center+radius into simplify_region."
+    };
+  }
+  if (!opts.center || opts.center.length !== 3) {
+    throw new Error("inspect_region needs center:[x,y,z] + radius (probe) or grid:2..5 (survey).");
+  }
+  const radius = resolveRadius2(viewer, opts, "inspect_region");
+  const center = new Vector3(...opts.center);
+  const stats = regionStats(viewer, entry, center, radius);
+  if (stats.triangles === 0) {
+    throw new Error("Region contains no triangles \u2014 check center (world coords: use pick, get_bounds, or describe_scene mesh centers) and radius.");
+  }
+  const objArea = entry.stats && entry.stats.faces ? stats.triangles / entry.stats.faces : 0;
+  return { mode: "probe", ...stats, shareOfObject: r33(objArea) };
+}
+function inspectTexture(viewer) {
+  const entry = viewer._activeEntry();
+  if (!entry) throw new Error("No object loaded.");
+  const meshes = meshesOf2(entry);
+  entry.model.updateMatrixWorld(true);
+  const reports = [];
+  const seenMats = /* @__PURE__ */ new Set();
+  for (const mesh of meshes) {
+    const stash = mesh._mvOriginalMaterial || mesh.material;
+    const mats = Array.isArray(stash) ? stash : [stash];
+    const uv = mesh.geometry.getAttribute("uv");
+    for (const mat of mats) {
+      if (!mat || seenMats.has(mat)) continue;
+      seenMats.add(mat);
+      const tex = mat.map;
+      const report = {
+        material: mat.name || "(unnamed)",
+        painted: !!(mat.userData && mat.userData._mvPaint) || void 0
+      };
+      if (tex && tex.image && tex.image.width) {
+        report.map = {
+          width: tex.image.width,
+          height: tex.image.height,
+          colorSpace: tex.colorSpace || "linear"
+        };
+      } else {
+        report.map = null;
+      }
+      if (uv && report.map) {
+        const density = texelDensity(mesh, report.map.width, report.map.height);
+        if (density) Object.assign(report, density);
+      } else if (!uv) {
+        report.note = "mesh has no UVs \u2014 painting/repair unavailable";
+      }
+      reports.push(report);
+    }
+  }
+  return { materials: reports };
+}
+function texelDensity(mesh, W, H) {
+  const geometry = mesh.geometry;
+  const pos = geometry.getAttribute("position");
+  const uv = geometry.getAttribute("uv");
+  const index = geometry.getIndex();
+  const triCount = triCountOf2(geometry);
+  if (triCount === 0 || triCount > INSPECT_TRIANGLE_BUDGET) return null;
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const m = mesh.matrixWorld;
+  const items = [];
+  let zeroUv = 0;
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const ia = idxOf(t2, 0), ib = idxOf(t2, 1), ic = idxOf(t2, 2);
+    a.fromBufferAttribute(pos, ia).applyMatrix4(m);
+    b.fromBufferAttribute(pos, ib).applyMatrix4(m);
+    c.fromBufferAttribute(pos, ic).applyMatrix4(m);
+    const areaW = b.clone().sub(a).cross(c.clone().sub(a)).length() / 2;
+    if (areaW < 1e-12) continue;
+    const u0 = uv.getX(ia) * W, v0 = uv.getY(ia) * H;
+    const u1 = uv.getX(ib) * W, v1 = uv.getY(ib) * H;
+    const u2 = uv.getX(ic) * W, v2 = uv.getY(ic) * H;
+    const areaUV = Math.abs((u1 - u0) * (v2 - v0) - (u2 - u0) * (v1 - v0)) / 2;
+    if (areaUV < 1e-9) {
+      zeroUv++;
+      continue;
+    }
+    items.push({
+      density: Math.sqrt(areaUV / areaW),
+      areaW,
+      center: [(a.x + b.x + c.x) / 3, (a.y + b.y + c.y) / 3, (a.z + b.z + c.z) / 3]
+    });
+  }
+  if (!items.length) return { zeroUvArea: zeroUv || void 0 };
+  items.sort((x, y) => x.density - y.density);
+  const totalArea = items.reduce((s, x) => s + x.areaW, 0);
+  const weightedPct = (p) => {
+    let acc = 0;
+    for (const it2 of items) {
+      acc += it2.areaW;
+      if (acc >= totalArea * p) return it2.density;
+    }
+    return items[items.length - 1].density;
+  };
+  const worst = [];
+  for (const it2 of items) {
+    if (worst.length >= 5) break;
+    const ok = worst.every((w) => {
+      const dx = w[0] - it2.center[0], dy = w[1] - it2.center[1], dz = w[2] - it2.center[2];
+      return dx * dx + dy * dy + dz * dz > totalArea / items.length;
+    });
+    if (ok) worst.push(it2.center.map(r33));
+  }
+  return {
+    texelDensity: {
+      p5: r1(weightedPct(0.05)),
+      median: r1(weightedPct(0.5)),
+      p95: r1(weightedPct(0.95))
+    },
+    lowestDensitySpots: worst,
+    zeroUvArea: zeroUv || void 0
+  };
+}
+
 // frontend/js/viewer/control_api.js
 var ViewerControlAPI = class {
   /**
@@ -48460,8 +51759,14 @@ var ViewerControlAPI = class {
         }
       }
       if (spec.type === "number") {
+        if (spec.aliases && typeof v === "string" && v in spec.aliases) {
+          v = spec.aliases[v];
+        }
         const n2 = Number(v);
-        if (Number.isNaN(n2)) return { error: `Param '${key}' must be a number` };
+        if (Number.isNaN(n2)) {
+          const hint = spec.aliases ? ` or one of: ${Object.keys(spec.aliases).join(", ")}` : "";
+          return { error: `Param '${key}' must be a number${hint}` };
+        }
         if (spec.min !== void 0 && n2 < spec.min) return { error: `Param '${key}' must be >= ${spec.min}` };
         if (spec.max !== void 0 && n2 > spec.max) return { error: `Param '${key}' must be <= ${spec.max}` };
         v = n2;
@@ -48718,7 +52023,7 @@ var ViewerControlAPI = class {
             frame: p.frame
           });
           this._emit("object_added", { objectId: result.objectId, name: v.getState().model.name });
-          return { stats: result, objectId: result.objectId, scene: v.getState().scene };
+          return { objectId: result.objectId, stats: result };
         }
       },
       add_primitive: {
@@ -48785,7 +52090,7 @@ var ViewerControlAPI = class {
           falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
           shape: { type: "string", enum: ["round", "square"] },
           max_normal_angle: { type: "number", min: 1, max: 180 },
-          texture_size: { type: "number", min: 64, max: 2048 }
+          texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } }
         },
         requiresModel: true,
         handler: (p) => paintStamp(v, p)
@@ -48803,7 +52108,7 @@ var ViewerControlAPI = class {
           falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
           shape: { type: "string", enum: ["round", "square"] },
           max_normal_angle: { type: "number", min: 1, max: 180 },
-          texture_size: { type: "number", min: 64, max: 2048 }
+          texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } }
         },
         requiresModel: true,
         handler: (p) => paintStroke(v, p)
@@ -48812,7 +52117,7 @@ var ViewerControlAPI = class {
         description: "Flood the ACTIVE object's whole paint layer with one color (a fresh base coat before detailing).",
         params: {
           color: { type: "string", required: true },
-          texture_size: { type: "number", min: 64, max: 2048 }
+          texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } }
         },
         requiresModel: true,
         handler: (p) => fillPaint(v, p)
@@ -48880,13 +52185,299 @@ var ViewerControlAPI = class {
         }
       },
       remove_object: {
-        description: "Remove ONE object from the scene (disposes its GPU resources). If it was active, the most recently added remaining object becomes active.",
+        description: "Remove ONE object from the scene (disposes its GPU resources). If it was active, the most recently added remaining object becomes active. Returns just {removed} \u2014 use list_objects for the roster.",
         params: { id: { type: "number", required: true } },
         requiresModel: true,
         handler: (p) => {
           v.removeObject(p.id);
-          return { removed: p.id, scene: v.getState().scene };
+          return { removed: p.id };
         }
+      },
+      // --- articulation (backlog 046) ---
+      detect_parts: {
+        description: "Find candidate articulation parts of the ACTIVE object. Strategy: the asset's own mesh partition first, then material groups, then welded connected components. HONESTY: image-to-3D outputs are usually ONE fused component \u2014 finding nothing (or only SOME parts, e.g. two of four wheels) is NORMAL; verify candidates with focus + screenshot before splitting. Returns {parts:[{partId, kind, triangles, center, size, suggestedPivot}], partitionId} \u2014 pass partitionId to split_object (parts go stale when geometry changes). When parts.length <= 1, articulation needs split_object with a plane cut.",
+        requiresModel: true,
+        handler: () => detectParts(v)
+      },
+      split_object: {
+        description: "Extract part(s) of the ACTIVE object into a NEW scene object \u2014 the articulation knife. Selection: parts:[partId,...] + partitionId (from detect_parts) OR a plane cut: {axis:'x'|'y'|'z', at:<world coordinate>, side:'+'|'-'} (side picks WHICH half is extracted, default '+' \u2014 cutting a LEFT wing needs side:'-') / {plane:{point,normal}} (oblique; the +normal side is extracted). Plane cuts classify whole triangles; CUT FACES ARE HOLLOW (capping would invent wrong UVs) \u2014 keep articulation sweeps \u227230\xB0 or orient cuts away from camera. Returns {created:[{objectId, suggestedPivot, ...}], remaining, openEdgesAdded} \u2014 suggestedPivot is the cut centroid: set_pivot there, set_parent, then rotate. The NEW part becomes active; keep_active:true keeps the SOURCE active instead (split\u2192split sequences in one batch). Painted materials are deep-copied (budget charged). Refuses skinned/animated/instanced objects. After a split: old mesh ids + partIds are void; reset restores the SPLIT state.",
+        params: {
+          parts: { type: "array" },
+          partitionId: { type: "number" },
+          plane: { type: "object" },
+          axis: { type: "string", enum: ["x", "y", "z"] },
+          at: { type: "number" },
+          side: { type: "string", enum: ["+", "-"] },
+          name: { type: "string" },
+          keep_active: { type: "boolean", default: false }
+        },
+        requiresModel: true,
+        handler: (p) => splitObject(v, p)
+      },
+      set_parent: {
+        description: "Build an articulation hierarchy: parent one object under another (or null to unparent). keepWorld (default true) preserves the world pose. After parenting, set/get_object_transform are PARENT-relative (unchanged for unparented objects); get_object_transform returns BOTH local and world. Rotating the parent moves the whole subtree \u2014 chain base->shoulder->forearm->gripper for a robot arm. Cycles and non-uniformly-scaled ancestors are refused with the reason.",
+        params: {
+          id: { type: "number", required: true },
+          parent_id: { type: "number" },
+          keep_world: { type: "boolean", default: true }
+        },
+        requiresModel: true,
+        handler: (p) => v.setParent(p.id, p.parent_id !== void 0 ? p.parent_id : null, p.keep_world)
+      },
+      set_pivot: {
+        description: "Set an object's rotation ORIGIN (world point \u2014 from split_object's suggestedPivot, pick, or raycast). Never moves the object; afterwards `rotation` in set_object_transform AND keyframes swings about this pivot (wing root, elbow, neck base). Pivot is authored data: persisted in manifests, not cleared by reset.",
+        params: {
+          id: { type: "number", required: true },
+          point: { type: "array", required: true }
+        },
+        requiresModel: true,
+        handler: (p) => v.setPivot(p.id, p.point)
+      },
+      // --- mesh/texture inspection + repair (backlog 046) ---
+      inspect_region: {
+        description: "Measure mesh density WHERE IT MATTERS \u2014 the observation for adaptive simplification. Probe mode {center, radius|radius_rel}: {triangles, surfaceArea, triPerUnit2, edgeLength{min,median,p95}, dihedralMeanDeg, openEdges}. Grid mode {grid:2..5}: N\xB3 cells over the object, sorted by simplification OPPORTUNITY (flat \xD7 dense = detail unjustified by curvature), each with center+radius ready to feed simplify_region. Decision rule: high triPerUnit2 + low dihedralMeanDeg = over-dense for what it represents.",
+        params: {
+          center: { type: "array" },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          grid: { type: "number", min: 2, max: 5 }
+        },
+        requiresModel: true,
+        handler: (p) => inspectRegion(v, p)
+      },
+      simplify_region: {
+        description: "Decimate ONLY a brush region of the ACTIVE object \u2014 adaptive resolution by agent judgment (dense where detail matters, coarse where it doesn't). ratio = fraction of region vertices to KEEP (0.25 \u2248 4\xD7 coarser). The region boundary ring is LOCKED (no cracks) and UV-seam welds are locked (no seam tears) \u2014 hard-edged/seam-dense regions decimate less than requested; read achievedRatio. Returns quantified before/after so no verification render is needed. Region cap 50k vertices. NOTE: geometry is REPLACED \u2014 reset baseline moves (earlier sculpt edits become permanent).",
+        params: {
+          center: { type: "array", required: true },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          ratio: { type: "number", required: true, min: 0.05, max: 0.9 }
+        },
+        requiresModel: true,
+        handler: (p) => simplifyRegion(v, p)
+      },
+      fix_mesh: {
+        description: "Targeted repair passes on the ACTIVE object. operations (default ['degenerate','normals']): degenerate = drop zero-area/collapsed triangles; normals = recompute vertex normals; flipped_faces = OPT-IN per-MESH winding reversal (only decidable on closed meshes with negative signed volume \u2014 per-face flip detection is unreliable and not offered). Returns per-op counts + issue deltas {openEdges, degenerate} so no re-describe is needed.",
+        params: { operations: { type: "array" } },
+        requiresModel: true,
+        handler: (p) => fixMesh(v, p)
+      },
+      inspect_texture: {
+        description: "Per-material texture audit of the ACTIVE object: resolution + colorSpace, painted flag, texel DENSITY (texels per world unit, area-weighted p5/median/p95) and the lowest-density world spots (feed to focus/paint \u2014 'too low-res HERE'). Stamp fidelity rule: a paint stamp holds detail when radius \xD7 median density >> 8 texels. zeroUvArea counts triangles with broken/projected UVs.",
+        requiresModel: true,
+        handler: () => inspectTexture(v)
+      },
+      blur_paint: {
+        description: "Soften/defect-smooth the texture inside a world-space brush (Gaussian, masked to the brush footprint \u2014 atlas neighbors never bleed in). strength 0..1 controls blend and kernel size. Requires a READABLE texture (KTX2/GPU-only refuse with the reason). Creates a paint layer from the existing texture on first use.",
+        params: {
+          center: { type: "array", required: true },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          strength: { type: "number", min: 0, max: 1 },
+          texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } }
+        },
+        requiresModel: true,
+        handler: (p) => blurPaint(v, p)
+      },
+      clone_paint: {
+        description: "Heal brush: copy texture from one surface region onto another via WORLD-space correspondence (works across UV islands \u2014 pick a clean `from` area and the defect `to` area on the SAME object). Source and destination must face similar directions (\u226445\xB0, else a teaching error). Returns {cloned, meanAlpha}. The repair workflow: close-up screenshot \u2192 pick the defect \u2192 pick a clean donor area \u2192 clone_paint \u2192 blur_paint the boundary.",
+        params: {
+          from: { type: "array", required: true },
+          to: { type: "array", required: true },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          strength: { type: "number", min: 0, max: 1 },
+          hardness: { type: "number", min: 0, max: 1 },
+          falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+          texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } }
+        },
+        requiresModel: true,
+        handler: (p) => clonePaint(v, p)
+      },
+      render_texture: {
+        description: "SEE the ACTIVE object's texture in TEXTURE SPACE: the texture image with the UV wireframe overlaid (green \u2014 where the mesh actually samples), optional crosshair markers at given UVs, an orange OUTLINE of the UV island containing outline_island_of, and an optional zoom crop (crop_center + crop_size in UV units \u2014 the measurement view for tiny charts). THE diagnostic for texture-to-mesh misalignment: pick a 3D feature (pick returns .uv), then render with markers + outline_island_of at that uv. Returns a PNG data URL (over MCP use the get_texture tool \u2014 this exceeds viewer_execute's truncation cap).",
+        params: {
+          size: { type: "number", min: 128, max: 2048 },
+          wireframe: { type: "boolean", default: true },
+          marker: { type: "array" },
+          markers: { type: "array" },
+          marker_size: { type: "number", min: 4, max: 60 },
+          labels: { type: "boolean", default: true },
+          outline_island_of: { type: "array" },
+          crop_center: { type: "array" },
+          crop_size: { type: "number", min: 0.02, max: 1 }
+        },
+        requiresModel: true,
+        handler: (p) => renderTexture(v, p)
+      },
+      transform_uv: {
+        description: "REPAIR texture-to-mesh misalignment by transforming UV coordinates: uv' = pivot + (uv \u2212 pivot)\xB7scale + offset. island_of: [u,v] scopes the transform to ONE UV chart (the island containing that uv) \u2014 fragmented atlases (generated meshes) have PER-CHART warps no global affine can fix: move only the offending chart (eyes chart +v) without dragging every other chart into its neighbors (the bleed trade-off). ALWAYS dry-run with preview_uv_transform first (bleed/out-of-bounds fractions). Workflow: pick the 3D feature (.uv) \u2192 get_texture {markers, outline_island_of} \u2192 preview_uv_transform \u2192 transform_uv \u2192 verify. UV edits persist and EXPORT; reset does not undo (reload restores).",
+        params: {
+          offset: { type: "array" },
+          scale: { type: "array" },
+          pivot: { type: "array" },
+          island_of: { type: "array" }
+        },
+        requiresModel: true,
+        handler: (p) => transformUV(v, p)
+      },
+      get_uv_islands: {
+        description: "UV island (chart) statistics of the ACTIVE object \u2014 run BEFORE planning any island-scoped UV repair: {islandCount, largest: [{island, vertices, uvBbox}], at: [{uv, island, vertices}]} for given uvs. A FRAGMENTED atlas (hundreds+ of non-semantic islands \u2014 photogrammetry/generated meshes) means feature\u2260island: island-scoped transform_uv will trade alignment for seam blotches, and the note says to use project_paint instead. `at` answers 'which chart does this pick's uv live in' (two features sharing one island = UV surgery cannot separate them).",
+        params: {
+          max: { type: "number", min: 1, max: 32 },
+          at: { type: "array" }
+        },
+        requiresModel: true,
+        handler: (p) => getUVIslands(v, p)
+      },
+      project_paint: {
+        description: "Texture repair through SCREEN space \u2014 THE fix for misalignment BAKED INTO the texture on fragmented atlases (where texel\u2194feature correspondence exists on the surface but not in UV space). Renders the CURRENT view, then every texel in the world-space brush samples the render at (its screen position + screen_offset) \u2014 content slides across the SURFACE regardless of UV islands: screen_offset [0, +20] moves what you see 20px DOWN the surface (e.g. an iris painted too high). Offsets: screen_offset [dx,dy] in projection pixels (camera-dependent) or surface_offset [right,down] in WORLD units (camera-independent \u2014 same magnitude from any framing; preferred). Workflow: face the feature head-on (preset 'neutral' minimizes baked shading) \u2192 pick the feature center \u2192 project_paint {center, radius, surface_offset} \u2192 fresh screenshot to verify. Occlusion ignored \u2014 use on convex camera-facing regions. Returns {painted, meanAlpha}.",
+        params: {
+          center: { type: "array", required: true },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          screen_offset: { type: "array" },
+          surface_offset: { type: "array" },
+          strength: { type: "number", min: 0, max: 1 },
+          hardness: { type: "number", min: 0, max: 1 },
+          falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+          texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } }
+        },
+        requiresModel: true,
+        handler: (p) => projectPaint(v, p)
+      },
+      preview_uv_transform: {
+        description: "DRY-RUN a transform_uv: for the would-be offset/scale (optionally scoped by island_of), report {clean, bleedFraction, outOfBoundsFraction, verdict} \u2014 the fraction of transformed samples that would land on texels owned by OTHER UV islands (visible contamination) or leave [0,1]\xB2. Replaces probe-render-revert loops: make the alignment-vs-bleed trade-off quantitative BEFORE mutating.",
+        params: {
+          offset: { type: "array" },
+          scale: { type: "array" },
+          pivot: { type: "array" },
+          island_of: { type: "array" }
+        },
+        requiresModel: true,
+        handler: (p) => previewUVTransform(v, p)
+      },
+      explode_view: {
+        description: "EXPLODED VIEW for articulation proofs: offset every object outward from the scene centroid so separate parts read as separate parts (factor 1 \u2248 clearly separated; 0.3 subtle). Returns per-object WORLD displacements and minGapWorld \u2014 the minimum pairwise AABB gap (negative = pairs still overlap, listed in `overlapping`: raise the factor BEFORE spending a screenshot). explode_view {factor: 0} RESTORES exact placements \u2014 always restore before save_scene/export. The proof loop: explode \u2192 check minGapWorld > 0 \u2192 screenshot \u2192 restore.",
+        params: { factor: { type: "number", required: true, min: 0, max: 5 } },
+        requiresModel: true,
+        handler: (p) => v.explodeView(p.factor)
+      },
+      resize_texture: {
+        description: "Re-allocate the ACTIVE object's PAINT layers at a new resolution (64..4096 or tiers low/medium/high/xhigh). filter:'smooth' (default) for quality downscale; 'nearest' preserves crisp square-stamp edges when upscaling. Only paint layers \u2014 authored textures are downsampled at export (export_glb texture_size) instead, non-destructively. Returns budget state.",
+        params: {
+          size: { type: "number", required: true, min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+          filter: { type: "string", enum: ["smooth", "nearest"] }
+        },
+        requiresModel: true,
+        handler: (p) => resizeTexture(v, p)
+      },
+      // --- timeline / keyframe animation (backlog 046) ---
+      set_keyframe: {
+        description: "Key an object's pose at `time` (seconds). Give explicit channels (position [x,y,z], rotation [x,y,z] Euler\xB0 or quaternion, scale) OR capture:true to key the object's CURRENT pose \u2014 the natural loop: pose with set_object_transform/look_at, then capture. With capture, `channels` narrows what gets keyed (e.g. ['rotation'] for a joint \u2014 avoids constant position/scale tracks bloating the export). Values are LOCAL (parent-relative) and rotation swings about the object's pivot. easing (out of this key): linear|step|ease_in|ease_out|ease_in_out. TEACHING: rotation interpolates the SHORT arc \u2014 a note fires when a segment exceeds 120\xB0 (use midpoint keys for full spins: 0/180/360). Setting a key pauses playback.",
+        params: {
+          id: { type: "number", required: true },
+          time: { type: "number", required: true, min: 0 },
+          position: { type: "array" },
+          rotation: { type: "array" },
+          quaternion: { type: "array" },
+          scale: { type: "number" },
+          easing: { type: "string", enum: ["linear", "step", "ease_in", "ease_out", "ease_in_out"] },
+          capture: { type: "boolean", default: false },
+          channels: { type: "array" }
+        },
+        requiresModel: true,
+        handler: (p) => setKeyframe(v, p)
+      },
+      delete_keyframe: {
+        description: "Delete keyframes of an object: at an exact `time`, a whole `channel` (position|rotation|scale), or ALL its keys (omit both).",
+        params: {
+          id: { type: "number", required: true },
+          time: { type: "number", min: 0 },
+          channel: { type: "string", enum: ["position", "rotation", "scale"] }
+        },
+        requiresModel: true,
+        handler: (p) => deleteKeyframe(v, p)
+      },
+      get_timeline: {
+        description: "Compact dump of the scene timeline: duration, playhead, per-object tracks with keys (rotations shown as derived Euler degrees).",
+        handler: () => getTimeline(v)
+      },
+      clear_timeline: {
+        description: "Remove tracks (one object via id, or ALL) and restore each object's pre-animation base placement \u2014 transient poses never leak into manifests/exports.",
+        params: { id: { type: "number" } },
+        handler: (p) => clearTimeline(v, p)
+      },
+      set_timeline: {
+        description: "Set the timeline duration (seconds). Without it, duration = the latest key time.",
+        params: { duration: { type: "number", min: 0.01 } },
+        handler: (p) => setTimelineDuration(v, p)
+      },
+      play_timeline: {
+        description: "Play the scene timeline (loop defaults true). The light/shadow rig is sized ONCE to the swept animation volume. Sculpt/paint/pick refuse while playing (they would bake a transient pose) \u2014 pause first.",
+        params: { loop: { type: "boolean" } },
+        requiresModel: true,
+        handler: (p) => playTimeline(v, p)
+      },
+      pause_timeline: {
+        description: "Pause timeline playback at the current playhead.",
+        handler: () => pauseTimeline(v)
+      },
+      seek_timeline: {
+        description: "Jump the playhead to `time` (seconds) and apply that exact pose \u2014 DETERMINISTIC: seek \u2192 screenshot always captures precisely this frame. The agent motion-verification loop: seek t, small screenshot, repeat (or use the MCP screenshot `times` contact sheet in one call).",
+        params: { time: { type: "number", required: true, min: 0 } },
+        requiresModel: true,
+        handler: (p) => seekTimeline(v, p)
+      },
+      clone_object: {
+        description: "Duplicate an object as a NEW scene object \u2014 the only duplication path that keeps sculpt/paint deltas (re-running add_primitive loses them). Geometry is deep-copied (sculpting the clone never displaces the original) and paint layers are cloned canvases (painting one never repaints the other; the paint texel budget is charged for the copy). transform (same shape as add_model) places the clone; without it the clone sits exactly on the original. Not supported for skinned models.",
+        params: {
+          id: { type: "number", required: true },
+          name: { type: "string" },
+          transform: { type: "object" }
+        },
+        requiresModel: true,
+        handler: (p) => v.cloneObject(p.id, { name: p.name, transform: p.transform })
+      },
+      ground_object: {
+        description: "Drop ONE object so it rests on the scene floor (world Y=0) \u2014 a PLACEMENT move (wrapper), never a vertex bake: works on skinned models, works after rotation, undoable via set_object_transform. Contrast: `ground` BAKES the active object's vertices in its local frame \u2014 use ground_object for scene composition. Returns {position, bounds}.",
+        params: { id: { type: "number", required: true } },
+        requiresModel: true,
+        handler: (p) => v.groundObject(p.id)
+      },
+      place_object: {
+        description: "Move object `id` so its bounding box rests against object `relative_to`'s box face \u2014 numbers-first relative placement with no hand arithmetic. side: WORLD-axis face of the target to attach to (+y = on top of, -y = below, +x/-x/+z/-z = beside; NEVER 'left/right' \u2014 world axes are unambiguous). gap: extra spacing along that axis. align: how the two cross axes line up (center|min|max). offset [x,y,z]: applied last \u2014 the escape hatch for deliberate overlaps (e.g. seating a sphere INTO snow). Returns {position, bounds}.",
+        params: {
+          id: { type: "number", required: true },
+          relative_to: { type: "number", required: true },
+          side: { type: "string", default: "+y", enum: ["+x", "-x", "+y", "-y", "+z", "-z"] },
+          gap: { type: "number", default: 0 },
+          align: { type: "string", default: "center", enum: ["center", "min", "max"] },
+          offset: { type: "array" }
+        },
+        requiresModel: true,
+        handler: (p) => v.placeObject(p.id, {
+          relativeTo: p.relative_to,
+          side: p.side,
+          gap: p.gap,
+          align: p.align,
+          offset: p.offset
+        })
+      },
+      look_at: {
+        description: "Rotate an object so a chosen LOCAL axis points at a world target or another object's center \u2014 aiming without direction-vector trig. Exactly ONE of target:[x,y,z] or target_id. axis = which local axis aims (default [0,0,1] = +Z 'forward'; cone/cylinder/capsule primitives are +Y-axial \u2014 pass axis:[0,1,0] to aim the tip). REPLACES the object's rotation. Returns {quaternion, rotation} (Euler degrees) \u2014 reuse the rotation for keyframes.",
+        params: {
+          id: { type: "number", required: true },
+          target: { type: "array" },
+          target_id: { type: "number" },
+          axis: { type: "array" }
+        },
+        requiresModel: true,
+        handler: (p) => v.lookAtObject(p.id, {
+          target: p.target,
+          targetId: p.target_id,
+          axis: p.axis || [0, 0, 1]
+        })
       },
       set_object_visible: {
         description: "Show/hide one object (it stays in the scene and in manifests).",
@@ -48913,7 +52504,7 @@ var ViewerControlAPI = class {
         }
       },
       set_object_transform: {
-        description: "Place an object in the scene: set its wrapper transform (NEVER baked into vertices \u2014 placement lives in the scene/manifest, not the asset). position [x,y,z]; quaternion [x,y,z,w] OR rotation [x,y,z] Euler degrees; scale [x,y,z] or uniform number. Omitted parts are unchanged. Returns the resulting transform.",
+        description: "Place an object in the scene: set its LOGICAL transform (NEVER baked into vertices \u2014 placement lives in the scene/manifest, not the asset). position [x,y,z]; quaternion [x,y,z,w] OR rotation [x,y,z] Euler degrees (about the object's PIVOT when one is set); scale [x,y,z] or uniform number. Omitted parts are unchanged. PARENT-relative once parented (= world when unparented). Returns the resulting transform. NOTE: on a keyframed object this pose is overwritten at the next seek/play \u2014 use set_keyframe.",
         params: {
           id: { type: "number", required: true },
           position: { type: "array" },
@@ -48923,15 +52514,21 @@ var ViewerControlAPI = class {
           scale_xyz: { type: "array" }
         },
         requiresModel: true,
-        handler: (p) => v.setObjectTransform(p.id, {
-          position: p.position,
-          quaternion: p.quaternion,
-          rotation: p.rotation,
-          scale: p.scale_xyz !== void 0 ? p.scale_xyz : p.scale
-        })
+        handler: (p) => {
+          const result = v.setObjectTransform(p.id, {
+            position: p.position,
+            quaternion: p.quaternion,
+            rotation: p.rotation,
+            scale: p.scale_xyz !== void 0 ? p.scale_xyz : p.scale
+          });
+          if (v._timeline && v._timeline.tracks.has(p.id)) {
+            result.note = "object has keyframed channels \u2014 this change is overwritten at the next seek/play; use set_keyframe (capture:true) to keep it.";
+          }
+          return result;
+        }
       },
       get_object_transform: {
-        description: "Read an object's placement transform {position, quaternion, scale}.",
+        description: "Read an object's placement: LOCAL {position, quaternion, scale} (parent-relative \u2014 what set_object_transform/keyframes write) plus world:{position, quaternion} (what renders show), pivot and parentId when set.",
         params: { id: { type: "number", required: true } },
         requiresModel: true,
         handler: (p) => v.getObjectTransform(p.id)
@@ -49236,10 +52833,17 @@ var ViewerControlAPI = class {
       // --- export ---
       export_obj: { description: "Export the model as OBJ text.", requiresModel: true, handler: () => v.exportAsOBJ() },
       export_glb: {
-        description: "Export the model as a GLB (binary glTF); returns a base64 data URL.",
+        description: "Export the visible scene as a GLB (binary glTF); returns a base64 data URL. Bakes sculpted geometry AND painted textures. When the timeline has tracks (or animation:true), exports glTF ANIMATIONS too (30 fps resampled; pivots composed \u2014 an off-origin rotation legitimately exports an arced position track; hierarchy preserved). texture_size (number or low/medium/high/xhigh) caps texture resolution on write \u2014 the non-destructive LoD path for authored textures. Over MCP use the export_model tool (this data URL exceeds viewer_execute's truncation cap).",
+        params: {
+          animation: { type: "boolean" },
+          texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } }
+        },
         requiresModel: true,
-        handler: async () => {
-          const buf = await v.exportAsGLB();
+        handler: async (p) => {
+          const buf = await v.exportAsGLB({
+            animation: p.animation,
+            maxTextureSize: p.texture_size
+          });
           if (!buf) return null;
           const bytes = new Uint8Array(buf);
           let bin = "";

@@ -458,6 +458,17 @@
                 </select>
             </div>
 
+            <!-- Scene timeline (backlog 046) — shown when keyframe tracks exist -->
+            <div id="timeline-bar" class="animation-bar timeline-bar" style="display: none;">
+                <span class="timeline-label" title="Scene keyframe timeline (agent-authored animation)">⏱ Timeline</span>
+                <button id="timeline-play-btn" class="btn btn-sm anim-play" title="Play/Pause timeline">▶</button>
+                <div class="timeline-scrub-wrap">
+                    <input type="range" id="timeline-scrub" class="anim-scrub" min="0" max="100" value="0" step="0.1" title="Scrub the timeline" />
+                    <div id="timeline-ticks" class="timeline-ticks"></div>
+                </div>
+                <span id="timeline-time" class="anim-time">0.0s / 0.0s</span>
+            </div>
+
             <!-- Viewer info -->
             <div id="viewer-info" style="display: none;">
                 <span id="info-vertices">0 vertices</span>

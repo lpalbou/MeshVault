@@ -18,11 +18,18 @@ When exporting to GLB with Three.js `GLTFExporter`, a common failure mode is **v
 
 ### Robust export strategy (used in MeshVault)
 - Export with **glTF convention**:
-  - Flip UV V component on export: $v \leftarrow 1 - v$
+  - Flip UV V component on export ($v \leftarrow 1 - v$) **ONLY when the UVs are
+    in GL convention** — announced by the material's texture `flipY`:
+    loader-sourced textures (OBJ/FBX/TextureLoader/paint layers) are
+    `flipY = true` = GL convention → flip; **GLB-sourced textures are
+    `flipY = false` = ALREADY glTF convention → do NOT flip** (an
+    unconditional flip double-converts and scrambles every glTF→GLB
+    round-trip into a mosaic — found by a cycle-4 agent's reload proof,
+    2026-07-11; tangent-handedness negation follows the same condition).
   - Force exported textures to `flipY = false`
 - For `DataTexture`-style sources (`image.data`), convert to a canvas in **top-to-bottom** row order before export so the PNG bytes match the original image orientation.
 
-This yields GLB textures that match the original images (no vertical flip), and a GLB that round-trips in MeshVault without UV/texture coordinate artifacts.
+This yields GLB textures that match the original images (no vertical flip), and a GLB that round-trips in MeshVault without UV/texture coordinate artifacts. Regression guard: a round-trip test compares the exported TEXCOORD_0 min/max V against the source's.
 
 ---
 
@@ -417,3 +424,118 @@ strokes must NOT invalidate per stamp — a SwiftShader composer render is
 - Idle-close headless browsers that serve ONE-SHOT requests (screenshot API: unload
   after each response + close after 5 min idle); NEVER idle-close a STATEFUL
   session (MCP: the scene IS the session).
+
+---
+
+## Articulation, timeline animation & regional repair (backlog 046, v0.7.0)
+
+Built against a 3-adversary design review and 3 live agent gauntlets. Each rule
+below prevented (or fixed) an observed failure.
+
+### Pivots are MATH, never scene-graph nodes
+The wrapper TRS is always the composition `T(p)·T(pivot)·R·S·T(−pivot)` folded
+to plain TRS (`position = p + pivot − R·S·pivot`); the LOGICAL placement
+{p,q,s} + pivot live on the registry entry. A pivot sub-group between wrapper
+and model CORRUPTS `_bakeWorldTransforms` (the group's transform bakes into
+vertices but never zeroes — double application) and splits the pose across two
+nodes (screenshot shows a rotated wing, get_object_transform says identity).
+Anything that writes RAW wrapper TRS (the gizmo) must re-derive the logical
+placement afterwards (`_syncLogicalFromWrapper`).
+
+### Keyframes store LOGICAL local TRS, playback is hand-rolled
+- Interpolate {p,q,s} then compose the pivot per frame → a keyed wing sweeps a
+  true ARC about its root; interpolating composed wrapper values cuts chords.
+- `AnimationMixer.setTime(t)` multiplies by timeScale — seek(5) at speed 2
+  lands at t=10, corrupting seek→screenshot determinism. A pure
+  `sampleTimeline(t)` + synchronous capture is exact by construction.
+- Playback writes wrapper TRS DIRECTLY — `setObjectTransform` per frame would
+  rebuild the grid/axis helpers at 60 Hz (GC storm). Size the rig ONCE at play
+  from the swept keyframe volume.
+- QUATERNIONS CANNOT ENCODE FULL TURNS: rotation[360,0,0] round-trips to
+  identity and the segment silently plays NO motion — the >120° quaternion-
+  delta check mathematically cannot catch exact 360° multiples. Track the
+  REQUESTED Euler angles per key (`k.e`), warn on ≥90° requests that collapse
+  (and on >120° steps), and show requested angles in get_timeline. Advise
+  ≤120° steps (0/90/180/... for spins) — 180° steps are direction-ambiguous.
+- basePlacement snapshot when an object gains its first track; stop/clear
+  restore it — otherwise transient animation poses leak into manifests.
+  Timeline must be CLEARED on scene replace (dangling "(removed)" tracks leak
+  into exports).
+
+### Animated GLB export: TRS nodes + node-relative geometry baking
+GLTFExporter FORCES `trs:true` when clips are present, then reads node
+position/quaternion/scale — the static path's matrix-only flat meshes export
+collapsed at the origin. The animated path builds `objNode(TRS) → mesh(identity,
+geometry baked by nodeInv × meshWorld)`, names nodes uniquely (`mv_obj_<id>` —
+PropertyBinding resolves BY NAME, first match wins, and silently DROPS
+unresolvable tracks), resamples at 30 fps with pivots composed into every
+sample, and VERIFIES the emitted channel count from the GLB's JSON chunk.
+
+### Region simplification: locked vertices, or nothing
+r170 SimplifyModifier has NO boundary locking — its border "preservation" is a
+soft cost that erodes under averaged-cost vertex selection. A crack-free
+regional decimation needs a constrained collapse where locked vertices (region
+ring + mesh borders + ALL multi-member welds = UV seams/normal creases) never
+move or disappear; a Melax collapse u→v never moves v, so the output vertex set
+is a strict subset — paint layers stay aligned with zero touch-up (texels don't
+move, only interpolation across bigger triangles). Report achievedRatio +
+locked counts: seam-dense regions legitimately decimate less than requested.
+LESSON (T3 gauntlet): a cost-function deterrent is NOT a lock. Open-boundary
+rims (split-cut edges) carried curvature=1 cost but were still collapsible —
+decimating both sides of a cut independently made the rims DIVERGE into
+visible gashes with no warning. Open edges (global welded count 1) must be
+HARD locks like seams; verified: rim edge count bit-identical across a
+straddling regional decimation.
+
+### One metric, one meaning ("three truths" trap)
+The same `openEdges` read 0 / hundreds / 439 across three tools on one mesh:
+stats counted welded cracks, inspect_region counted region-truncated perimeter
+edges, fix_mesh excluded degenerate triangles from edge multiplicity. Any
+metric reported by multiple tools MUST share one definition (welded, whole-mesh
+topology; degenerates count toward edge multiplicity until actually dropped) —
+or agents cannot detect regressions across operations.
+
+### The post-split active-object trap
+`split_object` makes the NEW part active (insert semantics), so the next brush
+targets the wrong mesh with a generic miss error. Miss errors now raycast the
+brush point against ALL objects and NAME the owner ("the point sits on object 3
+('body') but the ACTIVE object is 4 ('wing') — set_active_object first").
+Camera `views` batches must frame the SCENE for the same reason (framing a tiny
+active part puts preset cameras inside the parent mesh).
+
+## Texture forensics & persistence proofs (backlog 047, v0.7.0)
+
+Built through a 5-cycle adversarial program (repair quality, proofs, animation
+persistence). The durable lessons:
+
+### Diagnose the ATLAS before choosing the repair class
+A texture "misalignment" has two entirely different repair classes and the
+atlas topology decides between them. Coherent atlases (few semantic charts —
+one island ≈ one feature) are repairable in UV space: `transform_uv` with
+`island_of` scoping + `preview_uv_transform` bleed dry-runs. Fragmented
+photogrammetry-style atlases are NOT: the portrait measured 4,424 non-semantic
+Voronoi-like islands with the eye and mouth sharing one chart — no affine UV
+transform can move the eye without dragging the mouth, and both UV-surgery
+attempts were falsified by honest before/after renders. The correct class
+there is SCREEN-space: `project_paint` re-samples the current render at
+(screen + offset) for every texel in a world brush, so texel↔feature
+correspondence is taken from the SURFACE where it actually exists.
+`get_uv_islands` first; its island count IS the classifier.
+
+### Proof-pack discipline: numbers first, then pixels
+Every capability claim in 047 carries a machine-checkable number before any
+render: explode_view returns `minGapWorld` (negative = overlapping pairs — a
+separation verdict with no vision pass), transform_uv previews return bleed
+fractions, texture-LoD ladders report per-tier texel densities halving, and
+animated round-trips verify the emitted channel count from the GLB JSON chunk.
+Renders illustrate; numbers decide. Proof packs live outside the repo
+(~/MeshVault_assets/proofs/ + INDEX.md) because GLBs and screenshots are
+artifacts, not source.
+
+### Manifest v2: index-based references, two-pass application
+Hierarchy (`parent`), pivots and timeline tracks persist by OBJECT INDEX in
+the manifest's objects array, never by live registry id (ids are
+session-local) and never positionally against the loaded result (partial loads
+shift positions). Application is two-pass: create everything first, then wire
+parents/pivots/timeline through the index→id map, so forward references and
+per-object load failures degrade without corrupting the rest.

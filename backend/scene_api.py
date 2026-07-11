@@ -27,6 +27,8 @@ from pydantic import BaseModel
 SCENE_EXTENSION = ".mvscene"
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_SCENE_OBJECTS = 128
+MAX_TIMELINE_TRACKS = 192
+MAX_TIMELINE_KEYS = 256
 
 
 class SceneSaveRequest(BaseModel):
@@ -47,19 +49,69 @@ def validate_manifest(manifest: dict) -> dict:
     """
     if not isinstance(manifest, dict):
         raise HTTPException(status_code=422, detail="Manifest must be an object")
-    if manifest.get("version") != 1:
+    if manifest.get("version") not in (1, 2):
         raise HTTPException(status_code=422,
                             detail=f"Unsupported manifest version {manifest.get('version')!r} "
-                                   "(expected 1)")
+                                   "(expected 1 or 2)")
     objects = manifest.get("objects")
     if not isinstance(objects, list) or len(objects) == 0:
         raise HTTPException(status_code=422, detail="Manifest has no objects")
     if len(objects) > MAX_SCENE_OBJECTS:
         raise HTTPException(status_code=422,
                             detail=f"Too many objects ({len(objects)}); max {MAX_SCENE_OBJECTS}")
+
+    # v2 additive surface: per-object parent (manifest index) + pivot, top-level
+    # timeline. Bounded like everything else — a hostile manifest with 10^7 keys
+    # interpolated per frame is the segment bomb of backlog 042/045.
+    timeline = manifest.get("timeline")
+    if timeline is not None:
+        if not isinstance(timeline, dict):
+            raise HTTPException(status_code=422, detail="timeline must be an object")
+        tracks = timeline.get("tracks", [])
+        if not isinstance(tracks, list) or len(tracks) > MAX_TIMELINE_TRACKS:
+            raise HTTPException(status_code=422,
+                                detail=f"timeline.tracks must be a list of at most "
+                                       f"{MAX_TIMELINE_TRACKS}")
+        for ti, track in enumerate(tracks):
+            if not isinstance(track, dict):
+                raise HTTPException(status_code=422, detail=f"timeline.tracks[{ti}] invalid")
+            obj_ref = track.get("object")
+            if not isinstance(obj_ref, int) or not (0 <= obj_ref < len(objects)):
+                raise HTTPException(status_code=422,
+                                    detail=f"timeline.tracks[{ti}].object must be an "
+                                           "object index")
+            if track.get("channel") not in {"position", "rotation", "scale"}:
+                raise HTTPException(status_code=422,
+                                    detail=f"timeline.tracks[{ti}].channel invalid")
+            keys = track.get("keys", [])
+            if not isinstance(keys, list) or len(keys) > MAX_TIMELINE_KEYS:
+                raise HTTPException(status_code=422,
+                                    detail=f"timeline.tracks[{ti}].keys must be a list "
+                                           f"of at most {MAX_TIMELINE_KEYS}")
+            for key in keys:
+                if not isinstance(key, dict) or not isinstance(key.get("t"), (int, float)) \
+                        or not isinstance(key.get("v"), list) or len(key["v"]) > 4 \
+                        or not all(isinstance(x, (int, float)) for x in key["v"]):
+                    raise HTTPException(status_code=422,
+                                        detail=f"timeline.tracks[{ti}] has an invalid key")
+                e = key.get("e")
+                if e is not None and (not isinstance(e, list) or len(e) > 3
+                                      or not all(isinstance(x, (int, float)) for x in e)):
+                    raise HTTPException(status_code=422,
+                                        detail=f"timeline.tracks[{ti}] has an invalid key")
     for i, obj in enumerate(objects):
         if not isinstance(obj, dict):
             raise HTTPException(status_code=422, detail=f"objects[{i}] must be an object")
+        parent = obj.get("parent")
+        if parent is not None and (not isinstance(parent, int)
+                                   or not (0 <= parent < len(objects)) or parent == i):
+            raise HTTPException(status_code=422,
+                                detail=f"objects[{i}].parent must be another object's index")
+        pivot = obj.get("pivot")
+        if pivot is not None and (not isinstance(pivot, list) or len(pivot) != 3
+                                  or not all(isinstance(x, (int, float)) for x in pivot)):
+            raise HTTPException(status_code=422,
+                                detail=f"objects[{i}].pivot must be [x, y, z]")
         source = obj.get("source")
         if not isinstance(source, dict) or source.get("kind") not in {
             "file", "archive", "url", "primitive",

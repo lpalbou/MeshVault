@@ -1,7 +1,7 @@
 # MeshVault MCP Server
 
 Drive the MeshVault 3D viewer from any MCP client (Claude Desktop, Claude Code, Cursor,
-VS Code, …). The server runs a headless, GPU-optional viewer and exposes **eleven
+VS Code, …). The server runs a headless, GPU-optional viewer and exposes **thirteen
 tools** — a deliberately thin surface routed through the viewer's self-describing
 control API (one-tool-per-command surfaces measurably degrade agent performance).
 
@@ -10,9 +10,11 @@ textured), COMPOSE multi-object scenes (`load_model {add:true}` + placement comm
 persisted as `.mvscene` manifests via `save_scene`/`load_scene`), **CREATE from
 nothing** — add primitives, sculpt them with world-space brushes, paint real texture
 layers, and aim by screenshot coordinates (`pick`) — get a structured text
-description (no vision needed), discover and run any of the ~70 viewer commands
+description (no vision needed), discover and run any of the ~100 viewer commands
 (camera, render modes, lighting/IBL, transforms, cross-sections, measurement,
-animation, per-object placement, sculpt/paint), compare models geometrically, get PNG
+animation, per-object placement, sculpt/paint, regional inspect/simplify/repair,
+texture forensics + UV repair, part detection/splitting, pivots/parenting, and the
+scene keyframe timeline), compare models geometrically, get PNG
 screenshots back as proper MCP image content, and share a session with a human both
 ways — push what it sees into the running app (`open_in_app`), or pick up what the
 human sees (`get_app_state`).
@@ -88,8 +90,10 @@ interpreter and working directory).
 | `list_viewer_commands` | Every action with its parameter schema (types, ranges, defaults). Call once, then use `viewer_execute`. |
 | `get_state` | Compact state snapshot (model, camera, display, animation, lighting) — verify a command's effect without a screenshot. |
 | `compare_models` | Compare ONE reference against N candidates (1–8) **geometrically**, via shape registration — not screenshots. Per candidate: `alignment` (uniform scale ratio, rotation angle, translation — how it had to be transformed to match; unit mismatches surface as the scale ratio), `distances` (symmetric chamfer mean/p95 + Hausdorff, normalized by the reference bbox diagonal, floor-corrected for sampling noise; `asymmetry` flags missing/extra regions), `classification` (identical / near_identical / same_shape_modified / different, with `borderline` + `warnings`), and `structural` count/inventory deltas. Returns `rankingBySimilarity`. Reference or candidates may be paths or URLs; `align:false` compares in place (detects pose changes). |
-| `screenshot` | Render the model as MCP **image content** (PNG, 16–8192 px), with a JSON metadata text block first. `best_view: true` moves to the model's most detailed angle (the chosen azimuth/elevation/score come back in the metadata). `views: ["front","left","45,20"]` captures several angles — presets or "azimuth,elevation" degrees — in ONE call, images returned in order. `preset: "studio"\|"neutral"\|"dark"` pins the **full** lighting/background state to a documented look first, so renders are comparable across sessions and agents (see below). `ssao: false` + a small size (e.g. 192×192) = cheap proof render for sculpt/paint loops. |
-| `save_scene` | Persist the composed scene as a `.mvscene` manifest: per-object source + placement transform + visibility/opacity, plus scene lighting/environment/background. Objects from volatile sources (drag-drops) can't persist and are reported. |
+| `screenshot` | Render the model as MCP **image content** (PNG, 16–8192 px), with a JSON metadata text block first. `best_view: true` moves to the model's most detailed angle (the chosen azimuth/elevation/score come back in the metadata). `views: ["front","left","45,20"]` captures several angles — presets or "azimuth,elevation" degrees — in ONE call (scene-scoped framing: safe on composed scenes), images returned in order. `preset: "studio"\|"neutral"\|"dark"` pins the **full** lighting/background state to a documented look first, so renders are comparable across sessions and agents (see below). `ssao: false` + a small size (e.g. 192×192) = cheap proof render for sculpt/paint loops. `times: [0, 0.5, 1, ...]` (≤12) returns ONE **motion contact sheet** — the timeline sought to each time, tiles labeled, camera auto-framed to the whole swept motion — THE cheap animation preview. |
+| `get_texture` | The active object's texture rendered in **TEXTURE SPACE** as MCP image content: the image + the mesh's UV wireframe (green), crosshair `markers` at picked UVs, an orange outline of the chart under `outline_island_of`, and a `crop_center`/`crop_size` zoom. THE texture-to-mesh misalignment diagnostic — `pick` gives a surface point's `.uv`; if its marker sits offset from the matching texture feature, repair with `transform_uv` (coherent atlases) or `project_paint` (fragmented atlases — check `get_uv_islands` first). |
+| `export_model` | Write the visible scene to a **GLB file** — the persistence path for sculpted geometry, painted textures, articulation and timeline animation (none survive in `.mvscene`). `animation` (auto when the timeline has tracks) exports glTF animations (30 fps resampled, pivots composed, hierarchy preserved); `texture_size` (number or `low/medium/high/xhigh`) caps texture resolution on write — the non-destructive LoD path. UV convention handled per texture source (glTF round-trips are bit-exact). Verify: re-`load_model` the file → `get_state().animation` + a screenshot. |
+| `save_scene` | Persist the composed scene as a `.mvscene` manifest: per-object source + placement transform + visibility/opacity, plus scene lighting/environment/background — **v2** adds hierarchy (`parent`), pivots, and the keyframe timeline (index-based references, bounded). Objects from volatile sources (drag-drops, split parts) can't persist and are reported; sculpt/paint deltas need `export_model`. |
 | `load_scene` | Rebuild a composed scene from a `.mvscene` file (replaces the current scene). Unresolvable objects degrade per-object; the rest load. Archive-member sources are app-only. |
 | `open_in_app` | Push the model you are inspecting — plus your current camera pose — into the **running MeshVault app** (`meshvault`), live, so a human co-reviews exactly what you see. Discovers the app via `~/.meshvault/app_session.json` (override: `MESHVAULT_APP_URL` + `MESHVAULT_TOKEN`). Returns `{clients, deep_link}`; when no tab is connected, hand the human the `deep_link` (the app honors `?path=`/`?dir=`/`?scene=` deep links). |
 | `get_app_state` | The reverse of `open_in_app`: read **what the human is looking at** in the running app — current asset path, camera pose, and freshness (`age_seconds`). Continue their session headless: `load_model` the returned path, then `viewer_execute {action:"set_camera"}` with the returned camera. |
@@ -195,6 +199,47 @@ Rules an agent must know:
   sculpted geometry AND painted textures into a self-contained file. `list_objects`
   exposes `painted` / `sculpted` / `modified` (union) flags per object — a precise
   audit trail without a screenshot.
+
+### Inspect, repair, articulate, animate (backlog 046)
+
+All through `viewer_execute`; quantified returns everywhere (renders cost seconds
+on SwiftShader, numbers cost nothing).
+
+```
+viewer_execute { action: "inspect_region", params: { grid: 4 } }
+    → cells sorted by simplification OPPORTUNITY (flat × dense), each with
+      ready-to-use center+radius
+viewer_execute { action: "simplify_region",
+                 params: { center: [...], radius: 0.5, ratio: 0.3 } }
+    → {region: {trianglesBefore, trianglesAfter}, achievedRatio, locked{ring, seams}}
+      — boundary ring LOCKED (no cracks), UV seams locked (no tears)
+viewer_execute { action: "fix_mesh", params: {} }
+    → per-op counts + {openEdges, degenerate} before/after deltas
+viewer_execute { action: "clone_paint",
+                 params: { from: [clean donor], to: [defect], radius: 0.08 } }
+    → {cloned, meanAlpha} — world-space heal brush (donor within 45° of the
+      defect's surface orientation; blur_paint softens the boundary)
+
+viewer_execute { action: "detect_parts" }        → parts + partitionId (honesty
+      notes: fused single-component meshes are NORMAL for image-to-3D output)
+viewer_execute { action: "split_object", params: { axis: "y", at: 1.29 } }
+    → {created: [{objectId, suggestedPivot, ...}], openEdgesAdded, note}
+      (cut faces are HOLLOW — sweeps ≲30°; the new part becomes ACTIVE)
+viewer_execute { action: "set_pivot", params: { id: 2, point: <suggestedPivot> } }
+viewer_execute { action: "set_parent", params: { id: 2, parent_id: 1 } }
+viewer_execute { action: "set_keyframe",
+                 params: { id: 2, time: 0.8, rotation: [-12, 0, 0],
+                           easing: "ease_in_out" } }
+    → teaching notes on short-arc (>120° steps) AND the 360°=identity trap
+screenshot { times: [0, 0.5, 1, 1.5, 2, 2.5] }   → auto-framed motion sheet
+export_model { path: "/abs/nod.glb", texture_size: "medium" }
+```
+
+Traps the tools teach in-line: brushes target the ACTIVE object (after a split
+the NEW part is active — miss errors name the object your point actually sits
+on); full-turn rotation keys collapse to identity (key ≤120° steps); sculpt/
+paint/pick refuse while the timeline plays; `reset` after a split restores the
+SPLIT state.
 
 ### Render presets (`screenshot { preset }`)
 

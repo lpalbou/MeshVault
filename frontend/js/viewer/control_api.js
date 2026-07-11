@@ -18,15 +18,40 @@ import { describeScene } from "./describe_scene.js";
 import { meshStatistics } from "./mesh_stats.js";
 import { samplePoints } from "./sample_points.js";
 import {
+    blurPaint,
     clearPaint,
+    clonePaint,
     fillPaint,
     paintStamp,
     paintStroke,
     pick,
     raycast,
+    getUVIslands,
+    previewUVTransform,
+    projectPaint,
+    renderTexture,
+    resizeTexture,
     sculptStamp,
     sculptStroke,
+    transformUV,
 } from "./sculpt.js";
+import { detectParts, splitObject } from "./articulation.js";
+import {
+    fixMesh,
+    inspectRegion,
+    inspectTexture,
+    simplifyRegion,
+} from "./repair.js";
+import {
+    clearTimeline,
+    deleteKeyframe,
+    getTimeline,
+    pauseTimeline,
+    playTimeline,
+    seekTimeline,
+    setKeyframe,
+    setTimelineDuration,
+} from "./timeline.js";
 
 export class ViewerControlAPI {
     /**
@@ -168,8 +193,17 @@ export class ViewerControlAPI {
                 else { values[key] = undefined; continue; }
             }
             if (spec.type === "number") {
+                // Named aliases let agents use semantic tiers ("high") where the
+                // canonical type stays numeric (copy-pasteable from inspections).
+                if (spec.aliases && typeof v === "string" && v in spec.aliases) {
+                    v = spec.aliases[v];
+                }
                 const n = Number(v);
-                if (Number.isNaN(n)) return { error: `Param '${key}' must be a number` };
+                if (Number.isNaN(n)) {
+                    const hint = spec.aliases
+                        ? ` or one of: ${Object.keys(spec.aliases).join(", ")}` : "";
+                    return { error: `Param '${key}' must be a number${hint}` };
+                }
                 if (spec.min !== undefined && n < spec.min) return { error: `Param '${key}' must be >= ${spec.min}` };
                 if (spec.max !== undefined && n > spec.max) return { error: `Param '${key}' must be <= ${spec.max}` };
                 v = n;
@@ -427,7 +461,8 @@ export class ViewerControlAPI {
                         frame: p.frame,
                     });
                     this._emit("object_added", { objectId: result.objectId, name: v.getState().model.name });
-                    return { stats: result, objectId: result.objectId, scene: v.getState().scene };
+                    // Terse: no scene dump (list_objects is the roster query).
+                    return { objectId: result.objectId, stats: result };
                 },
             },
             add_primitive: {
@@ -492,7 +527,7 @@ export class ViewerControlAPI {
                     falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
                     shape: { type: "string", enum: ["round", "square"] },
                     max_normal_angle: { type: "number", min: 1, max: 180 },
-                    texture_size: { type: "number", min: 64, max: 2048 },
+                    texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
                 },
                 requiresModel: true,
                 handler: (p) => paintStamp(v, p),
@@ -510,7 +545,7 @@ export class ViewerControlAPI {
                     falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
                     shape: { type: "string", enum: ["round", "square"] },
                     max_normal_angle: { type: "number", min: 1, max: 180 },
-                    texture_size: { type: "number", min: 64, max: 2048 },
+                    texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
                 },
                 requiresModel: true,
                 handler: (p) => paintStroke(v, p),
@@ -519,7 +554,7 @@ export class ViewerControlAPI {
                 description: "Flood the ACTIVE object's whole paint layer with one color (a fresh base coat before detailing).",
                 params: {
                     color: { type: "string", required: true },
-                    texture_size: { type: "number", min: 64, max: 2048 },
+                    texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
                 },
                 requiresModel: true,
                 handler: (p) => fillPaint(v, p),
@@ -585,10 +620,294 @@ export class ViewerControlAPI {
                 handler: (p) => { v.setActiveObject(p.id); return { activeObjectId: p.id }; },
             },
             remove_object: {
-                description: "Remove ONE object from the scene (disposes its GPU resources). If it was active, the most recently added remaining object becomes active.",
+                description: "Remove ONE object from the scene (disposes its GPU resources). If it was active, the most recently added remaining object becomes active. Returns just {removed} — use list_objects for the roster.",
                 params: { id: { type: "number", required: true } },
                 requiresModel: true,
-                handler: (p) => { v.removeObject(p.id); return { removed: p.id, scene: v.getState().scene }; },
+                handler: (p) => { v.removeObject(p.id); return { removed: p.id }; },
+            },
+            // --- articulation (backlog 046) ---
+            detect_parts: {
+                description: "Find candidate articulation parts of the ACTIVE object. Strategy: the asset's own mesh partition first, then material groups, then welded connected components. HONESTY: image-to-3D outputs are usually ONE fused component — finding nothing (or only SOME parts, e.g. two of four wheels) is NORMAL; verify candidates with focus + screenshot before splitting. Returns {parts:[{partId, kind, triangles, center, size, suggestedPivot}], partitionId} — pass partitionId to split_object (parts go stale when geometry changes). When parts.length <= 1, articulation needs split_object with a plane cut.",
+                requiresModel: true,
+                handler: () => detectParts(v),
+            },
+            split_object: {
+                description: "Extract part(s) of the ACTIVE object into a NEW scene object — the articulation knife. Selection: parts:[partId,...] + partitionId (from detect_parts) OR a plane cut: {axis:'x'|'y'|'z', at:<world coordinate>, side:'+'|'-'} (side picks WHICH half is extracted, default '+' — cutting a LEFT wing needs side:'-') / {plane:{point,normal}} (oblique; the +normal side is extracted). Plane cuts classify whole triangles; CUT FACES ARE HOLLOW (capping would invent wrong UVs) — keep articulation sweeps ≲30° or orient cuts away from camera. Returns {created:[{objectId, suggestedPivot, ...}], remaining, openEdgesAdded} — suggestedPivot is the cut centroid: set_pivot there, set_parent, then rotate. The NEW part becomes active; keep_active:true keeps the SOURCE active instead (split→split sequences in one batch). Painted materials are deep-copied (budget charged). Refuses skinned/animated/instanced objects. After a split: old mesh ids + partIds are void; reset restores the SPLIT state.",
+                params: {
+                    parts: { type: "array" },
+                    partitionId: { type: "number" },
+                    plane: { type: "object" },
+                    axis: { type: "string", enum: ["x", "y", "z"] },
+                    at: { type: "number" },
+                    side: { type: "string", enum: ["+", "-"] },
+                    name: { type: "string" },
+                    keep_active: { type: "boolean", default: false },
+                },
+                requiresModel: true,
+                handler: (p) => splitObject(v, p),
+            },
+            set_parent: {
+                description: "Build an articulation hierarchy: parent one object under another (or null to unparent). keepWorld (default true) preserves the world pose. After parenting, set/get_object_transform are PARENT-relative (unchanged for unparented objects); get_object_transform returns BOTH local and world. Rotating the parent moves the whole subtree — chain base->shoulder->forearm->gripper for a robot arm. Cycles and non-uniformly-scaled ancestors are refused with the reason.",
+                params: {
+                    id: { type: "number", required: true },
+                    parent_id: { type: "number" },
+                    keep_world: { type: "boolean", default: true },
+                },
+                requiresModel: true,
+                handler: (p) => v.setParent(p.id, p.parent_id !== undefined ? p.parent_id : null, p.keep_world),
+            },
+            set_pivot: {
+                description: "Set an object's rotation ORIGIN (world point — from split_object's suggestedPivot, pick, or raycast). Never moves the object; afterwards `rotation` in set_object_transform AND keyframes swings about this pivot (wing root, elbow, neck base). Pivot is authored data: persisted in manifests, not cleared by reset.",
+                params: {
+                    id: { type: "number", required: true },
+                    point: { type: "array", required: true },
+                },
+                requiresModel: true,
+                handler: (p) => v.setPivot(p.id, p.point),
+            },
+
+            // --- mesh/texture inspection + repair (backlog 046) ---
+            inspect_region: {
+                description: "Measure mesh density WHERE IT MATTERS — the observation for adaptive simplification. Probe mode {center, radius|radius_rel}: {triangles, surfaceArea, triPerUnit2, edgeLength{min,median,p95}, dihedralMeanDeg, openEdges}. Grid mode {grid:2..5}: N³ cells over the object, sorted by simplification OPPORTUNITY (flat × dense = detail unjustified by curvature), each with center+radius ready to feed simplify_region. Decision rule: high triPerUnit2 + low dihedralMeanDeg = over-dense for what it represents.",
+                params: {
+                    center: { type: "array" },
+                    radius: { type: "number", min: 0.000001 },
+                    radius_rel: { type: "number", min: 0.000001, max: 1 },
+                    grid: { type: "number", min: 2, max: 5 },
+                },
+                requiresModel: true,
+                handler: (p) => inspectRegion(v, p),
+            },
+            simplify_region: {
+                description: "Decimate ONLY a brush region of the ACTIVE object — adaptive resolution by agent judgment (dense where detail matters, coarse where it doesn't). ratio = fraction of region vertices to KEEP (0.25 ≈ 4× coarser). The region boundary ring is LOCKED (no cracks) and UV-seam welds are locked (no seam tears) — hard-edged/seam-dense regions decimate less than requested; read achievedRatio. Returns quantified before/after so no verification render is needed. Region cap 50k vertices. NOTE: geometry is REPLACED — reset baseline moves (earlier sculpt edits become permanent).",
+                params: {
+                    center: { type: "array", required: true },
+                    radius: { type: "number", min: 0.000001 },
+                    radius_rel: { type: "number", min: 0.000001, max: 1 },
+                    ratio: { type: "number", required: true, min: 0.05, max: 0.9 },
+                },
+                requiresModel: true,
+                handler: (p) => simplifyRegion(v, p),
+            },
+            fix_mesh: {
+                description: "Targeted repair passes on the ACTIVE object. operations (default ['degenerate','normals']): degenerate = drop zero-area/collapsed triangles; normals = recompute vertex normals; flipped_faces = OPT-IN per-MESH winding reversal (only decidable on closed meshes with negative signed volume — per-face flip detection is unreliable and not offered). Returns per-op counts + issue deltas {openEdges, degenerate} so no re-describe is needed.",
+                params: { operations: { type: "array" } },
+                requiresModel: true,
+                handler: (p) => fixMesh(v, p),
+            },
+            inspect_texture: {
+                description: "Per-material texture audit of the ACTIVE object: resolution + colorSpace, painted flag, texel DENSITY (texels per world unit, area-weighted p5/median/p95) and the lowest-density world spots (feed to focus/paint — 'too low-res HERE'). Stamp fidelity rule: a paint stamp holds detail when radius × median density >> 8 texels. zeroUvArea counts triangles with broken/projected UVs.",
+                requiresModel: true,
+                handler: () => inspectTexture(v),
+            },
+            blur_paint: {
+                description: "Soften/defect-smooth the texture inside a world-space brush (Gaussian, masked to the brush footprint — atlas neighbors never bleed in). strength 0..1 controls blend and kernel size. Requires a READABLE texture (KTX2/GPU-only refuse with the reason). Creates a paint layer from the existing texture on first use.",
+                params: {
+                    center: { type: "array", required: true },
+                    radius: { type: "number", min: 0.000001 },
+                    radius_rel: { type: "number", min: 0.000001, max: 1 },
+                    strength: { type: "number", min: 0, max: 1 },
+                    texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+                },
+                requiresModel: true,
+                handler: (p) => blurPaint(v, p),
+            },
+            clone_paint: {
+                description: "Heal brush: copy texture from one surface region onto another via WORLD-space correspondence (works across UV islands — pick a clean `from` area and the defect `to` area on the SAME object). Source and destination must face similar directions (≤45°, else a teaching error). Returns {cloned, meanAlpha}. The repair workflow: close-up screenshot → pick the defect → pick a clean donor area → clone_paint → blur_paint the boundary.",
+                params: {
+                    from: { type: "array", required: true },
+                    to: { type: "array", required: true },
+                    radius: { type: "number", min: 0.000001 },
+                    radius_rel: { type: "number", min: 0.000001, max: 1 },
+                    strength: { type: "number", min: 0, max: 1 },
+                    hardness: { type: "number", min: 0, max: 1 },
+                    falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+                    texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+                },
+                requiresModel: true,
+                handler: (p) => clonePaint(v, p),
+            },
+            render_texture: {
+                description: "SEE the ACTIVE object's texture in TEXTURE SPACE: the texture image with the UV wireframe overlaid (green — where the mesh actually samples), optional crosshair markers at given UVs, an orange OUTLINE of the UV island containing outline_island_of, and an optional zoom crop (crop_center + crop_size in UV units — the measurement view for tiny charts). THE diagnostic for texture-to-mesh misalignment: pick a 3D feature (pick returns .uv), then render with markers + outline_island_of at that uv. Returns a PNG data URL (over MCP use the get_texture tool — this exceeds viewer_execute's truncation cap).",
+                params: {
+                    size: { type: "number", min: 128, max: 2048 },
+                    wireframe: { type: "boolean", default: true },
+                    marker: { type: "array" },
+                    markers: { type: "array" },
+                    marker_size: { type: "number", min: 4, max: 60 },
+                    labels: { type: "boolean", default: true },
+                    outline_island_of: { type: "array" },
+                    crop_center: { type: "array" },
+                    crop_size: { type: "number", min: 0.02, max: 1 },
+                },
+                requiresModel: true,
+                handler: (p) => renderTexture(v, p),
+            },
+            transform_uv: {
+                description: "REPAIR texture-to-mesh misalignment by transforming UV coordinates: uv' = pivot + (uv − pivot)·scale + offset. island_of: [u,v] scopes the transform to ONE UV chart (the island containing that uv) — fragmented atlases (generated meshes) have PER-CHART warps no global affine can fix: move only the offending chart (eyes chart +v) without dragging every other chart into its neighbors (the bleed trade-off). ALWAYS dry-run with preview_uv_transform first (bleed/out-of-bounds fractions). Workflow: pick the 3D feature (.uv) → get_texture {markers, outline_island_of} → preview_uv_transform → transform_uv → verify. UV edits persist and EXPORT; reset does not undo (reload restores).",
+                params: {
+                    offset: { type: "array" },
+                    scale: { type: "array" },
+                    pivot: { type: "array" },
+                    island_of: { type: "array" },
+                },
+                requiresModel: true,
+                handler: (p) => transformUV(v, p),
+            },
+            get_uv_islands: {
+                description: "UV island (chart) statistics of the ACTIVE object — run BEFORE planning any island-scoped UV repair: {islandCount, largest: [{island, vertices, uvBbox}], at: [{uv, island, vertices}]} for given uvs. A FRAGMENTED atlas (hundreds+ of non-semantic islands — photogrammetry/generated meshes) means feature≠island: island-scoped transform_uv will trade alignment for seam blotches, and the note says to use project_paint instead. `at` answers 'which chart does this pick's uv live in' (two features sharing one island = UV surgery cannot separate them).",
+                params: {
+                    max: { type: "number", min: 1, max: 32 },
+                    at: { type: "array" },
+                },
+                requiresModel: true,
+                handler: (p) => getUVIslands(v, p),
+            },
+            project_paint: {
+                description: "Texture repair through SCREEN space — THE fix for misalignment BAKED INTO the texture on fragmented atlases (where texel↔feature correspondence exists on the surface but not in UV space). Renders the CURRENT view, then every texel in the world-space brush samples the render at (its screen position + screen_offset) — content slides across the SURFACE regardless of UV islands: screen_offset [0, +20] moves what you see 20px DOWN the surface (e.g. an iris painted too high). Offsets: screen_offset [dx,dy] in projection pixels (camera-dependent) or surface_offset [right,down] in WORLD units (camera-independent — same magnitude from any framing; preferred). Workflow: face the feature head-on (preset 'neutral' minimizes baked shading) → pick the feature center → project_paint {center, radius, surface_offset} → fresh screenshot to verify. Occlusion ignored — use on convex camera-facing regions. Returns {painted, meanAlpha}.",
+                params: {
+                    center: { type: "array", required: true },
+                    radius: { type: "number", min: 0.000001 },
+                    radius_rel: { type: "number", min: 0.000001, max: 1 },
+                    screen_offset: { type: "array" },
+                    surface_offset: { type: "array" },
+                    strength: { type: "number", min: 0, max: 1 },
+                    hardness: { type: "number", min: 0, max: 1 },
+                    falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+                    texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+                },
+                requiresModel: true,
+                handler: (p) => projectPaint(v, p),
+            },
+            preview_uv_transform: {
+                description: "DRY-RUN a transform_uv: for the would-be offset/scale (optionally scoped by island_of), report {clean, bleedFraction, outOfBoundsFraction, verdict} — the fraction of transformed samples that would land on texels owned by OTHER UV islands (visible contamination) or leave [0,1]². Replaces probe-render-revert loops: make the alignment-vs-bleed trade-off quantitative BEFORE mutating.",
+                params: {
+                    offset: { type: "array" },
+                    scale: { type: "array" },
+                    pivot: { type: "array" },
+                    island_of: { type: "array" },
+                },
+                requiresModel: true,
+                handler: (p) => previewUVTransform(v, p),
+            },
+            explode_view: {
+                description: "EXPLODED VIEW for articulation proofs: offset every object outward from the scene centroid so separate parts read as separate parts (factor 1 ≈ clearly separated; 0.3 subtle). Returns per-object WORLD displacements and minGapWorld — the minimum pairwise AABB gap (negative = pairs still overlap, listed in `overlapping`: raise the factor BEFORE spending a screenshot). explode_view {factor: 0} RESTORES exact placements — always restore before save_scene/export. The proof loop: explode → check minGapWorld > 0 → screenshot → restore.",
+                params: { factor: { type: "number", required: true, min: 0, max: 5 } },
+                requiresModel: true,
+                handler: (p) => v.explodeView(p.factor),
+            },
+            resize_texture: {
+                description: "Re-allocate the ACTIVE object's PAINT layers at a new resolution (64..4096 or tiers low/medium/high/xhigh). filter:'smooth' (default) for quality downscale; 'nearest' preserves crisp square-stamp edges when upscaling. Only paint layers — authored textures are downsampled at export (export_glb texture_size) instead, non-destructively. Returns budget state.",
+                params: {
+                    size: { type: "number", required: true, min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+                    filter: { type: "string", enum: ["smooth", "nearest"] },
+                },
+                requiresModel: true,
+                handler: (p) => resizeTexture(v, p),
+            },
+
+            // --- timeline / keyframe animation (backlog 046) ---
+            set_keyframe: {
+                description: "Key an object's pose at `time` (seconds). Give explicit channels (position [x,y,z], rotation [x,y,z] Euler° or quaternion, scale) OR capture:true to key the object's CURRENT pose — the natural loop: pose with set_object_transform/look_at, then capture. With capture, `channels` narrows what gets keyed (e.g. ['rotation'] for a joint — avoids constant position/scale tracks bloating the export). Values are LOCAL (parent-relative) and rotation swings about the object's pivot. easing (out of this key): linear|step|ease_in|ease_out|ease_in_out. TEACHING: rotation interpolates the SHORT arc — a note fires when a segment exceeds 120° (use midpoint keys for full spins: 0/180/360). Setting a key pauses playback.",
+                params: {
+                    id: { type: "number", required: true },
+                    time: { type: "number", required: true, min: 0 },
+                    position: { type: "array" },
+                    rotation: { type: "array" },
+                    quaternion: { type: "array" },
+                    scale: { type: "number" },
+                    easing: { type: "string", enum: ["linear", "step", "ease_in", "ease_out", "ease_in_out"] },
+                    capture: { type: "boolean", default: false },
+                    channels: { type: "array" },
+                },
+                requiresModel: true,
+                handler: (p) => setKeyframe(v, p),
+            },
+            delete_keyframe: {
+                description: "Delete keyframes of an object: at an exact `time`, a whole `channel` (position|rotation|scale), or ALL its keys (omit both).",
+                params: {
+                    id: { type: "number", required: true },
+                    time: { type: "number", min: 0 },
+                    channel: { type: "string", enum: ["position", "rotation", "scale"] },
+                },
+                requiresModel: true,
+                handler: (p) => deleteKeyframe(v, p),
+            },
+            get_timeline: {
+                description: "Compact dump of the scene timeline: duration, playhead, per-object tracks with keys (rotations shown as derived Euler degrees).",
+                handler: () => getTimeline(v),
+            },
+            clear_timeline: {
+                description: "Remove tracks (one object via id, or ALL) and restore each object's pre-animation base placement — transient poses never leak into manifests/exports.",
+                params: { id: { type: "number" } },
+                handler: (p) => clearTimeline(v, p),
+            },
+            set_timeline: {
+                description: "Set the timeline duration (seconds). Without it, duration = the latest key time.",
+                params: { duration: { type: "number", min: 0.01 } },
+                handler: (p) => setTimelineDuration(v, p),
+            },
+            play_timeline: {
+                description: "Play the scene timeline (loop defaults true). The light/shadow rig is sized ONCE to the swept animation volume. Sculpt/paint/pick refuse while playing (they would bake a transient pose) — pause first.",
+                params: { loop: { type: "boolean" } },
+                requiresModel: true,
+                handler: (p) => playTimeline(v, p),
+            },
+            pause_timeline: {
+                description: "Pause timeline playback at the current playhead.",
+                handler: () => pauseTimeline(v),
+            },
+            seek_timeline: {
+                description: "Jump the playhead to `time` (seconds) and apply that exact pose — DETERMINISTIC: seek → screenshot always captures precisely this frame. The agent motion-verification loop: seek t, small screenshot, repeat (or use the MCP screenshot `times` contact sheet in one call).",
+                params: { time: { type: "number", required: true, min: 0 } },
+                requiresModel: true,
+                handler: (p) => seekTimeline(v, p),
+            },
+
+            clone_object: {
+                description: "Duplicate an object as a NEW scene object — the only duplication path that keeps sculpt/paint deltas (re-running add_primitive loses them). Geometry is deep-copied (sculpting the clone never displaces the original) and paint layers are cloned canvases (painting one never repaints the other; the paint texel budget is charged for the copy). transform (same shape as add_model) places the clone; without it the clone sits exactly on the original. Not supported for skinned models.",
+                params: {
+                    id: { type: "number", required: true },
+                    name: { type: "string" },
+                    transform: { type: "object" },
+                },
+                requiresModel: true,
+                handler: (p) => v.cloneObject(p.id, { name: p.name, transform: p.transform }),
+            },
+            ground_object: {
+                description: "Drop ONE object so it rests on the scene floor (world Y=0) — a PLACEMENT move (wrapper), never a vertex bake: works on skinned models, works after rotation, undoable via set_object_transform. Contrast: `ground` BAKES the active object's vertices in its local frame — use ground_object for scene composition. Returns {position, bounds}.",
+                params: { id: { type: "number", required: true } },
+                requiresModel: true,
+                handler: (p) => v.groundObject(p.id),
+            },
+            place_object: {
+                description: "Move object `id` so its bounding box rests against object `relative_to`'s box face — numbers-first relative placement with no hand arithmetic. side: WORLD-axis face of the target to attach to (+y = on top of, -y = below, +x/-x/+z/-z = beside; NEVER 'left/right' — world axes are unambiguous). gap: extra spacing along that axis. align: how the two cross axes line up (center|min|max). offset [x,y,z]: applied last — the escape hatch for deliberate overlaps (e.g. seating a sphere INTO snow). Returns {position, bounds}.",
+                params: {
+                    id: { type: "number", required: true },
+                    relative_to: { type: "number", required: true },
+                    side: { type: "string", default: "+y", enum: ["+x", "-x", "+y", "-y", "+z", "-z"] },
+                    gap: { type: "number", default: 0 },
+                    align: { type: "string", default: "center", enum: ["center", "min", "max"] },
+                    offset: { type: "array" },
+                },
+                requiresModel: true,
+                handler: (p) => v.placeObject(p.id, {
+                    relativeTo: p.relative_to, side: p.side, gap: p.gap,
+                    align: p.align, offset: p.offset,
+                }),
+            },
+            look_at: {
+                description: "Rotate an object so a chosen LOCAL axis points at a world target or another object's center — aiming without direction-vector trig. Exactly ONE of target:[x,y,z] or target_id. axis = which local axis aims (default [0,0,1] = +Z 'forward'; cone/cylinder/capsule primitives are +Y-axial — pass axis:[0,1,0] to aim the tip). REPLACES the object's rotation. Returns {quaternion, rotation} (Euler degrees) — reuse the rotation for keyframes.",
+                params: {
+                    id: { type: "number", required: true },
+                    target: { type: "array" },
+                    target_id: { type: "number" },
+                    axis: { type: "array" },
+                },
+                requiresModel: true,
+                handler: (p) => v.lookAtObject(p.id, {
+                    target: p.target, targetId: p.target_id, axis: p.axis || [0, 0, 1],
+                }),
             },
             set_object_visible: {
                 description: "Show/hide one object (it stays in the scene and in manifests).",
@@ -609,7 +928,7 @@ export class ViewerControlAPI {
                 handler: (p) => { v.setObjectOpacity(p.id, p.opacity); return true; },
             },
             set_object_transform: {
-                description: "Place an object in the scene: set its wrapper transform (NEVER baked into vertices — placement lives in the scene/manifest, not the asset). position [x,y,z]; quaternion [x,y,z,w] OR rotation [x,y,z] Euler degrees; scale [x,y,z] or uniform number. Omitted parts are unchanged. Returns the resulting transform.",
+                description: "Place an object in the scene: set its LOGICAL transform (NEVER baked into vertices — placement lives in the scene/manifest, not the asset). position [x,y,z]; quaternion [x,y,z,w] OR rotation [x,y,z] Euler degrees (about the object's PIVOT when one is set); scale [x,y,z] or uniform number. Omitted parts are unchanged. PARENT-relative once parented (= world when unparented). Returns the resulting transform. NOTE: on a keyframed object this pose is overwritten at the next seek/play — use set_keyframe.",
                 params: {
                     id: { type: "number", required: true },
                     position: { type: "array" },
@@ -619,15 +938,25 @@ export class ViewerControlAPI {
                     scale_xyz: { type: "array" },
                 },
                 requiresModel: true,
-                handler: (p) => v.setObjectTransform(p.id, {
-                    position: p.position,
-                    quaternion: p.quaternion,
-                    rotation: p.rotation,
-                    scale: p.scale_xyz !== undefined ? p.scale_xyz : p.scale,
-                }),
+                handler: (p) => {
+                    const result = v.setObjectTransform(p.id, {
+                        position: p.position,
+                        quaternion: p.quaternion,
+                        rotation: p.rotation,
+                        scale: p.scale_xyz !== undefined ? p.scale_xyz : p.scale,
+                    });
+                    // Silent-wrongness killer: a keyframed pose vanishes at the
+                    // next seek — tell the agent NOW, not after a wasted render.
+                    if (v._timeline && v._timeline.tracks.has(p.id)) {
+                        result.note = "object has keyframed channels — this change is "
+                            + "overwritten at the next seek/play; use set_keyframe "
+                            + "(capture:true) to keep it.";
+                    }
+                    return result;
+                },
             },
             get_object_transform: {
-                description: "Read an object's placement transform {position, quaternion, scale}.",
+                description: "Read an object's placement: LOCAL {position, quaternion, scale} (parent-relative — what set_object_transform/keyframes write) plus world:{position, quaternion} (what renders show), pivot and parentId when set.",
                 params: { id: { type: "number", required: true } },
                 requiresModel: true,
                 handler: (p) => v.getObjectTransform(p.id),
@@ -882,10 +1211,17 @@ export class ViewerControlAPI {
             // --- export ---
             export_obj: { description: "Export the model as OBJ text.", requiresModel: true, handler: () => v.exportAsOBJ() },
             export_glb: {
-                description: "Export the model as a GLB (binary glTF); returns a base64 data URL.",
+                description: "Export the visible scene as a GLB (binary glTF); returns a base64 data URL. Bakes sculpted geometry AND painted textures. When the timeline has tracks (or animation:true), exports glTF ANIMATIONS too (30 fps resampled; pivots composed — an off-origin rotation legitimately exports an arced position track; hierarchy preserved). texture_size (number or low/medium/high/xhigh) caps texture resolution on write — the non-destructive LoD path for authored textures. Over MCP use the export_model tool (this data URL exceeds viewer_execute's truncation cap).",
+                params: {
+                    animation: { type: "boolean" },
+                    texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+                },
                 requiresModel: true,
-                handler: async () => {
-                    const buf = await v.exportAsGLB();
+                handler: async (p) => {
+                    const buf = await v.exportAsGLB({
+                        animation: p.animation,
+                        maxTextureSize: p.texture_size,
+                    });
                     if (!buf) return null;
                     const bytes = new Uint8Array(buf);
                     let bin = "";

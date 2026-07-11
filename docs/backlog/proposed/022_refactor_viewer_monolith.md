@@ -12,6 +12,17 @@
 > the physical split of the still-large `viewer_3d.js` (~3.6k lines) into cohesive modules
 > (scene / loaders / texture-matching / transforms / measure / animation / export). The
 > decoupling + harness now make that split much lower-risk.
+>
+> Update 2026-07-11: urgency raised. 045–047 grew `viewer_3d.js` to ~6.4k lines even
+> though the NEW capability code landed in focused modules (`viewer/sculpt.js`,
+> `viewer/timeline.js`, `viewer/articulation.js`, `viewer/repair.js`, `viewer/control_api.js`
+> — that pattern works and is the template). The remaining monolith mass is the object
+> registry + placement/pivot composition, camera/framing, lighting/environment, the five
+> loaders, bake transforms, and the export builder. Extraction candidates in order of
+> cohesion: `viewer/registry.js` (entries, logical placement, hierarchy),
+> `viewer/exporter.js` (`_appendExportMesh` + animated-GLB builder), `viewer/loaders/*`.
+> Precondition: commit the E2E suites first (`0048`) — they are the behavior guard the
+> 2026-07-05 note asked for.
 
 ## Summary
 

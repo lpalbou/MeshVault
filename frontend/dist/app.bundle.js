@@ -27832,9 +27832,9 @@ var inflt = function(dat, st, buf, dict) {
         lm = flrm, dm = fdrm, lbt = 9, dbt = 5;
       else if (type == 2) {
         var hLit = bits(dat, pos, 31) + 257, hcLen = bits(dat, pos + 10, 15) + 4;
-        var tl = hLit + bits(dat, pos + 5, 31) + 1;
+        var tl2 = hLit + bits(dat, pos + 5, 31) + 1;
         pos += 14;
-        var ldt = new u8(tl);
+        var ldt = new u8(tl2);
         var clt = new u8(19);
         for (var i = 0; i < hcLen; ++i) {
           clt[clim[i]] = bits(dat, pos + i * 3, 7);
@@ -27842,7 +27842,7 @@ var inflt = function(dat, st, buf, dict) {
         pos += hcLen * 3;
         var clb = max(clt), clbmsk = (1 << clb) - 1;
         var clm = hMap(clt, clb, 1);
-        for (var i = 0; i < tl; ) {
+        for (var i = 0; i < tl2; ) {
           var r = clm[bits(dat, pos, clbmsk)];
           pos += r & 15;
           var s = r >> 4;
@@ -43108,8 +43108,15 @@ var OutputPass = class extends Pass {
 };
 
 // frontend/js/viewer/sculpt.js
-var PAINT_TEXEL_BUDGET = 16 * 1024 * 1024;
+var PAINT_TEXEL_BUDGET = 32 * 1024 * 1024;
 var paintTexelsAllocated = 0;
+function paintBudgetInfo() {
+  return {
+    texelsUsed: paintTexelsAllocated,
+    texelsBudget: PAINT_TEXEL_BUDGET,
+    usedFraction: Math.round(paintTexelsAllocated / PAINT_TEXEL_BUDGET * 1e3) / 1e3
+  };
+}
 function paintedMeshNames(model) {
   const names = [];
   if (!model) return names;
@@ -43120,6 +43127,40 @@ function paintedMeshNames(model) {
     if (m && m.userData && m.userData._mvPaint) names.push(c.name || "(unnamed)");
   });
   return names;
+}
+function clonePaintLayer(material) {
+  const layer = material.userData && material.userData._mvPaint;
+  if (!layer) return;
+  if (paintTexelsAllocated + layer.size * layer.size > PAINT_TEXEL_BUDGET) {
+    delete material.userData._mvPaint;
+    material.map = layer.prevMap || null;
+    throw new Error(
+      "Paint memory budget exceeded while cloning paint layers \u2014 clear_paint unused layers or resize_texture down, then clone."
+    );
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = layer.size;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(layer.canvas, 0, 0);
+  const texture = new CanvasTexture(canvas);
+  texture.colorSpace = SRGBColorSpace;
+  texture.flipY = layer.flipY;
+  if (layer.texture) {
+    texture.wrapS = layer.texture.wrapS;
+    texture.wrapT = layer.texture.wrapT;
+  }
+  material.map = texture;
+  material.needsUpdate = true;
+  paintTexelsAllocated += layer.size * layer.size;
+  material.userData._mvPaint = {
+    canvas,
+    ctx,
+    texture,
+    size: layer.size,
+    flipY: layer.flipY,
+    prevMap: layer.prevMap,
+    prevColor: layer.prevColor
+  };
 }
 function releasePaintBudget(model) {
   if (!model) return;
@@ -43138,6 +43179,219 @@ function releasePaintBudget(model) {
       }
     }
   });
+}
+
+// frontend/js/viewer/timeline.js
+var TIMELINE_MAX_KEYS = 256;
+var EASINGS = {
+  linear: (u2) => u2,
+  step: () => 0,
+  // hold the segment's start value
+  ease_in: (u2) => u2 * u2,
+  ease_out: (u2) => u2 * (2 - u2),
+  ease_in_out: (u2) => u2 < 0.5 ? 2 * u2 * u2 : 1 - (-2 * u2 + 2) ** 2 / 2
+};
+function createTimeline() {
+  return {
+    duration: 0,
+    // seconds; 0 = derived from max key time
+    time: 0,
+    playing: false,
+    loop: true,
+    // objectId -> { position:[{t,v:[3],easing}], rotation:[{t,v:quat[4],easing}],
+    //               scale:[{t,v:[3],easing}] } — keys sorted by t.
+    tracks: /* @__PURE__ */ new Map()
+  };
+}
+function effectiveDuration(tl2) {
+  if (tl2.duration > 0) return tl2.duration;
+  let max2 = 0;
+  for (const channels of tl2.tracks.values()) {
+    for (const keys of Object.values(channels)) {
+      if (keys.length) max2 = Math.max(max2, keys[keys.length - 1].t);
+    }
+  }
+  return max2;
+}
+function tl(viewer) {
+  if (!viewer._timeline) viewer._timeline = createTimeline();
+  return viewer._timeline;
+}
+function sampleChannel(keys, t2, interpolate) {
+  if (!keys.length) return null;
+  if (t2 <= keys[0].t) return keys[0].v;
+  if (t2 >= keys[keys.length - 1].t) return keys[keys.length - 1].v;
+  let i = 0;
+  while (i < keys.length - 1 && keys[i + 1].t <= t2) i++;
+  const a = keys[i], b = keys[i + 1];
+  const span = b.t - a.t;
+  let u2 = span > 1e-9 ? (t2 - a.t) / span : 1;
+  u2 = (EASINGS[a.easing] || EASINGS.linear)(u2);
+  return interpolate(a.v, b.v, u2);
+}
+var lerp3 = (a, b, u2) => [
+  a[0] + (b[0] - a[0]) * u2,
+  a[1] + (b[1] - a[1]) * u2,
+  a[2] + (b[2] - a[2]) * u2
+];
+var _qa = new Quaternion();
+var _qb = new Quaternion();
+var slerp4 = (a, b, u2) => {
+  _qa.set(a[0], a[1], a[2], a[3]);
+  _qb.set(b[0], b[1], b[2], b[3]);
+  _qa.slerp(_qb, u2).normalize();
+  return [_qa.x, _qa.y, _qa.z, _qa.w];
+};
+function sampleTimeline(viewer, t2) {
+  const timeline = tl(viewer);
+  for (const [objectId, channels] of timeline.tracks) {
+    const entry = viewer._entryById(objectId);
+    if (!entry) continue;
+    const p = sampleChannel(channels.position, t2, lerp3);
+    const q = sampleChannel(channels.rotation, t2, slerp4);
+    const s = sampleChannel(channels.scale, t2, lerp3);
+    if (p) entry.logical.p.set(p[0], p[1], p[2]);
+    if (q) entry.logical.q.set(q[0], q[1], q[2], q[3]);
+    if (s) entry.logical.s.set(s[0], s[1], s[2]);
+    viewer._composeWrapper(entry);
+  }
+}
+function playTimeline(viewer, { loop } = {}) {
+  const timeline = tl(viewer);
+  if (timeline.tracks.size === 0) {
+    throw new Error("Timeline is empty \u2014 set_keyframe first.");
+  }
+  if (loop !== void 0) timeline.loop = !!loop;
+  const swept = sweptBox(viewer);
+  if (swept && !swept.isEmpty()) viewer._updateSceneRig(swept);
+  timeline.playing = true;
+  viewer.invalidate();
+  return {
+    playing: true,
+    time: Math.round(timeline.time * 1e3) / 1e3,
+    duration: Math.round(effectiveDuration(timeline) * 1e3) / 1e3,
+    loop: timeline.loop
+  };
+}
+function pauseTimeline(viewer) {
+  const timeline = tl(viewer);
+  timeline.playing = false;
+  viewer.invalidate();
+  return { playing: false, time: Math.round(timeline.time * 1e3) / 1e3 };
+}
+function seekTimeline(viewer, { time } = {}) {
+  const timeline = tl(viewer);
+  if (!(time >= 0)) throw new Error("seek_timeline requires time >= 0 (seconds)");
+  timeline.time = time;
+  sampleTimeline(viewer, time);
+  viewer.invalidate();
+  return { time: Math.round(time * 1e3) / 1e3 };
+}
+function tickTimeline(viewer, delta) {
+  const timeline = viewer._timeline;
+  if (!timeline || !timeline.playing) return false;
+  const dur = effectiveDuration(timeline);
+  if (dur <= 0) {
+    timeline.playing = false;
+    return false;
+  }
+  timeline.time += delta;
+  if (timeline.time > dur) {
+    if (timeline.loop) timeline.time %= dur;
+    else {
+      timeline.time = dur;
+      timeline.playing = false;
+    }
+  }
+  sampleTimeline(viewer, timeline.time);
+  return timeline.playing;
+}
+function sweptBox(viewer) {
+  const timeline = viewer._timeline;
+  const union = viewer._visibleUnionBox() || new Box3();
+  if (!timeline) return union;
+  for (const [objectId, channels] of timeline.tracks) {
+    const entry = viewer._entryById(objectId);
+    if (!entry) continue;
+    const box = new Box3().setFromObject(entry.wrapper);
+    if (box.isEmpty()) continue;
+    const sphere = box.getBoundingSphere(new Sphere());
+    for (const k of channels.position) {
+      const c = new Vector3(k.v[0], k.v[1], k.v[2]);
+      union.union(new Box3(
+        c.clone().subScalar(sphere.radius),
+        c.clone().addScalar(sphere.radius)
+      ));
+    }
+  }
+  return union;
+}
+function timelineState(viewer) {
+  const timeline = viewer._timeline;
+  if (!timeline || timeline.tracks.size === 0) return { tracks: 0 };
+  const r3 = (v) => Math.round(v * 1e3) / 1e3;
+  return {
+    tracks: timeline.tracks.size,
+    playing: timeline.playing,
+    time: r3(timeline.time),
+    duration: r3(effectiveDuration(timeline)),
+    loop: timeline.loop
+  };
+}
+function serializeTimeline(viewer) {
+  const timeline = viewer._timeline;
+  if (!timeline || timeline.tracks.size === 0) return null;
+  const r4 = (v) => Math.round(v * 1e4) / 1e4;
+  const tracks = [];
+  for (const [objectId, channels] of timeline.tracks) {
+    for (const [channel, keys] of Object.entries(channels)) {
+      if (!keys.length) continue;
+      tracks.push({
+        objectId,
+        channel,
+        keys: keys.map((k) => ({
+          t: r4(k.t),
+          v: k.v.map(r4),
+          // Requested Euler degrees round-trip through manifests so
+          // get_timeline after load_scene shows the AUTHORED angles
+          // (a stored 120° yaw otherwise reads [-180, 60, -180]).
+          ...k.e ? { e: k.e.map(r4) } : {},
+          ...k.easing !== "linear" ? { easing: k.easing } : {}
+        }))
+      });
+    }
+  }
+  return { duration: r4(timeline.duration), tracks };
+}
+function restoreTimeline(viewer, data) {
+  const timeline = tl(viewer);
+  timeline.tracks.clear();
+  timeline.duration = data.duration || 0;
+  timeline.time = 0;
+  timeline.playing = false;
+  let restored = 0;
+  for (const track of data.tracks || []) {
+    const entry = viewer._entryById(track.objectId);
+    if (!entry) continue;
+    if (!timeline.tracks.has(track.objectId)) {
+      timeline.tracks.set(track.objectId, { position: [], rotation: [], scale: [] });
+      entry.basePlacement = {
+        p: entry.logical.p.clone(),
+        q: entry.logical.q.clone(),
+        s: entry.logical.s.clone()
+      };
+    }
+    const channels = timeline.tracks.get(track.objectId);
+    if (!channels[track.channel]) continue;
+    channels[track.channel] = track.keys.map((k) => ({
+      t: k.t,
+      v: k.v,
+      easing: k.easing || "linear",
+      ...k.e ? { e: k.e } : {}
+    })).sort((a, b) => a.t - b.t).slice(0, TIMELINE_MAX_KEYS);
+    restored++;
+  }
+  return restored;
 }
 
 // frontend/js/viewer_3d.js
@@ -43239,8 +43493,22 @@ var _Viewer3D = class _Viewer3D {
   _entryById(id) {
     return this._objects.find((e) => e.id === id) || null;
   }
+  /** Effective visibility: an entry is visible only if it AND all its
+   *  articulation ancestors are (three cascades wrapper.visible for rendering;
+   *  raycast/union-box consumers must agree or picks hit invisible geometry). */
+  _effectiveVisible(entry) {
+    let e = entry;
+    const seen = /* @__PURE__ */ new Set();
+    while (e) {
+      if (!e.visible) return false;
+      if (e.parentId == null || seen.has(e.id)) return true;
+      seen.add(e.id);
+      e = this._entryById(e.parentId);
+    }
+    return true;
+  }
   _visibleEntries() {
-    return this._objects.filter((e) => e.visible);
+    return this._objects.filter((e) => this._effectiveVisible(e));
   }
   /** Union world-space box of all VISIBLE objects (null when empty/none visible). */
   _visibleUnionBox() {
@@ -43587,7 +43855,25 @@ var _Viewer3D = class _Viewer3D {
       skinned,
       originalState: null,
       animation: null,
-      stats: null
+      stats: null,
+      // Articulation state (backlog 046). The LOGICAL placement {p,q,s} is
+      // the source of truth; the wrapper's actual TRS is always the
+      // composition T(p)·T(pivot)·R·S·T(−pivot) — plain TRS, no extra
+      // nodes, so bakes/exports/sculpt see only the composed matrix and
+      // stay untouched (pivot-sub-group designs corrupt bakes).
+      logical: {
+        p: new Vector3(),
+        q: new Quaternion(),
+        s: new Vector3(1, 1, 1)
+      },
+      pivot: new Vector3(),
+      // wrapper-local rotation origin
+      parentId: null,
+      // articulation hierarchy
+      geometryRev: 0,
+      // bumped by every geometry mutation
+      basePlacement: null
+      // pre-timeline pose (restored on stop)
     };
     this._objects.push(entry);
     this._activeObjectId = id;
@@ -43627,7 +43913,7 @@ var _Viewer3D = class _Viewer3D {
         }
       }
     });
-    this._scene.remove(entry.wrapper);
+    entry.wrapper.removeFromParent();
     this._disposeObject(entry.model);
     entry.originalState = null;
     entry.animation = null;
@@ -43640,6 +43926,12 @@ var _Viewer3D = class _Viewer3D {
     this._objects = [];
     this._activeObjectId = null;
     this._sceneGeneration++;
+    if (this._timeline) {
+      this._timeline.tracks.clear();
+      this._timeline.time = 0;
+      this._timeline.playing = false;
+      this._timeline.duration = 0;
+    }
     this._clearNormalsHelpers();
     if (this._measureGroup) this._clearMeasurement();
     if (this._renderer) {
@@ -43657,8 +43949,15 @@ var _Viewer3D = class _Viewer3D {
   // ---- registry public surface (control API + app UI) ----------------------
   /** Summaries of every object (id, name, active, visibility, opacity, source). */
   listObjects() {
+    const r3 = (v) => Math.round(v * 1e3) / 1e3;
     return this._objects.map((e) => {
       const painted = paintedMeshNames(e.model);
+      e.wrapper.updateMatrixWorld(true);
+      const box = new Box3().setFromObject(e.wrapper);
+      const bounds = box.isEmpty() ? null : {
+        min: [r3(box.min.x), r3(box.min.y), r3(box.min.z)],
+        max: [r3(box.max.x), r3(box.max.y), r3(box.max.z)]
+      };
       return {
         id: e.id,
         name: e.name,
@@ -43669,12 +43968,15 @@ var _Viewer3D = class _Viewer3D {
         source: e.source,
         vertices: e.stats ? e.stats.vertices : 0,
         faces: e.stats ? e.stats.faces : 0,
+        bounds,
         // Delta flags: which objects carry unexported work, introspectable
         // without a screenshot. painted = paint layers; sculpted =
         // geometry edits (sculpt/bakes); modified = the union (export-dirty).
         painted: painted.length > 0 || void 0,
         sculpted: e.sculpted || void 0,
         modified: e.modified || void 0,
+        parentId: e.parentId != null ? e.parentId : void 0,
+        pivot: e.pivot.lengthSq() > 0 ? [e.pivot.x, e.pivot.y, e.pivot.z].map((v) => Math.round(v * 1e4) / 1e4) : void 0,
         transform: this._transformOf(e)
       };
     });
@@ -43695,10 +43997,18 @@ var _Viewer3D = class _Viewer3D {
   /**
    * Remove ONE object. If it was active, the most recently added remaining
    * object becomes active (invariant: non-empty registry ⇒ active entry).
+   * Articulation children are RE-PARENTED to the removed node's parent with
+   * world pose preserved (deleting a shoulder must not vaporize the arm).
    */
   removeObject(id) {
     const entry = this._entryById(id);
     if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    for (const child of this._objects) {
+      if (child.parentId === id) {
+        this.setParent(child.id, entry.parentId, true);
+      }
+    }
+    if (this._timeline) this._timeline.tracks.delete(id);
     this._disposeEntry(entry);
     this._objects = this._objects.filter((e) => e.id !== id);
     if (this._activeObjectId === id) {
@@ -43774,49 +44084,172 @@ var _Viewer3D = class _Viewer3D {
       if (entry.opacity < 1) this._applyEntryOpacity(entry);
     }
   }
-  /** Placement transform of an object's wrapper (TRS, world = scene space). */
-  _transformOf(entry) {
+  /**
+   * Compose an entry's wrapper TRS from its LOGICAL placement {p,q,s} and its
+   * pivot (wrapper-local rotation origin). The composition
+   * M = T(p)·T(pivot)·R·S·T(−pivot) folds to plain TRS:
+   *   wrapper.quaternion = q ; wrapper.scale = s ;
+   *   wrapper.position   = p + pivot − R·S·pivot
+   * With pivot = 0 this degenerates to identity bookkeeping (backward compat).
+   * NO extra scene-graph nodes: bakes, exports and sculpt only ever see the
+   * composed matrix (a pivot sub-group corrupts _bakeWorldTransforms).
+   */
+  _composeWrapper(entry) {
+    const { p, q, s } = entry.logical;
     const w = entry.wrapper;
+    w.quaternion.copy(q);
+    w.scale.copy(s);
+    const rsPivot = entry.pivot.clone().multiply(s).applyQuaternion(q);
+    w.position.copy(p).add(entry.pivot).sub(rsPivot);
+    w.updateMatrixWorld(true);
+  }
+  /** Re-derive the LOGICAL placement from raw wrapper TRS (gizmo drags write
+   *  the wrapper directly): p = wrapper.position + R·S·pivot − pivot. */
+  _syncLogicalFromWrapper(entry) {
+    const w = entry.wrapper;
+    entry.logical.q.copy(w.quaternion);
+    entry.logical.s.copy(w.scale);
+    const rsPivot = entry.pivot.clone().multiply(w.scale).applyQuaternion(w.quaternion);
+    entry.logical.p.copy(w.position).add(rsPivot).sub(entry.pivot);
+  }
+  /** Placement transform of an object (LOGICAL TRS — parent-relative, which
+   *  equals world space for unparented objects; pivot-independent). */
+  _transformOf(entry) {
     const r3 = (v) => Math.round(v * 1e4) / 1e4;
+    const { p, q, s } = entry.logical;
     return {
-      position: [r3(w.position.x), r3(w.position.y), r3(w.position.z)],
-      quaternion: [
-        r3(w.quaternion.x),
-        r3(w.quaternion.y),
-        r3(w.quaternion.z),
-        r3(w.quaternion.w)
-      ],
-      scale: [r3(w.scale.x), r3(w.scale.y), r3(w.scale.z)]
+      position: [r3(p.x), r3(p.y), r3(p.z)],
+      quaternion: [r3(q.x), r3(q.y), r3(q.z), r3(q.w)],
+      scale: [r3(s.x), r3(s.y), r3(s.z)]
     };
   }
   getObjectTransform(id) {
     const entry = this._entryById(id);
     if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
-    return this._transformOf(entry);
+    const out = this._transformOf(entry);
+    const r4 = (v) => Math.round(v * 1e4) / 1e4;
+    entry.wrapper.updateMatrixWorld(true);
+    const wp = entry.wrapper.getWorldPosition(new Vector3());
+    const wq = entry.wrapper.getWorldQuaternion(new Quaternion());
+    out.world = {
+      position: [r4(wp.x), r4(wp.y), r4(wp.z)],
+      quaternion: [r4(wq.x), r4(wq.y), r4(wq.z), r4(wq.w)]
+    };
+    const pv = entry.pivot;
+    if (pv.lengthSq() > 0) out.pivot = [r4(pv.x), r4(pv.y), r4(pv.z)];
+    if (entry.parentId != null) out.parentId = entry.parentId;
+    return out;
   }
   /**
-   * Set an object's PLACEMENT (wrapper transform — never baked into vertices).
+   * Set an object's PLACEMENT (logical transform — never baked into vertices).
    * Accepts position [x,y,z], quaternion [x,y,z,w] OR rotation (Euler degrees
    * [x,y,z]), scale [x,y,z] or a uniform number. Omitted parts are unchanged.
+   * Parent-relative once the object is parented (= world when unparented).
+   * Rotation happens about the object's PIVOT (set_pivot; default: origin).
    */
   setObjectTransform(id, { position, quaternion, rotation, scale } = {}) {
     const entry = this._entryById(id);
     if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
-    const w = entry.wrapper;
-    if (position) w.position.set(position[0], position[1], position[2]);
+    const L = entry.logical;
+    if (position) L.p.set(position[0], position[1], position[2]);
     if (quaternion) {
-      w.quaternion.set(quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
+      L.q.set(quaternion[0], quaternion[1], quaternion[2], quaternion[3]).normalize();
     } else if (rotation) {
       const d2r = Math.PI / 180;
-      w.rotation.set(rotation[0] * d2r, rotation[1] * d2r, rotation[2] * d2r);
+      L.q.setFromEuler(new Euler(
+        rotation[0] * d2r,
+        rotation[1] * d2r,
+        rotation[2] * d2r,
+        "XYZ"
+      ));
     }
     if (scale !== void 0) {
-      if (typeof scale === "number") w.scale.setScalar(scale);
-      else if (scale) w.scale.set(scale[0], scale[1], scale[2]);
+      if (typeof scale === "number") L.s.setScalar(scale);
+      else if (scale) L.s.set(scale[0], scale[1], scale[2]);
     }
-    w.updateMatrixWorld(true);
+    this._composeWrapper(entry);
     this._updateSceneRig(this._visibleUnionBox());
+    this.invalidate();
     return this._transformOf(entry);
+  }
+  /**
+   * Set the rotation ORIGIN for an object (world-space input, stored
+   * wrapper-local). Never moves the object: the logical position is re-derived
+   * so the composed matrix is unchanged. After this, `rotation` in
+   * set_object_transform and keyframes swings about the pivot (wing root,
+   * elbow, neck base...). Pivot is authored data — no reset clears it.
+   */
+  setPivot(id, worldPoint) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    entry.wrapper.updateMatrixWorld(true);
+    const local = entry.wrapper.worldToLocal(
+      new Vector3(worldPoint[0], worldPoint[1], worldPoint[2])
+    );
+    entry.pivot.copy(local);
+    this._syncLogicalFromWrapper(entry);
+    const r4 = (v) => Math.round(v * 1e4) / 1e4;
+    return {
+      pivot: [r4(local.x), r4(local.y), r4(local.z)],
+      pivotWorld: worldPoint.map(r4),
+      note: "rotation in set_object_transform / keyframes now swings about this pivot"
+    };
+  }
+  /**
+   * Articulation hierarchy: re-parent `id`'s wrapper under `parentId`'s
+   * wrapper (or back to the scene with null). keepWorld preserves the world
+   * pose across the change. Transform semantics after parenting:
+   * set/get_object_transform are PARENT-relative (unchanged for unparented).
+   */
+  setParent(id, parentId, keepWorld = true) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    if (parentId != null && parentId === id) {
+      throw new Error("An object cannot be its own parent.");
+    }
+    let parent = null;
+    if (parentId != null) {
+      parent = this._entryById(parentId);
+      if (!parent) throw new Error(`No object with id ${parentId} (parent). Use list_objects.`);
+      const chain = [];
+      let e = parent;
+      while (e) {
+        chain.push(e.id);
+        if (e.id === id) {
+          throw new Error(
+            `Parenting ${id} under ${parentId} creates a cycle (${chain.reverse().join(" -> ")} -> ${id}).`
+          );
+        }
+        e = e.parentId != null ? this._entryById(e.parentId) : null;
+      }
+      e = parent;
+      while (e) {
+        const s = e.logical.s;
+        if (Math.abs(s.x - s.y) > 1e-9 || Math.abs(s.y - s.z) > 1e-9) {
+          throw new Error(
+            `Ancestor object ${e.id} has non-uniform scale [${s.x}, ${s.y}, ${s.z}] \u2014 parenting under it would shear children. Use uniform scale on parents, or scale the child instead.`
+          );
+        }
+        e = e.parentId != null ? this._entryById(e.parentId) : null;
+      }
+    }
+    const w = entry.wrapper;
+    const newContainer = parent ? parent.wrapper : this._scene;
+    if (keepWorld) {
+      newContainer.attach(w);
+    } else {
+      w.removeFromParent();
+      newContainer.add(w);
+    }
+    entry.parentId = parentId != null ? parentId : null;
+    this._syncLogicalFromWrapper(entry);
+    this._updateSceneRig(this._visibleUnionBox());
+    this.invalidate();
+    return {
+      objectId: id,
+      parentId: entry.parentId,
+      transform: this._transformOf(entry)
+    };
   }
   /** Reset an object's placement to identity (the non-destructive "undo"). */
   resetObjectTransform(id) {
@@ -43825,6 +44258,283 @@ var _Viewer3D = class _Viewer3D {
       quaternion: [0, 0, 0, 1],
       scale: [1, 1, 1]
     });
+  }
+  /** World AABB of one registry entry's wrapper (placement included).
+   *  NOT _worldBoxOf — that existing helper takes an Object3D (focus path). */
+  _entryWorldBox(entry) {
+    entry.wrapper.updateMatrixWorld(true);
+    return new Box3().setFromObject(entry.wrapper);
+  }
+  /** Bounds + position summary for composition command returns (terse). */
+  _placementSummary(entry) {
+    const r3 = (v) => Math.round(v * 1e3) / 1e3;
+    const box = this._entryWorldBox(entry);
+    return {
+      position: this._transformOf(entry).position,
+      bounds: box.isEmpty() ? null : {
+        min: [r3(box.min.x), r3(box.min.y), r3(box.min.z)],
+        max: [r3(box.max.x), r3(box.max.y), r3(box.max.z)]
+      }
+    };
+  }
+  /**
+   * Drop an object so it rests on the scene floor (world Y=0) — a WRAPPER
+   * operation (placement), never a vertex bake: works on skinned models,
+   * works after rotation, undoable via set_object_transform. Contrast with
+   * `ground` (bakes the active object's vertices in its LOCAL frame).
+   */
+  groundObject(id) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    const box = this._entryWorldBox(entry);
+    if (box.isEmpty()) throw new Error("Object has no measurable geometry.");
+    entry.wrapper.position.y -= box.min.y;
+    entry.wrapper.updateMatrixWorld(true);
+    this._updateSceneRig(this._visibleUnionBox());
+    this.invalidate();
+    return this._placementSummary(entry);
+  }
+  /**
+   * Duplicate an object as a NEW scene object. Geometry is DEEP-COPIED
+   * (sculpting the clone must never displace the original — the shared-geometry
+   * rule) and paint layers are cloned canvases (painting one never repaints the
+   * other; the texel budget is charged for the copy).
+   */
+  cloneObject(id, options = {}) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    if (entry.skinned) {
+      throw new Error(
+        "Cloning skinned (rigged) models is not supported \u2014 skeletons cannot be safely duplicated in-session. export_glb and add_model the exported file instead."
+      );
+    }
+    const cloneRoot = entry.model.clone(true);
+    const src = [];
+    entry.model.traverse((n2) => {
+      if (n2.isMesh) src.push(n2);
+    });
+    let i = 0;
+    cloneRoot.traverse((n2) => {
+      if (!n2.isMesh) return;
+      const from = src[i++];
+      if (!from) return;
+      n2.geometry = from.geometry.clone();
+      delete n2.geometry.userData._mvSculpt;
+      const stash = from._mvOriginalMaterial || from.material;
+      const cloneMat = (m) => {
+        const c = m.clone();
+        c.userData = { ...m.userData };
+        clonePaintLayer(c);
+        return c;
+      };
+      delete n2._mvOriginalMaterial;
+      n2.material = Array.isArray(stash) ? stash.map(cloneMat) : cloneMat(stash);
+    });
+    const newEntry = this._insertEntry(cloneRoot, "", "", {
+      name: options.name || `${entry.name}_copy`,
+      source: entry.source && entry.source.kind !== "volatile" ? JSON.parse(JSON.stringify(entry.source)) : { kind: "volatile" }
+    });
+    newEntry.sculpted = entry.sculpted;
+    newEntry.modified = entry.modified;
+    newEntry.pivot.copy(entry.pivot);
+    this.setObjectTransform(newEntry.id, this._transformOf(entry));
+    if (options.transform) this.setObjectTransform(newEntry.id, options.transform);
+    this._updateSceneRig(this._visibleUnionBox());
+    return {
+      objectId: newEntry.id,
+      name: newEntry.name,
+      ...this._placementSummary(newEntry)
+    };
+  }
+  /**
+   * Move an object so its AABB rests against another object's AABB face.
+   * side: which face of `relativeTo` to attach to, in WORLD axes ("+y" = on
+   * top of). align: how the two cross axes line up. offset applies last (an
+   * escape hatch — deliberate overlaps are a real composition need).
+   */
+  placeObject(id, {
+    relativeTo,
+    side = "+y",
+    gap = 0,
+    align = "center",
+    offset
+  } = {}) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    const target = this._entryById(relativeTo);
+    if (!target) {
+      throw new Error(`No object with id ${relativeTo} (relative_to). Use list_objects.`);
+    }
+    if (target === entry) throw new Error("Cannot place an object relative to itself.");
+    const m = /^([+-])([xyz])$/.exec(String(side));
+    if (!m) {
+      throw new Error(`Unknown side '${side}'. Use one of: +x, -x, +y, -y, +z, -z (world axes; +y = on top of the target).`);
+    }
+    const sign2 = m[1] === "+" ? 1 : -1;
+    const axis = m[2];
+    const a = this._entryWorldBox(entry);
+    const b = this._entryWorldBox(target);
+    if (a.isEmpty() || b.isEmpty()) throw new Error("Objects have no measurable geometry.");
+    const delta = new Vector3();
+    delta[axis] = sign2 > 0 ? b.max[axis] + gap - a.min[axis] : b.min[axis] - gap - a.max[axis];
+    for (const c of ["x", "y", "z"]) {
+      if (c === axis) continue;
+      if (align === "center") {
+        delta[c] = (b.min[c] + b.max[c]) / 2 - (a.min[c] + a.max[c]) / 2;
+      } else if (align === "min") {
+        delta[c] = b.min[c] - a.min[c];
+      } else if (align === "max") {
+        delta[c] = b.max[c] - a.max[c];
+      } else {
+        throw new Error(`Unknown align '${align}'. Use center|min|max.`);
+      }
+    }
+    if (offset) delta.add(new Vector3(offset[0], offset[1], offset[2]));
+    entry.wrapper.position.add(delta);
+    entry.wrapper.updateMatrixWorld(true);
+    this._updateSceneRig(this._visibleUnionBox());
+    this.invalidate();
+    return this._placementSummary(entry);
+  }
+  /**
+   * Exploded view — the articulation PROOF shot: offset every object outward
+   * from the scene centroid so separate parts read as separate parts.
+   * factor > 0 explodes (1 ≈ one scene-radius apart); factor 0 restores the
+   * saved placements exactly. Display state: manifests/exports are unaffected
+   * only if you restore first — the return says so.
+   */
+  explodeView(factor = 1) {
+    if (this._objects.length === 0) throw new Error("No objects loaded.");
+    if (this._timeline && this._timeline.playing) {
+      throw new Error("The timeline is PLAYING \u2014 pause_timeline before exploding.");
+    }
+    if (factor > 0 && this._objects.length < 2) {
+      throw new Error("Exploded view needs at least 2 objects (use detect_parts + split_object to separate parts first).");
+    }
+    const r3 = (v) => Math.round(v * 1e3) / 1e3;
+    if (factor <= 0) {
+      let restored = 0;
+      for (const e of this._objects) {
+        if (e._explodeBase) {
+          e.logical.p.copy(e._explodeBase);
+          e._explodeBase = null;
+          this._composeWrapper(e);
+          restored++;
+        }
+      }
+      this._updateSceneRig(this._visibleUnionBox());
+      this.invalidate();
+      return { exploded: false, restored };
+    }
+    const sceneBox = this._visibleUnionBox();
+    if (!sceneBox) throw new Error("Nothing visible to explode.");
+    const sceneCenter = sceneBox.getCenter(new Vector3());
+    const sceneRadius = sceneBox.getSize(new Vector3()).length() / 2 || 1;
+    const preCenters = /* @__PURE__ */ new Map();
+    for (const e of this._objects) {
+      const box = this._entryWorldBox(e);
+      if (!box.isEmpty()) preCenters.set(e.id, box.getCenter(new Vector3()));
+    }
+    const moved = [];
+    for (const e of this._objects) {
+      if (!e._explodeBase) e._explodeBase = e.logical.p.clone();
+      const box = this._entryWorldBox(e);
+      if (box.isEmpty()) continue;
+      const dir = box.getCenter(new Vector3()).sub(sceneCenter);
+      if (dir.lengthSq() < 1e-9) dir.set(0, 1, 0);
+      dir.normalize();
+      e.logical.p.copy(e._explodeBase).addScaledVector(dir, sceneRadius * factor * 0.6);
+      this._composeWrapper(e);
+      moved.push({ entry: e, dir });
+    }
+    const post = [];
+    for (const { entry: e, dir } of moved) {
+      const box = this._entryWorldBox(e);
+      const c = box.getCenter(new Vector3());
+      const before = preCenters.get(e.id);
+      post.push({ e, box });
+      const d = before ? c.clone().sub(before) : dir;
+      e._lastExplodeReport = {
+        id: e.id,
+        name: e.name,
+        worldOffset: [r3(d.x), r3(d.y), r3(d.z)]
+      };
+    }
+    let minGap = Infinity;
+    const overlapping = [];
+    for (let i = 0; i < post.length; i++) {
+      for (let j = i + 1; j < post.length; j++) {
+        const a = post[i], b = post[j];
+        const gapAxis = Math.max(
+          Math.max(a.box.min.x - b.box.max.x, b.box.min.x - a.box.max.x),
+          Math.max(a.box.min.y - b.box.max.y, b.box.min.y - a.box.max.y),
+          Math.max(a.box.min.z - b.box.max.z, b.box.min.z - a.box.max.z)
+        );
+        if (gapAxis < minGap) minGap = gapAxis;
+        if (gapAxis < 0) {
+          overlapping.push([`${a.e.id}:${a.e.name}`, `${b.e.id}:${b.e.name}`]);
+        }
+      }
+    }
+    this._updateSceneRig(this._visibleUnionBox());
+    this.invalidate();
+    const result = {
+      exploded: true,
+      factor,
+      objects: moved.map(({ entry: e }) => e._lastExplodeReport),
+      minGapWorld: Number.isFinite(minGap) ? r3(minGap) : null,
+      note: "explode_view {factor: 0} restores placements \u2014 do it BEFORE save_scene/export or the offsets persist."
+    };
+    if (overlapping.length) {
+      result.overlapping = overlapping;
+      result.note = `minGapWorld < 0: ${overlapping.length} pair(s) still overlap (AABB) \u2014 raise the factor and re-shoot. ` + result.note;
+    }
+    return result;
+  }
+  /**
+   * Rotate an object so a chosen LOCAL axis points at a world target (or at
+   * another object's AABB center). Replaces the wrapper rotation. Returns both
+   * quaternion and Euler degrees so callers learn the pose for keyframing.
+   */
+  lookAtObject(id, { target, targetId, axis = [0, 0, 1] } = {}) {
+    const entry = this._entryById(id);
+    if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+    if (target && targetId !== void 0 || !target && targetId === void 0) {
+      throw new Error("look_at needs exactly ONE of target:[x,y,z] or target_id.");
+    }
+    let point;
+    if (targetId !== void 0) {
+      const other = this._entryById(targetId);
+      if (!other) throw new Error(`No object with id ${targetId} (target_id).`);
+      point = this._entryWorldBox(other).getCenter(new Vector3());
+    } else {
+      point = new Vector3(target[0], target[1], target[2]);
+    }
+    const w = entry.wrapper;
+    w.updateMatrixWorld(true);
+    const origin = w.getWorldPosition(new Vector3());
+    const dir = point.clone().sub(origin);
+    if (dir.lengthSq() < 1e-12) {
+      throw new Error("Target coincides with the object's origin \u2014 nothing to aim.");
+    }
+    const local = new Vector3(axis[0], axis[1], axis[2]);
+    if (local.lengthSq() < 1e-12) throw new Error("axis must be non-zero.");
+    w.quaternion.setFromUnitVectors(local.normalize(), dir.normalize());
+    w.updateMatrixWorld(true);
+    this._updateSceneRig(this._visibleUnionBox());
+    this.invalidate();
+    const r4 = (v) => Math.round(v * 1e4) / 1e4;
+    const e = new Euler().setFromQuaternion(w.quaternion, "XYZ");
+    const r2d = 180 / Math.PI;
+    return {
+      quaternion: [
+        r4(w.quaternion.x),
+        r4(w.quaternion.y),
+        r4(w.quaternion.z),
+        r4(w.quaternion.w)
+      ],
+      rotation: [r4(e.x * r2d), r4(e.y * r2d), r4(e.z * r2d)]
+    };
   }
   /** Frame the union of all visible objects (the whole composed scene). */
   frameAll() {
@@ -43843,6 +44553,7 @@ var _Viewer3D = class _Viewer3D {
     const skipped = [];
     const unsavedPaint = [];
     const unsavedEdits = [];
+    const included = [];
     for (const e of this._objects) {
       if (paintedMeshNames(e.model).length > 0) unsavedPaint.push(e.name);
       if (e.modified) unsavedEdits.push(e.name);
@@ -43850,16 +44561,43 @@ var _Viewer3D = class _Viewer3D {
         skipped.push(e.name);
         continue;
       }
-      objects.push({
+      included.push(e);
+      const obj = {
         source: e.source,
         name: e.name,
-        transform: this._transformOf(e),
+        // Tracked objects persist their BASE placement, never a transient
+        // animation pose (the playhead must not leak into files).
+        transform: e.basePlacement ? this._logicalToTransform(e.basePlacement) : this._transformOf(e),
         visible: e.visible,
         opacity: e.opacity
-      });
+      };
+      if (e.pivot.lengthSq() > 0) {
+        const r4 = (v) => Math.round(v * 1e4) / 1e4;
+        obj.pivot = [r4(e.pivot.x), r4(e.pivot.y), r4(e.pivot.z)];
+      }
+      objects.push(obj);
     }
-    return {
-      version: 1,
+    const indexOf = new Map(included.map((e, i) => [e.id, i]));
+    let hasV2 = false;
+    included.forEach((e, i) => {
+      if (e.parentId != null && indexOf.has(e.parentId)) {
+        objects[i].parent = indexOf.get(e.parentId);
+        hasV2 = true;
+      }
+      if (objects[i].pivot) hasV2 = true;
+    });
+    let timeline = null;
+    const serialized = serializeTimeline(this);
+    if (serialized) {
+      timeline = {
+        duration: serialized.duration,
+        tracks: serialized.tracks.filter((t2) => indexOf.has(t2.objectId)).map(({ objectId, ...t2 }) => ({ object: indexOf.get(objectId), ...t2 }))
+      };
+      if (timeline.tracks.length) hasV2 = true;
+      else timeline = null;
+    }
+    const manifest = {
+      version: hasV2 ? 2 : 1,
       objects,
       skippedVolatile: skipped,
       unsavedPaint,
@@ -43868,6 +44606,56 @@ var _Viewer3D = class _Viewer3D {
       environment: this.getEnvironment(),
       background: this._background
     };
+    if (timeline) manifest.timeline = timeline;
+    return manifest;
+  }
+  _logicalToTransform(L) {
+    const r4 = (v) => Math.round(v * 1e4) / 1e4;
+    return {
+      position: [r4(L.p.x), r4(L.p.y), r4(L.p.z)],
+      quaternion: [r4(L.q.x), r4(L.q.y), r4(L.q.z), r4(L.q.w)],
+      scale: [r4(L.s.x), r4(L.s.y), r4(L.s.z)]
+    };
+  }
+  /**
+   * Apply manifest-v2 articulation to freshly loaded objects: pivots, then
+   * parents (two-pass — manifest order can't guarantee parents-first; the
+   * stored transforms are LOCAL so keepWorld=false), then the timeline
+   * (index → new id map; tracks of failed objects were never mapped).
+   * `idByIndex`: manifest object index → new object id (null for failures).
+   */
+  applyManifestArticulation(manifest, idByIndex) {
+    const objs = manifest.objects || [];
+    objs.forEach((obj, i) => {
+      const id = idByIndex[i];
+      if (id == null) return;
+      const entry = this._entryById(id);
+      if (!entry) return;
+      if (Array.isArray(obj.pivot) && obj.pivot.length === 3) {
+        entry.pivot.set(obj.pivot[0], obj.pivot[1], obj.pivot[2]);
+        this._composeWrapper(entry);
+      }
+    });
+    objs.forEach((obj, i) => {
+      const id = idByIndex[i];
+      if (id == null || obj.parent === void 0) return;
+      const parentId = idByIndex[obj.parent];
+      if (parentId == null) return;
+      try {
+        this.setParent(id, parentId, false);
+        if (obj.transform) this.setObjectTransform(id, obj.transform);
+      } catch {
+      }
+    });
+    let restoredTracks = 0;
+    if (manifest.timeline && manifest.timeline.tracks) {
+      const tracks = manifest.timeline.tracks.filter((t2) => idByIndex[t2.object] != null).map(({ object, ...t2 }) => ({ objectId: idByIndex[object], ...t2 }));
+      restoredTracks = restoreTimeline(this, {
+        duration: manifest.timeline.duration,
+        tracks
+      });
+    }
+    return { restoredTracks };
   }
   // ==========================================================
   // Animation playback (017) — single source of truth for clips
@@ -45465,6 +46253,11 @@ var _Viewer3D = class _Viewer3D {
         time: round2(this.getAnimationTime()),
         duration: round2(this.getAnimationDuration())
       },
+      // Scene timeline (keyframe authoring) — distinct from the loaded-clip
+      // animation above, so agents can tell WHY the scene is moving.
+      timeline: timelineState(this),
+      // Paint memory budget — visible before it bites.
+      paint: paintBudgetInfo(),
       lighting: this.getLightSettings()
     };
   }
@@ -47588,8 +48381,10 @@ var _Viewer3D = class _Viewer3D {
    * We flip V (v→1-v) and set textures to flipY=false so the exporter
    * writes pixel data without implicit flips.
    */
-  async exportAsGLB() {
+  async exportAsGLB(options = {}) {
     if (this._objects.length === 0) return null;
+    const wantAnimation = options.animation === true || options.animation !== false && this._timeline && this._timeline.tracks.size > 0;
+    if (wantAnimation) return this._exportAnimatedGLB(options);
     const exportScene = new Scene();
     exportScene.name = "MeshVault";
     for (const entry of this._visibleEntries()) {
@@ -47605,9 +48400,157 @@ var _Viewer3D = class _Viewer3D {
         exportScene,
         (result) => resolve(result),
         (error) => reject(error),
-        { binary: true, maxTextureSize: 4096 }
+        { binary: true, maxTextureSize: options.maxTextureSize || 4096 }
       );
     });
+  }
+  /**
+   * Animated GLB export (timeline tracks → glTF animations).
+   *
+   * GLTFExporter FORCES trs:true when clips are present and then reads node
+   * position/quaternion/scale — the static path's matrix-only flat meshes
+   * would all export collapsed at the origin. So the animated path builds a
+   * DIFFERENT export scene:
+   *   objNode "mv_obj_<id>" (TRS = composed wrapper transform, exact by
+   *   construction) → mesh children with (objNodeWorld⁻¹ × meshWorld) BAKED
+   *   into cloned geometry (identity mesh nodes — TRS-safe throughout).
+   * Tracks resample the LOGICAL TRS at 30 fps with the pivot composed into
+   * every sample (glTF has no pivots — an off-origin rotation legitimately
+   * exports a non-constant position track: the arc). Track names target the
+   * unique objNode names so PropertyBinding can never misbind.
+   */
+  async _exportAnimatedGLB(options = {}) {
+    const timeline = this._timeline;
+    const fps = options.fps || 30;
+    const exportScene = new Scene();
+    exportScene.name = "MeshVault";
+    const savedTime = timeline ? timeline.time : 0;
+    const nodeByEntry = /* @__PURE__ */ new Map();
+    for (const entry of this._visibleEntries()) {
+      if (entry.basePlacement) {
+        entry.logical.p.copy(entry.basePlacement.p);
+        entry.logical.q.copy(entry.basePlacement.q);
+        entry.logical.s.copy(entry.basePlacement.s);
+        this._composeWrapper(entry);
+      }
+      const node = new Group();
+      node.name = `mv_obj_${entry.id}`;
+      nodeByEntry.set(entry.id, node);
+    }
+    for (const entry of this._visibleEntries()) {
+      const node = nodeByEntry.get(entry.id);
+      const parentNode = entry.parentId != null ? nodeByEntry.get(entry.parentId) : null;
+      (parentNode || exportScene).add(node);
+      node.position.copy(entry.wrapper.position);
+      node.quaternion.copy(entry.wrapper.quaternion);
+      node.scale.copy(entry.wrapper.scale);
+    }
+    exportScene.updateMatrixWorld(true);
+    for (const entry of this._visibleEntries()) {
+      const node = nodeByEntry.get(entry.id);
+      const nodeInv = new Matrix4().copy(node.matrixWorld).invert();
+      entry.wrapper.updateMatrixWorld(true);
+      entry.model.traverse((child) => {
+        const staging = new Scene();
+        this._appendExportMesh(staging, child);
+        for (const mesh of [...staging.children]) {
+          const bake = new Matrix4().multiplyMatrices(nodeInv, child.matrixWorld);
+          mesh.geometry.applyMatrix4(bake);
+          mesh.geometry.computeBoundingBox();
+          mesh.geometry.computeBoundingSphere();
+          mesh.matrixAutoUpdate = true;
+          mesh.matrix.identity();
+          mesh.position.set(0, 0, 0);
+          mesh.quaternion.identity();
+          mesh.scale.set(1, 1, 1);
+          node.add(mesh);
+        }
+      });
+    }
+    const clips = [];
+    if (timeline && timeline.tracks.size > 0) {
+      const duration = (() => {
+        let max2 = timeline.duration || 0;
+        for (const channels of timeline.tracks.values()) {
+          for (const keys of Object.values(channels)) {
+            if (keys.length) max2 = Math.max(max2, keys[keys.length - 1].t);
+          }
+        }
+        return max2;
+      })();
+      const steps = Math.max(2, Math.round(duration * fps) + 1);
+      const times = new Float32Array(steps);
+      const samples = /* @__PURE__ */ new Map();
+      for (const id of timeline.tracks.keys()) {
+        samples.set(id, { pos: [], quat: [], scale: [] });
+      }
+      for (let i = 0; i < steps; i++) {
+        const t2 = i / (steps - 1) * duration;
+        times[i] = t2;
+        sampleTimeline(this, t2);
+        for (const id of timeline.tracks.keys()) {
+          const entry = this._entryById(id);
+          if (!entry) continue;
+          const w = entry.wrapper;
+          const s = samples.get(id);
+          s.pos.push(w.position.x, w.position.y, w.position.z);
+          s.quat.push(w.quaternion.x, w.quaternion.y, w.quaternion.z, w.quaternion.w);
+          s.scale.push(w.scale.x, w.scale.y, w.scale.z);
+        }
+      }
+      const tracks = [];
+      for (const [id, s] of samples) {
+        if (!nodeByEntry.has(id)) continue;
+        const name = `mv_obj_${id}`;
+        tracks.push(new VectorKeyframeTrack(`${name}.position`, times, s.pos));
+        tracks.push(new QuaternionKeyframeTrack(`${name}.quaternion`, times, s.quat));
+        tracks.push(new VectorKeyframeTrack(`${name}.scale`, times, s.scale));
+      }
+      if (tracks.length) {
+        clips.push(new AnimationClip("timeline", duration, tracks));
+      }
+      sampleTimeline(this, savedTime);
+    }
+    const exporter = new GLTFExporter();
+    const expectedChannels = clips.length ? clips[0].tracks.length : 0;
+    const glb = await new Promise((resolve, reject) => {
+      exporter.parse(
+        exportScene,
+        (result) => resolve(result),
+        (error) => reject(error),
+        {
+          binary: true,
+          maxTextureSize: options.maxTextureSize || 4096,
+          animations: clips,
+          trs: true
+        }
+      );
+    });
+    if (expectedChannels > 0) {
+      const emitted = this._glbAnimationChannelCount(glb);
+      if (emitted < expectedChannels) {
+        throw new Error(
+          `Animated export dropped channels (${emitted}/${expectedChannels} emitted) \u2014 this is a bug; report it.`
+        );
+      }
+    }
+    return glb;
+  }
+  /** Parse a GLB ArrayBuffer's JSON chunk and count animation channels. */
+  _glbAnimationChannelCount(glb) {
+    try {
+      const view = new DataView(glb);
+      const jsonLength = view.getUint32(12, true);
+      const jsonBytes = new Uint8Array(glb, 20, jsonLength);
+      const json = JSON.parse(new TextDecoder().decode(jsonBytes));
+      let channels = 0;
+      for (const anim of json.animations || []) {
+        channels += (anim.channels || []).length;
+      }
+      return channels;
+    } catch {
+      return -1;
+    }
   }
   /** Clone one mesh into the export scene with glTF-safe geometry + material. */
   _appendExportMesh(exportScene, child) {
@@ -47619,19 +48562,26 @@ var _Viewer3D = class _Viewer3D {
       if (srcPos) geo.setAttribute("position", srcPos.clone());
       const srcNorm = srcGeo.attributes.normal;
       if (srcNorm) geo.setAttribute("normal", srcNorm.clone());
+      const stashForUV = child._mvOriginalMaterial || child.material;
+      const matForUV = Array.isArray(stashForUV) ? stashForUV[0] : stashForUV;
+      const uvInGlConvention = !(matForUV && matForUV.map) || matForUV.map.flipY !== false;
       const srcUV = srcGeo.attributes.uv;
       if (srcUV) {
         const uvArr = new Float32Array(srcUV.array);
-        for (let i = 0; i < uvArr.length; i += 2) {
-          uvArr[i + 1] = 1 - uvArr[i + 1];
+        if (uvInGlConvention) {
+          for (let i = 0; i < uvArr.length; i += 2) {
+            uvArr[i + 1] = 1 - uvArr[i + 1];
+          }
         }
         geo.setAttribute("uv", new BufferAttribute(uvArr, 2));
       }
       const srcTan = srcGeo.attributes.tangent;
       if (srcTan && srcTan.itemSize === 4) {
         const tanArr = new Float32Array(srcTan.array);
-        for (let i = 0; i < srcTan.count; i++) {
-          tanArr[i * 4 + 3] = -tanArr[i * 4 + 3];
+        if (uvInGlConvention) {
+          for (let i = 0; i < srcTan.count; i++) {
+            tanArr[i * 4 + 3] = -tanArr[i * 4 + 3];
+          }
         }
         geo.setAttribute("tangent", new BufferAttribute(tanArr, 4));
       }
@@ -47660,8 +48610,10 @@ var _Viewer3D = class _Viewer3D {
         matParams.aoMap = this._prepTextureForGLB(srcMat.aoMap);
         if (srcUV) {
           const uv2Arr = new Float32Array(srcUV.array);
-          for (let i = 0; i < uv2Arr.length; i += 2) {
-            uv2Arr[i + 1] = 1 - uv2Arr[i + 1];
+          if (uvInGlConvention) {
+            for (let i = 0; i < uv2Arr.length; i += 2) {
+              uv2Arr[i + 1] = 1 - uv2Arr[i + 1];
+            }
           }
           geo.setAttribute("uv2", new BufferAttribute(uv2Arr, 2));
         }
@@ -47783,7 +48735,8 @@ var _Viewer3D = class _Viewer3D {
       const activeAnim = this._activeAnimation;
       const animating = !!(activeAnim && activeAnim.mixer && activeAnim.playing);
       const fpvActive = this._navMode === "fpv" && (this._keysPressed.size > 0 || this._fpvMouseDown);
-      if (!this._renderRequested && !animating && !fpvActive) {
+      const timelinePlaying = !!(this._timeline && this._timeline.playing);
+      if (!this._renderRequested && !animating && !fpvActive && !timelinePlaying) {
         if (++this._idleFrames > 45) {
           this._renderLoopActive = false;
           if (this._animationId) {
@@ -47796,6 +48749,12 @@ var _Viewer3D = class _Viewer3D {
       this._idleFrames = 0;
       this._renderRequested = false;
       const delta = this._clock.getDelta();
+      if (timelinePlaying) {
+        tickTimeline(this, delta);
+        if (this._renderer && this._renderer.shadowMap) {
+          this._renderer.shadowMap.needsUpdate = true;
+        }
+      }
       this._applyFPVMovement(delta);
       if (this._controls.enabled) {
         this._controls.update();
@@ -53500,6 +54459,8 @@ var ScenePanel = class {
     this._gizmo.addEventListener("dragging-changed", (e) => {
       v._controls.enabled = !e.value;
       if (!e.value) {
+        const entry = v._objects.find((o) => o.wrapper === this._gizmo.object);
+        if (entry) v._syncLogicalFromWrapper(entry);
         v._updateSceneRig(v._visibleUnionBox());
         this._refreshTransforms();
       }
@@ -53643,6 +54604,80 @@ var ScenePanel = class {
   }
 };
 
+// frontend/js/timeline_panel.js
+var TimelinePanel = class {
+  constructor(viewer) {
+    this._viewer = viewer;
+    this._bar = document.getElementById("timeline-bar");
+    this._playBtn = document.getElementById("timeline-play-btn");
+    this._scrub = document.getElementById("timeline-scrub");
+    this._ticks = document.getElementById("timeline-ticks");
+    this._timeEl = document.getElementById("timeline-time");
+    if (!this._bar) return;
+    this._playBtn.addEventListener("click", () => {
+      const tl2 = viewer._timeline;
+      if (!tl2 || tl2.tracks.size === 0) return;
+      if (tl2.playing) pauseTimeline(viewer);
+      else playTimeline(viewer, {});
+      this._refresh();
+    });
+    this._scrub.addEventListener("input", () => {
+      const tl2 = viewer._timeline;
+      if (!tl2) return;
+      const dur = this._duration();
+      if (dur <= 0) return;
+      if (tl2.playing) pauseTimeline(viewer);
+      seekTimeline(viewer, { time: this._scrub.value / 100 * dur });
+      this._refresh();
+    });
+    setInterval(() => this._refresh(), 200);
+  }
+  _duration() {
+    const tl2 = this._viewer._timeline;
+    if (!tl2) return 0;
+    if (tl2.duration > 0) return tl2.duration;
+    let max2 = 0;
+    for (const channels of tl2.tracks.values()) {
+      for (const keys of Object.values(channels)) {
+        if (keys.length) max2 = Math.max(max2, keys[keys.length - 1].t);
+      }
+    }
+    return max2;
+  }
+  _refresh() {
+    const tl2 = this._viewer._timeline;
+    const hasTracks = tl2 && tl2.tracks.size > 0;
+    this._bar.style.display = hasTracks ? "flex" : "none";
+    if (!hasTracks) return;
+    const dur = this._duration();
+    this._playBtn.textContent = tl2.playing ? "\u23F8" : "\u25B6";
+    if (dur > 0) {
+      this._scrub.value = String(tl2.time / dur * 100);
+      this._timeEl.textContent = `${tl2.time.toFixed(1)}s / ${dur.toFixed(1)}s`;
+    }
+    const times = /* @__PURE__ */ new Set();
+    for (const channels of tl2.tracks.values()) {
+      for (const keys of Object.values(channels)) {
+        for (const k of keys) times.add(Math.round(k.t * 100) / 100);
+      }
+    }
+    const sig = [...times].sort((a, b) => a - b).join(",") + "|" + dur;
+    if (sig !== this._tickSig) {
+      this._tickSig = sig;
+      this._ticks.innerHTML = "";
+      if (dur > 0) {
+        for (const t2 of times) {
+          const tick = document.createElement("div");
+          tick.className = "timeline-tick";
+          tick.style.left = `${t2 / dur * 100}%`;
+          tick.title = `key @ ${t2}s`;
+          this._ticks.appendChild(tick);
+        }
+      }
+    }
+  }
+};
+
 // frontend/js/app.js
 var App = class {
   constructor() {
@@ -53694,6 +54729,7 @@ var App = class {
       showToast: (m, t2) => this._showToast(m, t2),
       onSaveScene: () => this._saveScene()
     });
+    this._timelinePanel = new TimelinePanel(this._viewer);
     this._exportPanel = new ExportPanel(
       {
         controls: this._elements.assetControls,
@@ -54026,6 +55062,7 @@ Use right-click \u2192 "Add to scene" to compose instead, or Save the scene firs
     let loaded = 0;
     const failed = [];
     const browseCache = /* @__PURE__ */ new Map();
+    const idByIndex = [];
     for (const obj of manifest.objects || []) {
       try {
         const src = obj.source || {};
@@ -54038,6 +55075,7 @@ Use right-click \u2192 "Add to scene" to compose instead, or Save the scene firs
             transform: obj.transform,
             frame: false
           });
+          idByIndex.push(result2.objectId);
           if (obj.visible === false) this._viewer.setObjectVisible(result2.objectId, false);
           if (typeof obj.opacity === "number" && obj.opacity < 1) {
             this._viewer.setObjectOpacity(result2.objectId, obj.opacity);
@@ -54075,6 +55113,7 @@ Use right-click \u2192 "Add to scene" to compose instead, or Save the scene firs
           transform: obj.transform,
           frame: false
         });
+        idByIndex.push(result.objectId !== void 0 ? result.objectId : null);
         if (result.objectId !== void 0) {
           if (obj.visible === false) this._viewer.setObjectVisible(result.objectId, false);
           if (typeof obj.opacity === "number" && obj.opacity < 1) {
@@ -54085,7 +55124,11 @@ Use right-click \u2192 "Add to scene" to compose instead, or Save the scene firs
       } catch (err2) {
         console.warn("Scene object unavailable:", obj.name, err2);
         failed.push(obj.name || "(unnamed)");
+        idByIndex.push(null);
       }
+    }
+    if ((manifest.version || 1) >= 2) {
+      this._viewer.applyManifestArticulation(manifest, idByIndex);
     }
     const lighting = manifest.lighting;
     if (lighting) {

@@ -12,6 +12,7 @@ import { Thumbnailer } from "./thumbnailer.js";
 import { ModelComparer } from "./compare.js";
 import { AgentLink } from "./agent_link.js";
 import { ScenePanel } from "./scene_panel.js";
+import { TimelinePanel } from "./timeline_panel.js";
 
 
 class App {
@@ -73,6 +74,9 @@ class App {
             showToast: (m, t) => this._showToast(m, t),
             onSaveScene: () => this._saveScene(),
         });
+
+        // Scene keyframe timeline bar (backlog 046) — auto-shows when tracks exist.
+        this._timelinePanel = new TimelinePanel(this._viewer);
 
         this._exportPanel = new ExportPanel(
             {
@@ -511,6 +515,7 @@ class App {
         let loaded = 0;
         const failed = [];
         const browseCache = new Map();
+        const idByIndex = [];   // manifest index -> new objectId (v2 articulation)
 
         for (const obj of manifest.objects || []) {
             try {
@@ -522,6 +527,7 @@ class App {
                         params: src.params, color: src.color,
                         name: obj.name, transform: obj.transform, frame: false,
                     });
+                    idByIndex.push(result.objectId);
                     if (obj.visible === false) this._viewer.setObjectVisible(result.objectId, false);
                     if (typeof obj.opacity === "number" && obj.opacity < 1) {
                         this._viewer.setObjectOpacity(result.objectId, obj.opacity);
@@ -559,6 +565,7 @@ class App {
                     transform: obj.transform,
                     frame: false,
                 });
+                idByIndex.push(result.objectId !== undefined ? result.objectId : null);
                 if (result.objectId !== undefined) {
                     if (obj.visible === false) this._viewer.setObjectVisible(result.objectId, false);
                     if (typeof obj.opacity === "number" && obj.opacity < 1) {
@@ -569,7 +576,13 @@ class App {
             } catch (err) {
                 console.warn("Scene object unavailable:", obj.name, err);
                 failed.push(obj.name || "(unnamed)");
+                idByIndex.push(null);
             }
+        }
+
+        // Manifest v2: pivots, hierarchy, timeline (index-based references).
+        if ((manifest.version || 1) >= 2) {
+            this._viewer.applyManifestArticulation(manifest, idByIndex);
         }
 
         const lighting = manifest.lighting;

@@ -25,7 +25,7 @@ instance.
 
 MCP (Model Context Protocol): if you are an MCP-connected agent, you don't need a
 browser at all — the `meshvault-mcp` server hosts this same viewer headlessly and
-exposes 11 tools: `load_model` (http(s) URL or absolute local file path; loads AND
+exposes 13 tools: `load_model` (http(s) URL or absolute local file path; loads AND
 returns a scene description in one call; multi-file OBJ/FBX/gltf assets load
 textured; `add:true` composes instead of replacing), `describe_scene`,
 `viewer_execute` ({action, params} passthrough to every command in this document),
@@ -33,7 +33,9 @@ textured; `add:true` composes instead of replacing), `describe_scene`,
 registration), `screenshot` (returns real MCP image content; `best_view:true` for a
 one-call hero shot; `preset:"studio"|"neutral"|"dark"` pins lighting/background so
 renders are comparable across sessions; `ssao:false` + small size = cheap proof
-render for sculpt/paint loops), `save_scene` / `load_scene` (.mvscene manifest
+render; `times:[...]` = motion contact sheet), `get_texture` (texture-space view
+with UV wireframe/markers/chart outline/crop), `export_model` (GLB file export
+with animation + texture tiers), `save_scene` / `load_scene` (.mvscene manifest
 persistence for composed scenes), `open_in_app` (push your current model +
 camera into the human's running `meshvault` app for live co-review; the app also
 honors `?path=`/`?dir=`/`?scene=` deep links), and `get_app_state` (read what the
@@ -307,6 +309,104 @@ pristine sources (see `unsavedPaint`/`unsavedEdits` warnings); `export_glb` bake
 sculpted geometry AND painted textures into a self-contained file. Audit trail:
 `list_objects` flags per object — painted (paint layers), sculpted (geometry
 edits), modified (the union = export-dirty).
+
+================================================================================
+## 5d. Inspecting & repairing: adaptive simplification, mesh fixes, texture repair
+
+The decision loop for "this area is over-detailed for what it represents":
+
+- `inspect_region { center, radius|radius_rel }` (probe) or `{ grid: 2..5 }`
+  (survey) — density metrics per region: {triangles, surfaceArea, triPerUnit2,
+  edgeLength{min,median,p95}, dihedralMeanDeg, openEdges}. Grid cells come
+  SORTED by simplification opportunity (flat × dense = unjustified density) and
+  carry ready-to-use center+radius. openEdges = TRUE welded cracks touching the
+  region (same basis as get_mesh_stats/fix_mesh — comparable across all three).
+- `simplify_region { center, radius|radius_rel, ratio }` — decimate ONLY that
+  region; ratio = fraction of region vertices to KEEP (0.25 ≈ 4× coarser). The
+  boundary ring is LOCKED (no cracks), UV-seam welds are locked (no tears), and
+  OPEN rims (split-cut edges) are locked (decimating both sides of a cut can
+  never make the rims diverge) — read `achievedRatio` +
+  `locked{ring,seams,borders}`: seam-dense regions decimate less than
+  requested, and the return says why. Region cap 50k vertices.
+- `fix_mesh { operations? }` — default [degenerate, normals]; flipped_faces is
+  opt-in (per-mesh winding reversal, closed meshes only). Returns per-op counts
+  + issue deltas {openEdges, degenerate}.
+- `inspect_texture` — per-material: resolution/colorSpace/painted, texel DENSITY
+  (area-weighted p5/median/p95 texels per world unit) + lowest-density world
+  spots (feed to focus / paint decisions). Stamp fidelity: radius × median
+  density >> 8 texels.
+- `blur_paint { center, radius, strength }` — masked Gaussian defect softening
+  (atlas neighbors never bleed). `clone_paint { from, to, radius }` — heal brush
+  via WORLD-space correspondence (from = clean donor, to = defect, SAME object,
+  surfaces within 45°). Both return quantified {blurred|cloned, meanAlpha}.
+  Repair recipe: close-up screenshot → pick the defect → pick a nearby donor →
+  clone_paint → blur_paint the boundary → before/after close-ups.
+- `resize_texture { size, filter? }` — re-allocate paint layers (tiers work);
+  authored textures downsample at EXPORT (`export_glb {texture_size}`) instead.
+
+TEXTURE-TO-MESH MISALIGNMENT (features sample too high/low — common on
+generated assets) — the forensic loop:
+- `pick` returns the surface point's `.uv`; `render_texture { markers,
+  outline_island_of, crop_center, crop_size }` (MCP: the get_texture tool)
+  SHOWS texture space: the image + UV wireframe + the chart under a point +
+  a zoom crop. Marker offset from the matching texture feature = the defect.
+- `get_uv_islands { at? }` — chart statistics FIRST: a fragmented atlas
+  (hundreds+ of non-semantic islands) means feature≠island and UV surgery
+  cannot succeed (the note says so).
+- Coherent atlases: `preview_uv_transform { offset, scale, island_of? }`
+  (dry-run bleed report) → `transform_uv` (global or island-scoped affine;
+  persists + exports; reload restores).
+- Fragmented atlases: `project_paint { center, radius, surface_offset:[right,
+  down] world units | screen_offset:[dx,dy] px }` — texels re-sample the
+  CURRENT render shifted in SCREEN space, so content slides across the surface
+  regardless of UV islands. Use the 'neutral' preset (shading bakes into the
+  copied texels); occlusion ignored (convex, camera-facing regions).
+
+================================================================================
+## 5e. Articulating & animating: parts, hierarchy, pivots, timeline
+
+Articulation (F-14 wings, robot arms, nodding heads):
+
+- `detect_parts` — mesh partition → material groups → welded components, with
+  HONESTY notes: image-to-3D outputs are usually ONE fused component; partial
+  detection (two of four wheels) is normal. Returns {parts, partitionId}.
+- `split_object { parts+partitionId | axis+at | plane }` — the articulation
+  knife for fused meshes. Plane cuts leave HOLLOW faces (keep sweeps ≲30° or
+  orient cuts away from camera); `suggestedPivot` = the cut centroid — exactly
+  where the hinge belongs. After a split, the NEW part becomes ACTIVE (brushes
+  target it — set_active_object back if painting the body).
+- `set_pivot { id, point }` — world point; rotation (transforms AND keyframes)
+  swings about it afterwards. Never moves the object.
+- `set_parent { id, parent_id, keep_world?=true }` — hierarchy: rotating the
+  parent carries the subtree. Transforms become PARENT-relative
+  (get_object_transform returns local AND world). Cycles/non-uniform-scale
+  ancestors refused.
+- `explode_view { factor }` — THE articulation proof shot: every object offsets
+  outward from the scene centroid; returns world displacements + minGapWorld
+  (negative = pairs overlap, listed — raise the factor before wasting a
+  screenshot). factor 0 restores EXACTLY; always restore before save/export.
+  Proof loop: explode → minGapWorld > 0 → screenshot → restore.
+
+Animation (one scene timeline, seconds everywhere):
+
+- `set_keyframe { id, time, position?|rotation?|quaternion?|scale?, easing?,
+  capture?, channels? }` — pose-then-capture is the natural loop
+  (set_object_transform / look_at, then capture:true; channels:["rotation"]
+  keeps joint tracks lean). Rotation TEACHING: interpolation takes the SHORT
+  arc and 360° = 0° (identity) — key full turns in steps ≤120°
+  (0/90/180/.../720); the command warns on both traps.
+- `seek_timeline { time }` — DETERMINISTIC: seek → screenshot captures exactly
+  that frame. `play_timeline { loop? }` / `pause_timeline` / `get_timeline`
+  (shows REQUESTED angles) / `delete_keyframe` / `clear_timeline` (restores
+  pre-animation placements) / `set_timeline { duration }`.
+- Sculpt/paint/pick REFUSE while playing (they would bake a transient pose).
+- MOTION VERIFICATION: the MCP screenshot tool takes `times: [0, 0.5, ...]` and
+  returns ONE auto-framed contact sheet (camera fits the whole swept motion).
+- Export: `export_glb {animation}` / MCP `export_model {path, animation,
+  texture_size}` — glTF animation, 30 fps resampled, pivots composed (an
+  off-origin rotation exports an arced position track — correct, glTF has no
+  pivots), hierarchy preserved. Verify: reload → get_state().animation.
+- `.mvscene` v2 manifests persist hierarchy/pivots/timeline (index-based refs).
 
 ================================================================================
 ## 6. Camera

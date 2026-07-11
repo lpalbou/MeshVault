@@ -30,11 +30,13 @@ Key facts for agents:
   with `set_environment { enabled, intensity, asBackground }` / `get_environment`.
 
 - MCP: agents can drive MeshVault natively via the bundled MCP server (`meshvault-mcp`,
-  11 tools: load_model [URL or local path; multi-file OBJ/FBX/gltf assets load
+  13 tools: load_model [URL or local path; multi-file OBJ/FBX/gltf assets load
   textured; add:true composes multi-object scenes], describe_scene, viewer_execute,
   list_viewer_commands, get_state, compare_models [geometric shape registration],
-  screenshot [supports preset:"studio"|"neutral"|"dark" for renders comparable across
-  sessions], save_scene/load_scene [.mvscene manifests persist composed scenes],
+  screenshot [presets for comparable renders; times:[...] motion contact sheets],
+  get_texture [texture-space views: UV wireframe, markers, chart outline, crop],
+  export_model [GLB file export: animation + texture tiers],
+  save_scene/load_scene [.mvscene manifests persist composed scenes],
   open_in_app [push your model + camera into the running app so a human co-views
   live], get_app_state [read what the HUMAN is looking at — path + camera — and
   continue their session headless]).
@@ -50,6 +52,18 @@ Key facts for agents:
   {painted, meanAlpha} feedback; shape:"square" quads; max_normal_angle edge clamp),
   `pick`/`raycast` (screenshot/world coords → surface points — the hand-eye loop),
   and `batch` (≤32 commands per round-trip). Sculpt+paint persist via export_glb.
+- Repair & adaptive LoD: `inspect_region` (density survey, opportunity-sorted grid)
+  → `simplify_region` (boundary-locked regional decimation — adaptive resolution by
+  agent judgment), `fix_mesh` (degenerate/normals/flipped-face passes with issue
+  deltas), `inspect_texture` (texel density + worst spots), `blur_paint`/`clone_paint`
+  (defect softening + world-space heal brush), texture tiers low/medium/high/xhigh
+  (512→4096) on paint and on export.
+- Articulation & animation: `detect_parts`/`split_object` (plane cuts with suggested
+  pivots — fused image-to-3D meshes articulate this way), `set_parent`/`set_pivot`
+  (hierarchies + rotation origins), `set_keyframe`/`play`/`seek_timeline` (scene
+  timeline, deterministic seeks, short-arc + 360°-identity teaching), motion contact
+  sheets (MCP screenshot times:[...]), animated GLB export (export_model), timeline
+  UI bar for humans, `.mvscene` v2 persistence.
 - REST screenshot (local server, no MCP needed): `GET /api/screenshot?path=/abs/
   model.glb&best_view=true&preset=studio` returns a PNG (token header required;
   metadata in the X-MeshVault-Screenshot header). Docs: docs/api.md.

@@ -68,15 +68,19 @@ ZIP (built-in), RAR (multi-tool fallback), `.unitypackage` (tar.gz with GUID str
 Pure Python FBX binary parser (v5000–6100) → OBJ converter. Zero dependencies.
 
 ### `mcp_server.py` — MCP adapter (optional)
-`meshvault-mcp` exposes the viewer to MCP clients (Claude, Cursor) as 11 tools routed
+`meshvault-mcp` exposes the viewer to MCP clients (Claude, Cursor) as 13 tools routed
 through the control API: `load_model` (URL or local path; multi-file assets load
-textured; `add:true` composes scenes), `describe_scene`, `viewer_execute`,
+textured; `add:true` composes scenes), `describe_scene`, `viewer_execute` (the wide
+surface: primitives, sculpt/paint, inspection/repair, articulation, timeline),
 `list_viewer_commands`, `get_state`, `compare_models` (refuses to destroy composed
-scenes), `screenshot` (MCP image content; render presets for cross-session
-comparability), `save_scene`/`load_scene` (`.mvscene` manifests), `open_in_app`
-(push model + camera into the running app), and `get_app_state` (read what the human
-is looking at). Composes the shared `headless_viewer.py` runtime. Optional deps:
-`pip install "meshvault[mcp]"`. See [MCP Server](mcp.md).
+scenes), `screenshot` (MCP image content; render presets; `views` batches frame the
+scene; `times` motion contact sheets), `get_texture` (texture-space renders with UV
+wireframe/markers/island outline/crop), `export_model` (GLB to disk incl. animation
+and texture-size tiers), `save_scene`/`load_scene` (`.mvscene` manifests, v2 with
+hierarchy/pivots/timeline), `open_in_app` (push model + camera into the running app),
+and `get_app_state` (read what the human is looking at). Composes the shared
+`headless_viewer.py` runtime. Optional deps: `pip install "meshvault[mcp]"`.
+See [MCP Server](mcp.md).
 
 ### `scene_api.py` — Scene persistence
 `POST /api/scene/save` + `GET /api/scene/load` for `.mvscene` manifests: safe-write
@@ -158,10 +162,15 @@ A single, self-describing command surface designed to be driven by AI agents or 
   `set_render_mode` (textured/solid/wireframe/normals)/`set_wireframe`/`set_grid`/`set_axes`/`set_normals`/`set_clip`/`set_fog`/`set_background`/`set_scale`/`set_lighting`/`set_environment`/`get_environment` (IBL),
   `center`/`ground`/`auto_orient`/`rotate`/`simplify`/`recompute_normals`/`reset`,
   `add_model`/`list_objects`/`set_active_object`/`set_object_transform`/`set_object_visible`/`set_object_opacity`/`remove_object`/`frame_all`/`get_scene_manifest` (scene composition),
+  `bounds`-bearing `list_objects` + `clone_object`/`ground_object`/`place_object`/`look_at` (composition ergonomics),
   `add_primitive`/`sculpt`/`sculpt_stroke`/`paint`/`paint_stroke`/`fill_paint`/`clear_paint`/`pick`/`raycast`/`batch`
   (creation: primitives, world-space sculpt brushes, texture-paint layers, screenshot-to-surface picking — see `viewer/sculpt.js`),
-  `play_animation`/`pause_animation`/`set_animation_time`/`set_animation_speed`,
-  `measure`/`set_measure_mode`, `export_obj`/`export_glb`,
+  `inspect_region`/`simplify_region`/`fix_mesh`/`inspect_texture`/`blur_paint`/`clone_paint`/`resize_texture` (inspection + repair),
+  `render_texture`/`get_uv_islands`/`transform_uv`/`preview_uv_transform`/`project_paint` (texture forensics, backlog 047),
+  `detect_parts`/`split_object`/`set_parent`/`set_pivot`/`explode_view` (articulation),
+  `set_keyframe`/`delete_keyframe`/`get_timeline`/`clear_timeline`/`set_timeline`/`play_timeline`/`pause_timeline`/`seek_timeline` (scene timeline),
+  `play_animation`/`pause_animation`/`set_animation_time`/`set_animation_speed` (authored clips),
+  `measure`/`set_measure_mode`, `export_obj`/`export_glb` (animation + texture-size tiers),
   `screenshot`/`capture_views`/`turntable` (hero shots: resolution, transparency, fog/ground/SSAO control),
   `get_state`/`get_scene_info`/`get_bounds`/`describe_scene` (structured text snapshot + geometry QA for text-only agents).
   Model-dependent commands return `{ok:false}` when no model is loaded; unknown params are rejected.
@@ -174,8 +183,31 @@ displacement (seam-safe inflate/smooth), shared-geometry dedup (glTF instancing)
 falloff kernels, UV-space triangle rasterization for paint with per-call max-alpha
 accumulation and sRGB-correct blending, square tangent-plane stamps + hard-edge
 normal clamping, per-session paint texel budget, and camera/world raycast picking
-with screenshot-aspect correction. Rendering is demand-driven: the rAF loop parks
-after ~0.75 s idle (0.0% CPU) and every mutating command invalidates exactly once.
+with screenshot-aspect correction. Also hosts the texture-repair brushes
+(`blur_paint` masked Gaussian, `clone_paint` world-space heal) and paint-layer
+resizing. Rendering is demand-driven: the rAF loop parks after ~0.75 s idle
+(0.0% CPU) and every mutating command invalidates exactly once.
+
+### `viewer/timeline.js` + `timeline_panel.js` — keyframe animation (backlog 046)
+One scene timeline: per-object TRS tracks over LOGICAL local placements
+(pivot-factored, parent-relative), hand-rolled interpolation (5 easings,
+deterministic `seek_timeline` → screenshot), requested-Euler tracking (the
+360°-identity and short-arc teaching notes), basePlacement restore on clear,
+render-loop integration (keep-alive while playing; rig sized once per play from
+the swept volume). The panel is a thin polling view — the render loop owns the
+only clock.
+
+### `viewer/articulation.js` + `viewer/repair.js` — parts & repair (backlog 046)
+`detect_parts` (mesh partition → material groups → welded connected components,
+honesty notes, partition handshake) and `split_object` (triangle-subset
+extraction, plane cuts with hollow-face disclosure, suggested pivots, painted-
+material deep-copies). `repair.js`: `simplify_region` (constrained Melax-style
+collapse with REAL locked vertices — region ring, mesh borders, seam welds),
+`fix_mesh` passes, `inspect_region` density surveys (welded whole-mesh openEdges
+semantics shared with mesh_stats), `inspect_texture` texel-density audits.
+Pivot/parenting live in the engine: wrapper TRS is always the composition
+T(p)·T(pivot)·R·S·T(−pivot) — logical placement + pivot on the registry entry,
+no extra scene-graph nodes (a pivot sub-group corrupts vertex bakes).
 
 ### `viewer/standalone.js` — `createViewer(container, options)`
 Instantiates the engine + control API with a client-only resolver and exposes
