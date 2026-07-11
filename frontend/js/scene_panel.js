@@ -85,6 +85,8 @@ export class ScenePanel {
                 this._refreshTransforms();
             }
         });
+        // Demand-driven rendering: gizmo interaction must repaint every frame.
+        this._gizmo.addEventListener("change", () => v.invalidate());
 
         // Keyboard mode switch (t/r/s) while an object is attached.
         window.addEventListener("keydown", (e) => {

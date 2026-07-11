@@ -8,7 +8,7 @@ A professional, local web-based tool for rapidly browsing, previewing, and manag
 |---|---|---|
 | **Online, zero install** | [Open the live viewer](https://www.lpalbou.info/MeshVault/) — drag-drop a model or pass `?src=<url>`; nothing is uploaded | Drive `window.mv` on the live page via browser automation — see the site's [`llms.txt`](https://www.lpalbou.info/MeshVault/llms.txt) |
 | **Local app** | `pip install meshvault` → `meshvault` → browse your filesystem at `http://localhost:8420` | Same server also serves the JSON control API docs at `/llms.txt` |
-| **MCP server** | — | `pip install "meshvault[mcp]"` → `meshvault-mcp`: 9 tools (load by path/URL, describe, mesh stats, geometric compare, reproducible screenshots, two-way co-review with the app) for Claude/Cursor — [docs/mcp.md](docs/mcp.md) |
+| **MCP server** | — | `pip install "meshvault[mcp]"` → `meshvault-mcp`: 11 tools (load by path/URL, describe, mesh stats, geometric compare, sculpt/paint/primitives, reproducible screenshots, scene persistence, two-way co-review with the app) for Claude/Cursor — [docs/mcp.md](docs/mcp.md) |
 
 [![CI](https://github.com/lpalbou/meshvault/actions/workflows/ci.yml/badge.svg)](https://github.com/lpalbou/meshvault/actions)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
@@ -39,6 +39,7 @@ Older FBX files (version < 7000) are auto-converted to OBJ by a built-in zero-de
 | **Toolbar** | Screenshot, grid, axes (XYZ), wireframe, normals viz, texture folder picker, material inspector, lights, measure |
 | **Animation** | Play/pause, scrub, speed, clip selector for animated GLB/FBX/Collada |
 | **Scene composition** | Co-load multiple objects, place them with a gizmo (move/rotate/scale), objects panel, save/load `.mvscene` scenes, export the composition as one GLB |
+| **Sculpt & paint (agents)** | 7 primitives with paint-safe UVs, 6 world-space sculpt brushes (seam-safe, quantified feedback), texture painting (round/square stamps, edge clamping, honest `meanAlpha`), screenshot-to-surface `pick` — the full create/observe/correct loop over MCP |
 | **Transforms** | Reload, reset, center, ground, auto-orient (PCA), rotate ±90° per axis |
 | **Mesh Ops** | Simplify (edge collapse LOD, UV-preserving), recompute smooth normals (UV-preserving) |
 | **Textures** | Folder picker with smart matching (convention + fuzzy name) for separated texture packs |
@@ -72,7 +73,7 @@ MeshVault is built to be driven by agents, not just humans. Four entry points, f
 lightest to most integrated:
 
 1. **Self-describing JSON control API** — the viewer exposes one entry point,
-   `execute({action, params})`, with ~48 discoverable commands (`listCommands()`), plus
+   `execute({action, params})`, with ~70 discoverable commands (`listCommands()`), plus
    `describe_scene`: a structured text snapshot (inventory, size, materials, geometry-QA
    issues, current view) so a text-only agent can reason without screenshots. Agent-ready
    reference served at [`/llms.txt`](frontend/llms.txt) and
@@ -81,7 +82,9 @@ lightest to most integrated:
    headless viewer natively through 11 tools: load a model by **URL or local file path**
    (multi-file OBJ/FBX assets load textured), compose multi-object scenes
    (`add: true` + placement commands, persisted as `.mvscene` via
-   `save_scene`/`load_scene`), describe it, run any viewer command, and get PNG
+   `save_scene`/`load_scene`), **create and modify content** — primitives, sculpting
+   brushes, texture painting, screenshot-coordinate picking (the agent hand-eye
+   loop) — describe it, run any viewer command, and get PNG
    screenshots back as image content (`best_view: true` gives a one-call hero shot;
    `preset: "studio"` pins lighting so renders are comparable across sessions).
    With the app running, co-review works both ways: `open_in_app` pushes the agent's

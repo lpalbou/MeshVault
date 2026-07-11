@@ -313,3 +313,107 @@ design review before it could break in production):
   on framing — or placed objects silently lose shadows. Offscreen SCORING passes
   (best view, auto-upright) must hide non-active wrappers or neighbors contaminate
   the edge-energy scores.
+
+---
+
+## Sculpting & texture painting for agents (backlog 045, v0.7.0)
+
+Built against three adversarial design reviews and three live artist-agent
+sessions. The rules below each prevented (or fixed) a real, observed failure.
+
+### Geometry snapshots must be ACCESSOR-DECODED, never raw array copies
+`new Float32Array(posAttr.array)` snapshots raw storage: for KHR_mesh_quantization
+attributes that's Int16 integers, for interleaved attributes it's the whole
+stride-packed buffer. Any later layout conversion (dequantize/de-interleave — which
+sculpt and bakes do) makes the restore write ±32767-range garbage into decoded
+float buffers (model destroyed), or silently no-op. Snapshot through
+`getX/getY/getZ` and restore via `setXYZ` — decoded floats are layout-independent.
+The same rule as the heatmap lesson: *never read or write `attribute.array`
+directly when the attribute could be quantized or interleaved.*
+
+### Sculpting rules (frontend/js/viewer/sculpt.js)
+- **Weld before displacing.** UV/normal seams duplicate vertices at identical
+  positions; per-vertex normals differ across the duplicates, so inflate/smooth on
+  raw vertices TEARS every textured mesh at its seams. Quantize positions
+  (1e-6 × bbox diagonal), compute one displacement per canonical position, write it
+  to all duplicates. This also gives non-indexed (STL) meshes adjacency for free.
+- **Dedup shared geometries per stamp.** GLTFLoader instancing shares one
+  BufferGeometry across meshes — a traverse-per-mesh stamp displaces the shared
+  buffer once per instance (2× displacement), not "each instance once".
+- **World-space brushes, position-space transforms back.** Falloff on world
+  positions (correct under non-uniform wrapper scale); map the DISPLACED WORLD
+  POSITION back through the mesh's inverse matrixWorld. Never
+  `transformDirection()` for displacement vectors — it normalizes and destroys
+  magnitude.
+- **Finalize once per COMMAND, not per stamp**: computeVertexNormals + bounds +
+  stats after the last stamp of a stroke. Recompute `boundingSphere` or the next
+  `pick`/raycast misses the sculpted region (Raycaster culls by it).
+- **Missed brushes are ERRORS that teach** ("check center — use pick/get_bounds"),
+  and mutation returns carry quantified feedback ({affected, maxDisplacement,
+  newSize}) — a SwiftShader verification render costs 10-60 s; numbers are free.
+
+### Texture painting rules (the paint layer pipeline)
+- **Blend in sRGB bytes.** `THREE.Color` components are LINEAR working space
+  (r152+ color management): blending `color.r*255` into a canvas paints darker than
+  requested (#00aa00 → rgb(0,103,0)). Convert via `getHexString()` first.
+- **Per-call MAX-alpha accumulation, single blend pass.** Rasterizing per-triangle
+  directly double-blends texels straddling shared edges (the barycentric edge
+  tolerance overlaps them) → plaid/moiré at low opacity; overlapping stroke stamps
+  compound the same way. Accumulate texel→max(alpha) across the whole call, apply
+  once: painter's per-stroke opacity semantics (`opacity` = the call's alpha cap).
+- **Triangle rasterization in UV space with WORLD-space falloff** — continuous
+  coverage at any mesh density (vertex-splatting gaps on sparse meshes) and each
+  triangle owns its UV island pixels.
+- **Stock primitive UVs are not paintable.** three.js BoxGeometry maps ALL SIX
+  faces to the full [0,1]² square (cylinder/cone caps overlap the side band):
+  painting one face paints all six. Remap per-group UV atlases at creation
+  (box 3×2, cylinder/cone side band + cap islands), then `clearGroups()` for
+  single-material rendering.
+- **The paint layer inherits the replaced map's `flipY`** (GLB textures false,
+  loader textures true) and the splat row is `flipY ? (1-v)·H : v·H` — wrong
+  orientation V-flips the base layer. CanvasTexture colorSpace = SRGBColorSpace.
+- **Clone-on-first-paint for shared materials** (across ALL scene objects, not just
+  the active one) or painting one mesh repaints its siblings; keep the pre-paint
+  map/color for `clear_paint` (paint must have an undo path); budget painted texels
+  per session (~16M) and return the budget on object disposal.
+- **`meanAlpha` in every paint result**: `painted` (texel count) alone reports
+  success for visually-null paint (low opacity × soft falloff); the mean applied
+  alpha catches it numerically before the agent wastes a render (observed: the T1
+  artist burned ~8 calls diagnosing invisible paint).
+- **Square stamps need an anchor frame**: nearest-triangle normal → tangent plane →
+  Chebyshev distance = crisp axis-aligned quads; `max_normal_angle` (dot of face
+  normal vs anchor normal) stops paint wrapping around hard edges — both came from
+  an artist session hand-building a checkerboard out of 36 round stamps per cell.
+
+### The agent hand-eye loop (pick) needs the SCREENSHOT's aspect
+Screenshots default 1024² but the live canvas is 4:3 — unprojecting screenshot
+coordinates through the live camera lands up to ~15% off near edges. `pick` takes
+the screenshot's width/height, temporarily sets `camera.aspect`, and restores.
+Picks are only valid until the camera moves (re-pick after orbit).
+
+### Demand-driven rendering (perf, backlog 043)
+The rAF loop renders only when `_renderRequested` (input/damping/animation/FPV) and
+parks after ~45 idle frames — measured 0.0% CPU for the whole browser tree at idle.
+Load-bearing details: reset `clock.getDelta()` on loop resume (or animation jumps),
+`invalidate()` from OrbitControls "change" (damping settle frames), every mutating
+control-API command invalidates once (the API layer does it centrally), captures
+invalidate afterward (the canvas holds a capture-sized frame while the loop is
+parked), shadow maps `autoUpdate=false` + `needsUpdate` on invalidate. Sculpt
+strokes must NOT invalidate per stamp — a SwiftShader composer render is
+~100-300 ms and a 64-stamp stroke would turn into a 20 s op.
+
+### Memory rules learned the hard way
+- Reset snapshots are LAZY (taken at first mutation via `_ensureResetSnapshot`) —
+  an unmodified model never pays the ~35-40% geometry-RAM duplicate; geometry-
+  REPLACING ops (simplify/recompute) DROP the snapshot (new baseline) instead of
+  eagerly retaking it.
+- Timer closures must not capture models: the 8 s texture-janitor timeout held the
+  full model (geometry + textures) even after removal — capture the entry ID and
+  look it up at fire time.
+- Never build per-vertex STRING keys for dedup (`${x},${y},${z}` ≈ 60 B + rope
+  churn each): nested numeric Maps (x→y→Set(z)) are exact and allocation-free per
+  vertex. Multi-million-vertex models turned hundreds of MB of transient garbage
+  into ~nothing.
+- Idle-close headless browsers that serve ONE-SHOT requests (screenshot API: unload
+  after each response + close after 5 min idle); NEVER idle-close a STATEFUL
+  session (MCP: the scene IS the session).

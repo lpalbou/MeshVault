@@ -77,6 +77,7 @@ export class ModelComparer {
             try {
                 heat = applyDeviationHeatmap(ref, offscreen._currentModel, m4, diag);
                 this._active = true;
+                this._viewer.invalidate();  // repaint with the heatmap materials
             } catch (e) {
                 console.warn("Heatmap failed (showing verdict only):", e);
             }
@@ -96,6 +97,7 @@ export class ModelComparer {
         if (this._viewer._currentModel) clearDeviationHeatmap(this._viewer._currentModel);
         this._active = false;
         if (this._panel) { this._panel.remove(); this._panel = null; }
+        this._viewer.invalidate();
     }
 
     async _postCompare(body) {

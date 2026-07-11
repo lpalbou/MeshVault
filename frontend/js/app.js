@@ -516,6 +516,19 @@ class App {
             try {
                 const src = obj.source || {};
                 let resolved;
+                if (src.kind === "primitive") {
+                    // Procedural stock — rebuilt from parameters, no file involved.
+                    const result = this._viewer.addPrimitive(src.primitive, {
+                        params: src.params, color: src.color,
+                        name: obj.name, transform: obj.transform, frame: false,
+                    });
+                    if (obj.visible === false) this._viewer.setObjectVisible(result.objectId, false);
+                    if (typeof obj.opacity === "number" && obj.opacity < 1) {
+                        this._viewer.setObjectOpacity(result.objectId, obj.opacity);
+                    }
+                    loaded++;
+                    continue;
+                }
                 if (src.kind === "file") {
                     const asset = await this._assetFromPath(src.path, browseCache);
                     resolved = await this._resolveAssetForLoad(asset);
@@ -604,9 +617,19 @@ class App {
             this._showToast(`Not saved (drag-dropped, no file path): `
                 + manifest.skippedVolatile.join(", "), "info");
         }
+        const unsaved = [...(manifest.unsavedPaint || []),
+                         ...(manifest.unsavedEdits || [])];
+        if (unsaved.length) {
+            this._showToast("Paint & sculpt edits are not saved in scenes — export "
+                + `as GLB to keep them on: ${[...new Set(unsaved)].join(", ")}`, "info");
+        }
         const name = window.prompt("Scene name (.mvscene):", "scene");
         if (!name) return;
         const targetDir = this._fileBrowser.currentPath;
+        // Save-time metadata — reported above, not scene data.
+        delete manifest.skippedVolatile;
+        delete manifest.unsavedPaint;
+        delete manifest.unsavedEdits;
 
         const save = async (overwrite) => fetch("/api/scene/save", {
             method: "POST",
@@ -1243,7 +1266,7 @@ class App {
             card.innerHTML = `
                 <div class="mat-card-header">
                     <div class="mat-color-swatch" style="background:${mat.color};"></div>
-                    <div class="mat-card-name" title="${mat.name}">${mat.name}</div>
+                    <div class="mat-card-name" title="${this._escapeHtml(mat.name)}">${this._escapeHtml(mat.name)}</div>
                     <div class="mat-card-type">${mat.type.replace("Mesh", "").replace("Material", "")}</div>
                 </div>
                 <div class="mat-props">

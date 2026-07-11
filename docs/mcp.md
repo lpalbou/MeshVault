@@ -7,13 +7,15 @@ control API (one-tool-per-command surfaces measurably degrade agent performance)
 
 An agent can: load a model from a **URL or a local file path** (multi-file assets load
 textured), COMPOSE multi-object scenes (`load_model {add:true}` + placement commands,
-persisted as `.mvscene` manifests via `save_scene`/`load_scene`), get a structured text
-description (no vision needed), discover and run any of the ~60 viewer commands
+persisted as `.mvscene` manifests via `save_scene`/`load_scene`), **CREATE from
+nothing** — add primitives, sculpt them with world-space brushes, paint real texture
+layers, and aim by screenshot coordinates (`pick`) — get a structured text
+description (no vision needed), discover and run any of the ~70 viewer commands
 (camera, render modes, lighting/IBL, transforms, cross-sections, measurement,
-animation, per-object placement), compare models geometrically, get PNG screenshots
-back as proper MCP image content, and share a session with a human both ways — push
-what it sees into the running app (`open_in_app`), or pick up what the human sees
-(`get_app_state`).
+animation, per-object placement, sculpt/paint), compare models geometrically, get PNG
+screenshots back as proper MCP image content, and share a session with a human both
+ways — push what it sees into the running app (`open_in_app`), or pick up what the
+human sees (`get_app_state`).
 
 > Not speaking MCP? The local server also exposes `GET /api/screenshot` — a plain
 > authenticated HTTP endpoint returning a PNG render (same presets, same confinement)
@@ -86,7 +88,7 @@ interpreter and working directory).
 | `list_viewer_commands` | Every action with its parameter schema (types, ranges, defaults). Call once, then use `viewer_execute`. |
 | `get_state` | Compact state snapshot (model, camera, display, animation, lighting) — verify a command's effect without a screenshot. |
 | `compare_models` | Compare ONE reference against N candidates (1–8) **geometrically**, via shape registration — not screenshots. Per candidate: `alignment` (uniform scale ratio, rotation angle, translation — how it had to be transformed to match; unit mismatches surface as the scale ratio), `distances` (symmetric chamfer mean/p95 + Hausdorff, normalized by the reference bbox diagonal, floor-corrected for sampling noise; `asymmetry` flags missing/extra regions), `classification` (identical / near_identical / same_shape_modified / different, with `borderline` + `warnings`), and `structural` count/inventory deltas. Returns `rankingBySimilarity`. Reference or candidates may be paths or URLs; `align:false` compares in place (detects pose changes). |
-| `screenshot` | Render the model as MCP **image content** (PNG, 16–8192 px), with a JSON metadata text block first. `best_view: true` moves to the model's most detailed angle (the chosen azimuth/elevation/score come back in the metadata). `views: ["front","left","45,20"]` captures several angles — presets or "azimuth,elevation" degrees — in ONE call, images returned in order. `preset: "studio"\|"neutral"\|"dark"` pins the **full** lighting/background state to a documented look first, so renders are comparable across sessions and agents (see below). |
+| `screenshot` | Render the model as MCP **image content** (PNG, 16–8192 px), with a JSON metadata text block first. `best_view: true` moves to the model's most detailed angle (the chosen azimuth/elevation/score come back in the metadata). `views: ["front","left","45,20"]` captures several angles — presets or "azimuth,elevation" degrees — in ONE call, images returned in order. `preset: "studio"\|"neutral"\|"dark"` pins the **full** lighting/background state to a documented look first, so renders are comparable across sessions and agents (see below). `ssao: false` + a small size (e.g. 192×192) = cheap proof render for sculpt/paint loops. |
 | `save_scene` | Persist the composed scene as a `.mvscene` manifest: per-object source + placement transform + visibility/opacity, plus scene lighting/environment/background. Objects from volatile sources (drag-drops) can't persist and are reported. |
 | `load_scene` | Rebuild a composed scene from a `.mvscene` file (replaces the current scene). Unresolvable objects degrade per-object; the rest load. Archive-member sources are app-only. |
 | `open_in_app` | Push the model you are inspecting — plus your current camera pose — into the **running MeshVault app** (`meshvault`), live, so a human co-reviews exactly what you see. Discovers the app via `~/.meshvault/app_session.json` (override: `MESHVAULT_APP_URL` + `MESHVAULT_TOKEN`). Returns `{clients, deep_link}`; when no tab is connected, hand the human the `deep_link` (the app honors `?path=`/`?dir=`/`?scene=` deep links). |
@@ -132,6 +134,67 @@ commands (`viewer_execute`): `list_objects`, `set_active_object {id}`,
   `set_object_transform` for scene placement.
 - GLB export includes every VISIBLE object with placements applied (authored
   materials, never viewer overrides); OBJ export stays active-object-only.
+
+### Sculpting, painting, primitives (backlog 045)
+
+Agents create and modify 3D content through `viewer_execute` — the same brush both a
+generator and a repair agent would use. All brushes are **world-space**; get
+coordinates from `pick` (screenshot pixel → surface point), `raycast` (world ray →
+surface point), `get_bounds`, or describe_scene mesh centers.
+
+```
+viewer_execute { action: "add_primitive",
+                 params: { kind: "sphere", color: "#c08850" } }
+viewer_execute { action: "sculpt",
+                 params: { tool: "draw", center: [0,0.9,0], radius: 0.3,
+                           strength: 0.15 } }          → {affected, maxDisplacement, newSize}
+viewer_execute { action: "paint",
+                 params: { center: [0,1,0.4], radius: 0.2, color: "#aa2200",
+                           opacity: 0.9 } }            → {painted, meanAlpha}
+screenshot { width: 256, height: 256, ssao: false }    → cheap proof render
+viewer_execute { action: "pick",
+                 params: { x: 0.44, y: 0.6, width: 256, height: 256 } }
+                                                       → {point, normal, objectId}
+```
+
+Rules an agent must know:
+
+- **Primitives** (`add_primitive`): box/sphere/cylinder/cone/torus/plane/capsule with
+  sculpt-friendly segment defaults and non-overlapping, paint-safe UV atlases. `color`
+  is honored exactly. Unknown `params` keys are rejected; segments cap at 256/axis.
+  Cylinder/cone caps are triangle fans — paintable, poor sculpting targets.
+- **Sculpt** (`sculpt`, `sculpt_stroke` ≤64 points/call): tools draw / inflate /
+  smooth / flatten / pinch / grab; `radius` world units or `radius_rel` (fraction of
+  the object's bounding-sphere radius — scale-free). Edits are seam-safe (welded
+  positions), instancing-aware, and correct under any placement. Quantified returns
+  ({affected, maxDisplacement, newSize}) let you steer without a render; a missed
+  brush is an ERROR that says how to fix it. `reset` restores pre-sculpt geometry.
+  Skinned models are refused. Strokes take explicit `points` OR a parametric
+  `path` ({type:"circle", center, axis, radius, sweep_deg?} / {type:"line", from,
+  to}) that the server samples at the correct density — rings, bands, arcs and
+  lines with zero external math.
+- **Paint** (`paint`, `paint_stroke`, `fill_paint`, `clear_paint`): real
+  CanvasTexture layers over the existing texture (or authored base color). `opacity`
+  is the MAX alpha per call (overlapping stamps never exceed it — no double-blend
+  artifacts); `meanAlpha` in the result flags near-invisible paint before you spend a
+  render. `shape:"square"` stamps crisp tangent-plane quads (checkers, panels);
+  `max_normal_angle` stops paint wrapping around hard edges (≈45° for boxes). Colors
+  blend in sRGB and land exactly as requested. Requires UVs (primitives always
+  qualify; STL/PLY error clearly). Budgeted at ~16M texels per session.
+- **Aim** (`pick`, `raycast`): `pick {x, y, width, height}` converts normalized
+  screenshot coordinates (y DOWN, top-left origin) into a surface point — ALWAYS pass
+  that screenshot's width/height, and re-pick after camera moves. `raycast {origin,
+  direction}` is the camera-independent variant.
+- **Batch** (`batch {commands: [...]≤32}`): one round-trip for stamp sequences
+  (e.g. 8 raycasts + 8 paint stamps). Stops at first error by default; cannot nest.
+- **Cameras for tableaus**: `orbit` / `set_view` accept `scope:"scene"` to frame the
+  whole composition from any angle; `frame_all` keeps the current direction.
+- **Persistence**: sculpt/paint deltas are session state. `.mvscene` manifests
+  rebuild pristine sources — `save_scene` warns (`unsaved paint/edits`) when the
+  scene carries unexported work; `viewer_execute {action:"export_glb"}` bakes
+  sculpted geometry AND painted textures into a self-contained file. `list_objects`
+  exposes `painted` / `sculpted` / `modified` (union) flags per object — a precise
+  audit trail without a screenshot.
 
 ### Render presets (`screenshot { preset }`)
 

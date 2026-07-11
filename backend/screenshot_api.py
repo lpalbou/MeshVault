@@ -85,8 +85,12 @@ class ScreenshotService:
     def _get_viewer(self) -> HeadlessViewer:
         if self._viewer is None:
             # The token authenticates the harness page's /api/asset/* fetches.
+            # idle_close_s: a one-shot screenshot must not pin ~0.8 GB of Chromium
+            # forever — the browser closes after idle and restarts on demand.
             self._viewer = HeadlessViewer(
-                extra_http_headers={"X-MeshVault-Token": self._token_supplier()})
+                extra_http_headers={"X-MeshVault-Token": self._token_supplier()},
+                idle_close_s=float(os.environ.get("MESHVAULT_SCREENSHOT_IDLE_CLOSE", "300")),
+            )
         return self._viewer
 
     async def render(self, harness_url: str, serve_path: Path, extension: str,
@@ -148,6 +152,11 @@ class ScreenshotService:
 
         png = await viewer.capture_png(width, height, transparent=transparent,
                                        hide_ground=hide_ground)
+
+        # Free the model's geometry/texture memory NOW: the warm browser (kept
+        # for fast follow-up requests) should idle at its floor, not pin the last
+        # model until the idle reaper fires. The next request unloads anyway.
+        await viewer.execute("unload", {})
         return png, meta
 
     async def close(self):

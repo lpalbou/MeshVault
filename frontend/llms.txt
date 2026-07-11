@@ -41,8 +41,15 @@ Key facts for agents:
   See https://github.com/lpalbou/MeshVault/blob/main/docs/mcp.md.
 - Scene composition: `load` replaces, `add_model` composes; per-object placement via
   set_object_transform (wrapper transforms, never baked); single-object commands act
-  on the ACTIVE object (set_active_object); frame_all for scene-wide framing;
-  get_scene_manifest serializes the composition.
+  on the ACTIVE object (set_active_object); frame_all or orbit/set_view with
+  scope:"scene" for scene-wide framing; get_scene_manifest serializes the composition.
+- Creation: agents can BUILD from nothing — `add_primitive` (7 kinds, paint-safe UV
+  atlases, exact colors), `sculpt`/`sculpt_stroke` (6 world-space brushes, welded
+  seam-safe edits, quantified {affected, maxDisplacement, newSize} returns),
+  `paint`/`paint_stroke`/`fill_paint`/`clear_paint` (real texture layers; honest
+  {painted, meanAlpha} feedback; shape:"square" quads; max_normal_angle edge clamp),
+  `pick`/`raycast` (screenshot/world coords → surface points — the hand-eye loop),
+  and `batch` (≤32 commands per round-trip). Sculpt+paint persist via export_glb.
 - REST screenshot (local server, no MCP needed): `GET /api/screenshot?path=/abs/
   model.glb&best_view=true&preset=studio` returns a PNG (token header required;
   metadata in the X-MeshVault-Screenshot header). Docs: docs/api.md.

@@ -223,6 +223,9 @@ function collectMaterials(meshes) {
                 modifiedByViewer,
                 maps,
                 textures,
+                // Agent-painted layer (CanvasTexture) vs authored texture — lets a
+                // material audit distinguish the two.
+                painted: !!(mat.userData && mat.userData._mvPaint) || undefined,
                 transparent: !!mat.transparent,
                 doubleSided: mat.side === THREE.DoubleSide,
                 meshes: [m.name],
@@ -301,6 +304,7 @@ function materialSummaries(materials, maxItems) {
         modifiedByViewer: m.modifiedByViewer || undefined,
         maps: m.maps,
         textures: Object.keys(m.textures).length ? m.textures : undefined,
+        painted: m.painted,
         transparent: m.transparent, doubleSided: m.doubleSided,
     }));
     return { items, omitted: Math.max(0, materials.length - items.length) };

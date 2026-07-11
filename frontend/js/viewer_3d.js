@@ -38,6 +38,7 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { SSAOPass } from "three/addons/postprocessing/SSAOPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import { paintedMeshNames, releasePaintBudget } from "./viewer/sculpt.js";
 
 /**
  * Turn a loader failure into a readable message. Loaders (and the Draco/Basis worker
@@ -174,7 +175,14 @@ export class Viewer3D {
 
     set _modelModified(value) {
         const entry = this._activeEntry();
-        if (entry) entry.modified = !!value;
+        if (entry) {
+            entry.modified = !!value;
+            // Every writer of this compat setter is a GEOMETRY operation
+            // (bakes/rotate/simplify/recompute) — track it as sculpted/baked so
+            // introspection can distinguish geometry edits from paint-only
+            // changes (`modified` stays the union: "anything unexported").
+            if (value) entry.sculpted = true;
+        }
     }
 
     _activeEntry() {
@@ -290,6 +298,182 @@ export class Viewer3D {
         return { ...entry.stats, objectId: entry.id };
     }
 
+    /**
+     * Add a procedural primitive as a scene object (backlog 045 — the sculpting
+     * starting stock). Primitives are first-class objects: they persist in
+     * manifests via their {kind:"primitive"} source and rebuild without files.
+     * Default segment densities are chosen for SCULPTABILITY — a 12-triangle box
+     * cannot deform.
+     */
+    addPrimitive(kind, options = {}) {
+        const { geometry, params } = this._buildPrimitiveGeometry(kind, options.params || {});
+        const color = options.color !== undefined ? options.color : "#9aa4b0";
+        const material = new THREE.MeshStandardMaterial({
+            color, roughness: 0.7, metalness: 0.0, side: THREE.DoubleSide,
+        });
+        // The agent chose this color deliberately — the dark-color preview clamp
+        // must not repaint it (see _fixDarkColor).
+        material.userData._mvKeepColor = true;
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.name = kind;
+        const group = new THREE.Group();
+        group.name = `${kind}_primitive`;
+        group.add(mesh);
+
+        const entry = this._insertEntry(group, "", `.${kind}`, {
+            name: options.name || kind,
+            source: { kind: "primitive", primitive: kind, params, color },
+        });
+        if (options.transform) this.setObjectTransform(entry.id, options.transform);
+        if (options.frame !== false) this.frameAll();
+        else this._updateSceneRig(this._visibleUnionBox());
+        return { ...entry.stats, objectId: entry.id, kind, params };
+    }
+
+    /** Allowed params per primitive kind — unknown keys are REJECTED (a typo like
+     *  `radiu` must not silently produce a default shape with ok:true). */
+    static PRIMITIVE_PARAMS = {
+        box: ["width", "height", "depth", "segments"],
+        sphere: ["radius", "widthSegments", "heightSegments"],
+        cylinder: ["radius", "radiusTop", "radiusBottom", "height",
+                   "radialSegments", "heightSegments"],
+        cone: ["radius", "height", "radialSegments", "heightSegments"],
+        torus: ["radius", "tube", "radialSegments", "tubularSegments"],
+        plane: ["width", "height", "widthSegments", "heightSegments"],
+        capsule: ["radius", "length", "capSegments", "radialSegments"],
+    };
+
+    _buildPrimitiveGeometry(kind, p) {
+        const allowed = Viewer3D.PRIMITIVE_PARAMS[kind];
+        if (!allowed) {
+            throw new Error(
+                `Unknown primitive '${kind}'. Use box|sphere|cylinder|cone|torus|plane|capsule.`);
+        }
+        const unknown = Object.keys(p).filter((k) => !allowed.includes(k));
+        if (unknown.length > 0) {
+            throw new Error(
+                `Unknown param(s) for ${kind}: ${unknown.join(", ")}. Allowed: ${allowed.join(", ")}.`);
+        }
+        // Segment caps (≤256) bound the constructible vertex count; the post-check
+        // below is the belt-and-braces total cap.
+        const seg = (v, def) => Math.max(1, Math.min(256, Math.round(v !== undefined ? v : def)));
+        const num = (v, def) => (typeof v === "number" && v > 0 ? v : def);
+        let geometry, params;
+        // Segment defaults are tuned for SCULPTABILITY: a brush of ~0.1× the
+        // primitive size should cover dozens of vertices, not a handful.
+        switch (kind) {
+            case "box": {
+                params = { width: num(p.width, 1), height: num(p.height, 1),
+                           depth: num(p.depth, 1), segments: seg(p.segments, 24) };
+                geometry = new THREE.BoxGeometry(
+                    params.width, params.height, params.depth,
+                    params.segments, params.segments, params.segments);
+                // 3×2 face atlas — default BoxGeometry maps ALL SIX faces onto the
+                // full [0,1]² square, so painting one face paints all six.
+                this._atlasGroupUVs(geometry, [
+                    [0, 0.5, 1 / 3, 0.5], [1 / 3, 0.5, 1 / 3, 0.5], [2 / 3, 0.5, 1 / 3, 0.5],
+                    [0, 0, 1 / 3, 0.5], [1 / 3, 0, 1 / 3, 0.5], [2 / 3, 0, 1 / 3, 0.5],
+                ]);
+                break;
+            }
+            case "sphere": {
+                params = { radius: num(p.radius, 0.5),
+                           widthSegments: seg(p.widthSegments, 64),
+                           heightSegments: seg(p.heightSegments, 48) };
+                geometry = new THREE.SphereGeometry(
+                    params.radius, params.widthSegments, params.heightSegments);
+                break;
+            }
+            case "cylinder": {
+                params = { radiusTop: num(p.radiusTop, num(p.radius, 0.5)),
+                           radiusBottom: num(p.radiusBottom, num(p.radius, 0.5)),
+                           height: num(p.height, 1),
+                           radialSegments: seg(p.radialSegments, 64),
+                           heightSegments: seg(p.heightSegments, 32) };
+                geometry = new THREE.CylinderGeometry(
+                    params.radiusTop, params.radiusBottom, params.height,
+                    params.radialSegments, params.heightSegments);
+                // Side band on top, cap islands below (caps overlap the side band
+                // in stock UVs). Caps are triangle FANS — fine to paint, poor to
+                // sculpt (no interior vertices); documented in the command help.
+                this._atlasGroupUVs(geometry, [
+                    [0, 0.5, 1, 0.5], [0, 0, 0.5, 0.5], [0.5, 0, 0.5, 0.5],
+                ]);
+                break;
+            }
+            case "cone": {
+                params = { radius: num(p.radius, 0.5), height: num(p.height, 1),
+                           radialSegments: seg(p.radialSegments, 64),
+                           heightSegments: seg(p.heightSegments, 32) };
+                geometry = new THREE.ConeGeometry(
+                    params.radius, params.height,
+                    params.radialSegments, params.heightSegments);
+                this._atlasGroupUVs(geometry, [
+                    [0, 0.5, 1, 0.5], [0, 0, 0.5, 0.5], [0.5, 0, 0.5, 0.5],
+                ]);
+                break;
+            }
+            case "torus": {
+                params = { radius: num(p.radius, 0.5), tube: num(p.tube, 0.2),
+                           radialSegments: seg(p.radialSegments, 48),
+                           tubularSegments: seg(p.tubularSegments, 96) };
+                geometry = new THREE.TorusGeometry(
+                    params.radius, params.tube,
+                    params.radialSegments, params.tubularSegments);
+                break;
+            }
+            case "plane": {
+                params = { width: num(p.width, 1), height: num(p.height, 1),
+                           widthSegments: seg(p.widthSegments, 48),
+                           heightSegments: seg(p.heightSegments, 48) };
+                geometry = new THREE.PlaneGeometry(
+                    params.width, params.height,
+                    params.widthSegments, params.heightSegments);
+                break;
+            }
+            case "capsule": {
+                params = { radius: num(p.radius, 0.3), length: num(p.length, 0.6),
+                           capSegments: seg(p.capSegments, 24),
+                           radialSegments: seg(p.radialSegments, 64) };
+                geometry = new THREE.CapsuleGeometry(
+                    params.radius, params.length,
+                    params.capSegments, params.radialSegments);
+                break;
+            }
+        }
+        const count = geometry.getAttribute("position").count;
+        if (count > 250000) {
+            geometry.dispose();
+            throw new Error(
+                `Primitive too dense (${count.toLocaleString()} vertices > 250k). Lower the segment counts.`);
+        }
+        return { geometry, params };
+    }
+
+    /** Remap each geometry GROUP's UVs into its own atlas rect
+     *  [uOffset, vOffset, uScale, vScale] so paint on one face/cap never bleeds
+     *  onto another. Vertices are not shared across groups in three's builders. */
+    _atlasGroupUVs(geometry, rects) {
+        const uv = geometry.getAttribute("uv");
+        const index = geometry.getIndex();
+        if (!uv || !geometry.groups || geometry.groups.length === 0) return;
+        const seen = new Set();
+        geometry.groups.forEach((group, gi) => {
+            const rect = rects[Math.min(gi, rects.length - 1)];
+            for (let i = group.start; i < group.start + group.count; i++) {
+                const vi = index ? index.getX(i) : i;
+                if (seen.has(vi)) continue;
+                seen.add(vi);
+                uv.setXY(vi,
+                         rect[0] + uv.getX(vi) * rect[2],
+                         rect[1] + uv.getY(vi) * rect[3]);
+            }
+        });
+        // Single-material primitives: collapse the per-face material groups so the
+        // whole geometry renders as one range.
+        geometry.clearGroups();
+    }
+
     /** Fetch + parse a model WITHOUT touching the scene (shared by load/add). */
     async _parseModel(url, extension, options = {}) {
         const ext = extension.toLowerCase();
@@ -377,20 +561,21 @@ export class Viewer3D {
         // Texture loads OUTLIVE the mesh load (loaders resolve when geometry
         // parses; MTL/FBX textures keep streaming in). Once they settle, clear
         // slots that DEFINITIVELY failed (404/decode error) so those materials
-        // fall back to their base color instead of an unbound sampler. Membership
-        // check against the REGISTRY (not the active pointer): a co-loaded object
-        // must get its janitor pass even after another object became active.
+        // fall back to their base color instead of an unbound sampler. The
+        // closure captures only the entry ID — capturing the model would pin its
+        // full geometry/texture memory for 8 s even after removal/unload.
+        const janitorId = entry.id;
         setTimeout(() => {
-            if (this._objects.some((e) => e.model === object)) {
-                this._sanitizeObjectTextures(object);
-            }
+            const live = this._objects.find((e) => e.id === janitorId);
+            if (live) this._sanitizeObjectTextures(live.model);
         }, 8000);
 
         // Wire up any animation clips and notify the UI (play/pause/scrub controls).
         this._setupAnimationsForEntry(entry);
 
-        // Save a per-entry snapshot of the original geometry for Reset.
-        this._saveOriginalGeometryForEntry(entry);
+        // The Reset snapshot is taken LAZILY (_ensureResetSnapshot) at the first
+        // geometry-mutating operation — an unmodified model never pays the ~35-40%
+        // geometry-RAM duplicate just for the possibility of Reset.
 
         // Re-apply persistent scene settings (wireframe/normals/render mode) so an
         // object arriving into a styled scene matches it.
@@ -421,6 +606,9 @@ export class Viewer3D {
      * so removed objects never pin geometry copies in memory.
      */
     _disposeEntry(entry) {
+        // Return painted-texel budget BEFORE materials are disposed (the layer
+        // records live on material.userData).
+        releasePaintBudget(entry.model);
         entry.model.traverse((child) => {
             if (child.isMesh && child._mvOriginalMaterial) {
                 const override = child.material;
@@ -470,18 +658,27 @@ export class Viewer3D {
 
     /** Summaries of every object (id, name, active, visibility, opacity, source). */
     listObjects() {
-        return this._objects.map((e) => ({
-            id: e.id,
-            name: e.name,
-            active: e.id === this._activeObjectId,
-            visible: e.visible,
-            opacity: e.opacity,
-            skinned: e.skinned,
-            source: e.source,
-            vertices: e.stats ? e.stats.vertices : 0,
-            faces: e.stats ? e.stats.faces : 0,
-            transform: this._transformOf(e),
-        }));
+        return this._objects.map((e) => {
+            const painted = paintedMeshNames(e.model);
+            return {
+                id: e.id,
+                name: e.name,
+                active: e.id === this._activeObjectId,
+                visible: e.visible,
+                opacity: e.opacity,
+                skinned: e.skinned,
+                source: e.source,
+                vertices: e.stats ? e.stats.vertices : 0,
+                faces: e.stats ? e.stats.faces : 0,
+                // Delta flags: which objects carry unexported work, introspectable
+                // without a screenshot. painted = paint layers; sculpted =
+                // geometry edits (sculpt/bakes); modified = the union (export-dirty).
+                painted: painted.length > 0 || undefined,
+                sculpted: e.sculpted || undefined,
+                modified: e.modified || undefined,
+                transform: this._transformOf(e),
+            };
+        });
     }
 
     /** Make an object active (single-object commands target it). */
@@ -655,7 +852,15 @@ export class Viewer3D {
     getSceneManifest() {
         const objects = [];
         const skipped = [];
+        const unsavedPaint = [];
+        const unsavedEdits = [];
         for (const e of this._objects) {
+            // Manifests store SOURCES + placements, not deltas: paint layers
+            // (CanvasTextures) and sculpt/bake vertex edits are NOT persisted —
+            // load_scene rebuilds pristine sources. The warnings must surface AT
+            // SAVE TIME or agents lose work silently; export GLB keeps both.
+            if (paintedMeshNames(e.model).length > 0) unsavedPaint.push(e.name);
+            if (e.modified) unsavedEdits.push(e.name);
             if (!e.source || e.source.kind === "volatile") {
                 skipped.push(e.name);
                 continue;
@@ -672,6 +877,8 @@ export class Viewer3D {
             version: 1,
             objects,
             skippedVolatile: skipped,
+            unsavedPaint,
+            unsavedEdits,
             lighting: this.getLightSettings(),
             environment: this.getEnvironment(),
             background: this._background,
@@ -735,6 +942,7 @@ export class Viewer3D {
 
     /** Play the clip at `index` on the ACTIVE object (stops its other clips). */
     playAnimation(index) {
+        this.invalidate();
         const anim = this._activeAnimation;
         if (!anim || !anim.actions[index]) return;
         for (const a of anim.actions) a.stop();
@@ -748,6 +956,7 @@ export class Viewer3D {
 
     /** Pause or resume the active object's clip. Returns the new playing state. */
     toggleAnimationPlay() {
+        this.invalidate();
         const anim = this._activeAnimation;
         if (!anim || !anim.activeAction) return false;
         anim.activeAction.paused = !anim.activeAction.paused;
@@ -756,6 +965,7 @@ export class Viewer3D {
     }
 
     setAnimationPlaying(playing) {
+        this.invalidate();
         const anim = this._activeAnimation;
         if (!anim || !anim.activeAction) return;
         anim.activeAction.paused = !playing;
@@ -783,6 +993,7 @@ export class Viewer3D {
 
     /** Seek the active clip to `seconds` (pauses so the frame holds). */
     setAnimationTime(seconds) {
+        this.invalidate();
         const anim = this._activeAnimation;
         if (!anim || !anim.activeAction || !anim.mixer) return;
         anim.activeAction.paused = true;
@@ -1142,11 +1353,21 @@ export class Viewer3D {
         this._renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this._renderer.shadowMap.enabled = true;
         this._renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        // Shadows re-render only when something changes (invalidate() flags
+        // needsUpdate). A static scene was re-rendering its shadow map every
+        // frame — pure waste for a viewer whose scenes are mostly still.
+        this._renderer.shadowMap.autoUpdate = false;
+        this._renderer.shadowMap.needsUpdate = true;
         this._renderer.toneMapping = THREE.ACESFilmicToneMapping;
         this._renderer.toneMappingExposure = 1.2;
         this._renderer.outputColorSpace = THREE.SRGBColorSpace;
 
         this._container.appendChild(this._renderer.domElement);
+
+        // Async resource arrivals (textures decoding after the mesh parsed) must
+        // repaint, or agents screenshot untextured models and humans see stale
+        // frames until they touch the camera.
+        THREE.DefaultLoadingManager.onLoad = () => this.invalidate();
     }
 
     _initControls() {
@@ -1162,6 +1383,9 @@ export class Viewer3D {
         this._controls.maxDistance = 1000;
         this._controls.target.set(0, 0.5, 0);
         this._controls.update();
+        // Demand-driven rendering: camera motion (user input AND damping settle
+        // frames) requests repaints; when motion stops, the loop goes idle.
+        this._controls.addEventListener("change", () => this.invalidate());
     }
 
     /**
@@ -1293,6 +1517,7 @@ export class Viewer3D {
     }
 
     _clearMeasurement() {
+        this.invalidate();
         this._measurePoints = [];
         while (this._measureGroup.children.length) {
             const child = this._measureGroup.children.pop();
@@ -1303,6 +1528,7 @@ export class Viewer3D {
     }
 
     _addMeasurePoint(point) {
+        this.invalidate();
         // A third click starts a fresh measurement.
         if (this._measurePoints.length >= 2) this._clearMeasurement();
         this._measurePoints.push(point);
@@ -1572,6 +1798,7 @@ export class Viewer3D {
      * @param {'orbit'|'fpv'} mode
      */
     setNavMode(mode) {
+        this.invalidate();
         if (mode === this._navMode) return;
 
         this._keysPressed.clear();
@@ -1653,6 +1880,7 @@ export class Viewer3D {
      * @param {number[]} [target] - [x,y,z]; defaults to current target
      */
     setCamera(position, target, fov) {
+        this.invalidate();
         if (this._navMode === "fpv") this.setNavMode("orbit");
         this._camera.position.set(position[0], position[1], position[2]);
         if (target) this._controls.target.set(target[0], target[1], target[2]);
@@ -1850,9 +2078,17 @@ export class Viewer3D {
         return base / f;
     }
 
-    /** Place the camera along a unit direction, framed to fill the current model. */
-    _placeCamera(dir, fill, up) {
-        const box = new THREE.Box3().setFromObject(this._currentModel);
+    /** Place the camera along a unit direction, framed to fill the current model —
+     *  or the whole visible scene with scope:"scene" (multi-object tableaus need
+     *  angled shots without hand-computed set_camera positions). */
+    _placeCamera(dir, fill, up, scope) {
+        let box = null;
+        if (scope === "scene") {
+            box = this._visibleUnionBox();
+        }
+        if (!box || box.isEmpty()) {
+            box = new THREE.Box3().setFromObject(this._currentModel);
+        }
         const size = box.getSize(new THREE.Vector3());
         const center = box.getCenter(new THREE.Vector3());
         const maxDim = Math.max(size.x, size.y, size.z) || 1;
@@ -1991,7 +2227,7 @@ export class Viewer3D {
         };
         const d = dirs[preset];
         if (!d) return false;
-        return this._placeCamera(new THREE.Vector3(d[0], d[1], d[2]), opts.fill);
+        return this._placeCamera(new THREE.Vector3(d[0], d[1], d[2]), opts.fill, null, opts.scope);
     }
 
     /**
@@ -2009,7 +2245,7 @@ export class Viewer3D {
             Math.sin(el),
             Math.cos(el) * Math.cos(az),
         );
-        return this._placeCamera(dir, opts.fill);
+        return this._placeCamera(dir, opts.fill, null, opts.scope);
     }
 
     /**
@@ -2257,6 +2493,7 @@ export class Viewer3D {
      * Original materials are preserved and restored when returning to 'shaded'.
      */
     setRenderMode(mode) {
+        this.invalidate();
         if (this._objects.length === 0) return false;
         // Canonical modes + friendly aliases:
         //   textured (= mesh + texture, the lit PBR surface)   [aliases: shaded]
@@ -2404,6 +2641,7 @@ export class Viewer3D {
 
     /** Enable/disable/adjust exponential scene fog. */
     setFog(opts = {}) {
+        this.invalidate();
         if (opts.enabled === false) {
             this._scene.fog = null;
             return true;
@@ -2605,6 +2843,7 @@ export class Viewer3D {
      * @param {boolean} [opts.asBackground] - show the environment as the background
      */
     setEnvironment(opts = {}) {
+        this.invalidate();
         if (opts.enabled !== undefined) this._environmentEnabled = !!opts.enabled;
         if (opts.intensity !== undefined) this._environmentIntensity = opts.intensity;
         this._applyEnvironment();
@@ -2680,6 +2919,7 @@ export class Viewer3D {
     _loadOBJ(url, options = {}) {
         return new Promise((resolve, reject) => {
             const manager = new THREE.LoadingManager();
+            manager.onLoad = () => this.invalidate();  // repaint when textures land
             const relatedFiles = options.relatedFiles || [];
 
             // Check if there's a .mtl file among related files
@@ -2750,6 +2990,7 @@ export class Viewer3D {
             // through our API. This is essential for archived assets where
             // textures are extracted to a temp directory.
             const manager = new THREE.LoadingManager();
+            manager.onLoad = () => this.invalidate();  // repaint when textures land
             const relatedFiles = options.relatedFiles || [];
             const sourcePath = options.sourcePath || null;
 
@@ -3175,11 +3416,15 @@ export class Viewer3D {
      */
     _sanitizeObjectTextures(object, settled = true) {
         if (!object) return;
+        let changed = false;
         object.traverse((child) => {
             if (!child.isMesh || !child.material) return;
             const mats = Array.isArray(child.material) ? child.material : [child.material];
-            for (const m of mats) this._sanitizeMaterialTextureSlots(m, settled);
+            for (const m of mats) {
+                if (this._sanitizeMaterialTextureSlots(m, settled)) changed = true;
+            }
         });
+        if (changed) this.invalidate();
     }
 
     _isTextureFilePath(path) {
@@ -3739,6 +3984,10 @@ export class Viewer3D {
         let changed = false;
         this._sanitizeMaterialTextureSlots(material);
 
+        // Deliberately-colored materials (agent-created primitives) are exempt from
+        // the readability clamps — a requested black stays black.
+        if (material.userData && material.userData._mvKeepColor) return false;
+
         // Some FBX exports set transparent=true with very low opacity even for
         // opaque meshes. In a preview viewer this makes assets nearly invisible.
         if (material.transparent && !material.alphaMap && material.opacity < 0.2) {
@@ -3824,6 +4073,7 @@ export class Viewer3D {
      * single-object loads pass the object's own box (unchanged behavior).
      */
     _frameToBox(box) {
+        this.invalidate();
         if (!box || box.isEmpty()) return;
         this._preFocusClip = null;  // whole-scene framing supersedes any part focus
 
@@ -3867,6 +4117,7 @@ export class Viewer3D {
      * its shadow otherwise).
      */
     _updateSceneRig(box) {
+        this.invalidate();
         if (!box || box.isEmpty()) return;
         const size = box.getSize(new THREE.Vector3());
         const center = box.getCenter(new THREE.Vector3());
@@ -3920,6 +4171,7 @@ export class Viewer3D {
      * Uses spherical coordinates orbiting around the model center.
      */
     _updateKeyLightPosition() {
+        this.invalidate();
         const r = this._keyLightRadius;
         const az = this._keyLightAzimuth;
         const el = this._keyLightElevation;
@@ -3954,22 +4206,26 @@ export class Viewer3D {
 
     /** Set key light intensity (0-3). Default: 1.2. */
     setKeyLightIntensity(value) {
+        this.invalidate();
         this._keyLight.intensity = value;
     }
 
     /** Set fill light intensity (0-2). Default: 0.5. */
     setFillLightIntensity(value) {
+        this.invalidate();
         this._fillLight.intensity = value;
     }
 
     /** Set ambient light intensity (0-2). Default: 0.3. */
     setAmbientIntensity(value) {
+        this.invalidate();
         this._ambientLight.intensity = value;
         this._hemiLight.intensity = value * 2; // Hemisphere scales proportionally
     }
 
     /** Set tone mapping exposure (0.3-4). Default: 1.2. */
     setExposure(value) {
+        this.invalidate();
         this._renderer.toneMappingExposure = value;
     }
 
@@ -3978,8 +4234,11 @@ export class Viewer3D {
      * @param {number} scale - Scale factor (e.g., 0.25, 0.5, 1.0, 2.0)
      */
     setModelScale(scale) {
+        this.invalidate();
         const entry = this._activeEntry();
         if (entry) {
+            // Reset must be able to restore the pre-scale root transform.
+            this._ensureResetSnapshot(entry);
             // Scale sits on the MODEL root (inside the wrapper): it is an asset
             // adjustment that bake ops fold into vertices — distinct from the
             // wrapper's placement scale (set_object_transform), which never bakes.
@@ -3997,6 +4256,7 @@ export class Viewer3D {
      * @param {boolean} enabled - Whether to show wireframe
      */
     setWireframe(enabled) {
+        this.invalidate();
         // Scene-wide display toggle: applies to every object.
         for (const entry of this._objects) {
             entry.model.traverse((child) => {
@@ -4024,6 +4284,7 @@ export class Viewer3D {
      * @param {boolean} enabled
      */
     setNormalsVisible(enabled) {
+        this.invalidate();
         // Remove existing helpers
         this._clearNormalsHelpers();
 
@@ -4073,6 +4334,7 @@ export class Viewer3D {
      * @param {string} hex - CSS hex color (e.g. "#1a1a1a")
      */
     setBackground(hex) {
+        this.invalidate();
         const color = new THREE.Color(hex);
         // Don't clobber an environment-as-background; just remember the color for later.
         if (!this._envAsBackground) this._scene.background = color;
@@ -4104,6 +4366,7 @@ export class Viewer3D {
      * @param {boolean} visible
      */
     setGridVisible(visible) {
+        this.invalidate();
         this._gridVisible = visible;
         if (this._grid) this._grid.visible = visible;
     }
@@ -4118,6 +4381,7 @@ export class Viewer3D {
      * @param {boolean} visible
      */
     setAxisVisible(visible) {
+        this.invalidate();
         this._axisVisible = visible;
         this._axisGroup.visible = visible;
     }
@@ -4135,17 +4399,38 @@ export class Viewer3D {
      * Save a snapshot of all geometry positions + mesh transforms
      * so we can restore them on Reset.
      */
-    /** Per-entry geometry snapshot (Reset support). See _insertEntry. */
+    /** Per-entry geometry snapshot (Reset support). See _insertEntry.
+     *
+     * Positions are snapshotted THROUGH THE ACCESSOR (getX/getY/getZ), never as a
+     * raw array copy: quantized attributes (KHR_mesh_quantization Int16) would
+     * snapshot raw integers and restore ±32767-range garbage into the dequantized
+     * float buffer after any bake/sculpt; interleaved attributes would snapshot
+     * the whole stride-packed buffer and silently fail the restore. Decoded
+     * floats restore correctly into ANY later attribute layout via setXYZ. */
+    /** Take the Reset snapshot if this entry doesn't have one yet. Called at
+     *  every geometry-mutating entry point (bakes, scale, sculpt) — unmodified
+     *  models never pay the snapshot's memory. */
+    _ensureResetSnapshot(entry) {
+        if (entry && !entry.originalState) this._saveOriginalGeometryForEntry(entry);
+    }
+
     _saveOriginalGeometryForEntry(entry) {
         const items = [];
         entry.model.updateMatrixWorld(true);
         entry.model.traverse((child) => {
             if (child.isMesh && child.geometry) {
                 const posAttr = child.geometry.attributes.position;
+                const positions = new Float32Array(posAttr.count * 3);
+                for (let i = 0; i < posAttr.count; i++) {
+                    positions[i * 3] = posAttr.getX(i);
+                    positions[i * 3 + 1] = posAttr.getY(i);
+                    positions[i * 3 + 2] = posAttr.getZ(i);
+                }
                 items.push({
                     mesh: child,
                     geometry: child.geometry,
-                    positions: new Float32Array(posAttr.array),
+                    count: posAttr.count,
+                    positions,
                     position: child.position.clone(),
                     rotation: child.rotation.clone(),
                     scale: child.scale.clone(),
@@ -4171,35 +4456,51 @@ export class Viewer3D {
      * undoes bakes since the last geometry-modifying operation instead.
      */
     resetModel() {
+        this.invalidate();
         const entry = this._activeEntry();
         if (!entry || !entry.originalState) return;
         const snap = entry.originalState;
 
+        const restoredGeometries = new Set();
         for (const saved of snap.items) {
             // Geometry object was replaced since the snapshot? (defensive — the
             // retake rule should prevent this, but never write into a mismatched
-            // buffer.)
+            // buffer.) Shared geometries (glTF instancing) restore once.
             if (saved.mesh.geometry !== saved.geometry) continue;
             const posAttr = saved.mesh.geometry.attributes.position;
-            if (!posAttr || posAttr.array.length !== saved.positions.length) continue;
-            posAttr.array.set(saved.positions);
-            posAttr.needsUpdate = true;
+            if (!posAttr || posAttr.count !== saved.count) continue;
+            if (!restoredGeometries.has(saved.geometry)) {
+                restoredGeometries.add(saved.geometry);
+                // Write through the accessor: correct into plain, dequantized OR
+                // interleaved layouts alike (see _saveOriginalGeometryForEntry).
+                for (let i = 0; i < saved.count; i++) {
+                    posAttr.setXYZ(i, saved.positions[i * 3],
+                                   saved.positions[i * 3 + 1],
+                                   saved.positions[i * 3 + 2]);
+                }
+                posAttr.needsUpdate = true;
+                saved.mesh.geometry.computeVertexNormals();
+                saved.mesh.geometry.computeBoundingBox();
+                saved.mesh.geometry.computeBoundingSphere();
+            }
 
             saved.mesh.position.copy(saved.position);
             saved.mesh.rotation.copy(saved.rotation);
             saved.mesh.scale.copy(saved.scale);
             saved.mesh.updateMatrix();
-
-            saved.mesh.geometry.computeVertexNormals();
-            saved.mesh.geometry.computeBoundingBox();
-            saved.mesh.geometry.computeBoundingSphere();
         }
 
         entry.model.position.copy(snap.rootPos);
         entry.model.rotation.copy(snap.rootRot);
         entry.model.scale.copy(snap.rootScale);
+        // Keep the tracked scale value in sync with the restored root scale
+        // (getModelScale/UI slider read it).
+        entry.modelScale = snap.rootScale.x;
 
-        entry.modified = false;
+        entry.sculpted = false;
+        // Paint layers survive reset (clear_paint is their undo) — the object is
+        // still export-dirty if any remain.
+        entry.modified = paintedMeshNames(entry.model).length > 0;
     }
 
     /**
@@ -4223,6 +4524,8 @@ export class Viewer3D {
                 + "supported for skinned/animated models — it corrupts the bind pose. "
                 + "Use set_object_transform to place the object instead.");
         }
+        // First mutation of this entry? Snapshot NOW, before vertices change.
+        this._ensureResetSnapshot(entry);
 
         const model = entry.model;
         entry.wrapper.updateMatrixWorld(true);
@@ -4432,11 +4735,13 @@ export class Viewer3D {
         // Re-enable normals display if it was on
         if (hadNormals) this.setNormalsVisible(true);
 
-        // Geometry objects were REPLACED — retake the Reset snapshot (restoring an
-        // old positions array into new geometry was the "offset out of bounds" bug).
+        // Geometry objects were REPLACED — the old snapshot must not be restored
+        // into the new geometry (the "offset out of bounds" bug). Drop it; the
+        // NEW geometry becomes the reset baseline, snapshotted lazily on the next
+        // mutation ("reset = undo everything since the last geometry-replacing op").
         const entry = this._activeEntry();
         if (entry) {
-            this._saveOriginalGeometryForEntry(entry);
+            entry.originalState = null;
             entry.stats = this._computeStats(entry.model);
             this._lastStats = entry.stats;
             this._onInfoUpdate(entry.stats);
@@ -4789,10 +5094,11 @@ export class Viewer3D {
         this._modelModified = true;
         if (hadNormals) this.setNormalsVisible(true);
 
-        // Geometry objects were REPLACED — retake the Reset snapshot (see resetModel).
+        // Geometry objects were REPLACED — drop the stale snapshot; the new
+        // geometry is the reset baseline (snapshotted lazily on next mutation).
         const entry = this._activeEntry();
         if (entry) {
-            this._saveOriginalGeometryForEntry(entry);
+            entry.originalState = null;
             entry.stats = this._computeStats(entry.model);
             this._lastStats = entry.stats;
             this._onInfoUpdate(entry.stats);
@@ -5017,6 +5323,9 @@ export class Viewer3D {
             cam.aspect = prevAspect;
             cam.updateProjectionMatrix();
         }
+        // The canvas now holds the capture-sized frame; with the demand-driven
+        // loop idle, nothing would repaint at the live size until the next input.
+        this.invalidate();
         return dataUrl;
     }
 
@@ -5252,16 +5561,72 @@ export class Viewer3D {
     // Render Loop
     // ==========================================
 
+    /**
+     * DEMAND-DRIVEN rendering (resource priority: stay lightweight).
+     *
+     * The old loop rendered 60fps forever — in the headless MCP harness that
+     * meant SwiftShader software-rendering an unchanged frame continuously
+     * (measured: ~140% CPU while completely idle; an orphaned session burned
+     * 19 CPU-hours overnight). Now a frame renders only when something asks
+     * for one (invalidate()), an animation is playing, or FPV input is active;
+     * after ~0.75s with nothing to do the rAF loop STOPS entirely and resumes
+     * on the next invalidation. OrbitControls damping keeps itself alive via
+     * its 'change' events; synchronous captures (screenshot/scoring) render
+     * explicitly and are unaffected.
+     */
     _startRenderLoop() {
+        this._renderRequested = true;   // always draw the first frame
+        this._idleFrames = 0;
+        this._renderLoopActive = false;
+        this._resumeRenderLoop();
+    }
+
+    /** Request a repaint (and shadow refresh); restarts the loop if stopped. */
+    invalidate() {
+        this._renderRequested = true;
+        if (this._renderer && this._renderer.shadowMap) {
+            this._renderer.shadowMap.needsUpdate = true;
+        }
+        this._resumeRenderLoop();
+    }
+
+    _resumeRenderLoop() {
+        if (this._renderLoopActive) return;
+        this._renderLoopActive = true;
+        // Reset the clock so a resumed animation doesn't jump by the idle time.
+        this._clock.getDelta();
+
         const animate = () => {
+            if (!this._renderLoopActive) return;
             this._animationId = requestAnimationFrame(animate);
+
+            const activeAnim = this._activeAnimation;
+            const animating = !!(activeAnim && activeAnim.mixer && activeAnim.playing);
+            const fpvActive = this._navMode === "fpv"
+                && (this._keysPressed.size > 0 || this._fpvMouseDown);
+
+            if (!this._renderRequested && !animating && !fpvActive) {
+                // Nothing to draw. Idle briefly (damping/late events), then stop.
+                if (++this._idleFrames > 45) {
+                    this._renderLoopActive = false;
+                    if (this._animationId) {
+                        cancelAnimationFrame(this._animationId);
+                        this._animationId = null;
+                    }
+                }
+                return;
+            }
+            this._idleFrames = 0;
+            this._renderRequested = false;
 
             const delta = this._clock.getDelta();
 
             // Apply FPV drone movement (only active in FPV mode)
             this._applyFPVMovement(delta);
 
-            // Update orbit controls (damping, etc. — only when enabled)
+            // Update orbit controls (damping, etc. — only when enabled). While
+            // damping is in motion this fires 'change' → invalidate(), which keeps
+            // the loop alive exactly until the motion settles.
             if (this._controls.enabled) {
                 this._controls.update();
             }
@@ -5269,9 +5634,10 @@ export class Viewer3D {
             // Update animation mixers (FBX)
             // Advance ONLY the active object's animation: deactivated objects
             // freeze mid-pose in the composed scene and resume on re-activation.
-            const activeAnim = this._activeAnimation;
-            if (activeAnim && activeAnim.mixer) {
+            if (animating) {
                 activeAnim.mixer.update(delta);
+                // Animated geometry moves its shadows every frame.
+                this._renderer.shadowMap.needsUpdate = true;
             }
 
             // A camera-relative cutting plane must track the moving camera each frame.
@@ -5287,6 +5653,7 @@ export class Viewer3D {
     }
 
     _onResize() {
+        this.invalidate();
         const width = this._container.clientWidth;
         const height = this._container.clientHeight;
 
@@ -5320,7 +5687,13 @@ export class Viewer3D {
     _computeStats(object) {
         let bufferVerts = 0;
         let faces = 0;
-        const uniqueSet = new Set();
+        // Dedup positions with nested NUMERIC maps (x -> y -> Set of z) — exact
+        // for any coordinate range, and allocation-free per vertex. The previous
+        // per-vertex template strings (~60 B + rope churn each) burned hundreds
+        // of MB transiently on multi-million-vertex models.
+        const byX = new Map();
+        const quant = 1e5; // matches the previous 5-decimal rounding
+        let uniqueVerts = 0;
 
         object.traverse((child) => {
             if (child.isMesh && child.geometry) {
@@ -5329,10 +5702,16 @@ export class Viewer3D {
                 if (posAttr) {
                     bufferVerts += posAttr.count;
 
-                    // Count unique vertex positions (rounded to avoid float noise)
+                    // Count unique vertex positions (rounded to avoid float noise).
                     for (let i = 0; i < posAttr.count; i++) {
-                        const key = `${posAttr.getX(i).toFixed(5)},${posAttr.getY(i).toFixed(5)},${posAttr.getZ(i).toFixed(5)}`;
-                        uniqueSet.add(key);
+                        const x = Math.round(posAttr.getX(i) * quant);
+                        const y = Math.round(posAttr.getY(i) * quant);
+                        const z = Math.round(posAttr.getZ(i) * quant);
+                        let byY = byX.get(x);
+                        if (!byY) { byY = new Map(); byX.set(x, byY); }
+                        let zs = byY.get(y);
+                        if (!zs) { zs = new Set(); byY.set(y, zs); }
+                        if (!zs.has(z)) { zs.add(z); uniqueVerts++; }
                     }
                 }
                 if (geo.index) {
@@ -5342,8 +5721,6 @@ export class Viewer3D {
                 }
             }
         });
-
-        const uniqueVerts = uniqueSet.size;
 
         // Compute bounding box dimensions
         const box = new THREE.Box3().setFromObject(object);

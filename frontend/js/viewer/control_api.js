@@ -17,6 +17,16 @@
 import { describeScene } from "./describe_scene.js";
 import { meshStatistics } from "./mesh_stats.js";
 import { samplePoints } from "./sample_points.js";
+import {
+    clearPaint,
+    fillPaint,
+    paintStamp,
+    paintStroke,
+    pick,
+    raycast,
+    sculptStamp,
+    sculptStroke,
+} from "./sculpt.js";
 
 export class ViewerControlAPI {
     /**
@@ -97,6 +107,10 @@ export class ViewerControlAPI {
         try {
             const result = await def.handler(validation.values);
             this._emit("executed", { action: command.action, params });
+            // Demand-driven rendering: any successful command may have changed what's
+            // on screen — request a frame (no-op cost for pure reads; guarantees an
+            // agent's next screenshot reflects THIS command).
+            if (this._viewer.invalidate) this._viewer.invalidate();
             return { ok: true, result: result === undefined ? null : result };
         } catch (err) {
             const message = String(err && err.message ? err.message : err);
@@ -416,15 +430,159 @@ export class ViewerControlAPI {
                     return { stats: result, objectId: result.objectId, scene: v.getState().scene };
                 },
             },
+            add_primitive: {
+                description: "Add a procedural primitive to the scene as a new object (sculpting stock / scene building block). kind: box|sphere|cylinder|cone|torus|plane|capsule. params (all optional, sensible sculptable defaults; unknown keys rejected): box {width,height,depth,segments} · sphere {radius,widthSegments,heightSegments} · cylinder {radius|radiusTop+radiusBottom,height,radialSegments,heightSegments} · cone {radius,height,radialSegments,heightSegments} · torus {radius,tube,radialSegments,tubularSegments} · plane {width,height,widthSegments,heightSegments} · capsule {radius,length,capSegments,radialSegments}. Higher segments = finer sculpting (cap 256/axis, 250k vertices). Note: cylinder/cone CAPS are triangle fans — paintable but poor sculpting targets (no interior vertices); sculpt sides or use sphere/capsule. UVs are non-overlapping (paint-safe). color is CSS hex, honored exactly. transform places it immediately. The primitive becomes ACTIVE and persists in .mvscene manifests without any file.",
+                params: {
+                    kind: { type: "string", required: true, enum: ["box", "sphere", "cylinder", "cone", "torus", "plane", "capsule"] },
+                    params: { type: "object" },
+                    color: { type: "string" },
+                    name: { type: "string" },
+                    transform: { type: "object" },
+                    frame: { type: "boolean", default: true },
+                },
+                handler: (p) => {
+                    const result = v.addPrimitive(p.kind, {
+                        params: p.params, color: p.color, name: p.name,
+                        transform: p.transform, frame: p.frame,
+                    });
+                    this._emit("object_added", { objectId: result.objectId, name: p.name || p.kind });
+                    return result;
+                },
+            },
+
+            // --- sculpting & painting (backlog 045) ---
+            sculpt: {
+                description: "Apply ONE sculpting brush stamp to the ACTIVE object, in WORLD coordinates (get them from pick, get_bounds, or describe_scene mesh centers). tool: draw (displace along the surface's average normal, or `direction`), inflate (along each vertex's own normal), smooth (relax bumps), flatten (toward the local plane), pinch (pull toward center), grab (move by `direction`*strength). radius: world units — or radius_rel (0..1, fraction of the object's bounding-sphere radius; scale-free). strength: world-units displacement for draw/inflate/grab (default radius*0.25); 0..1 blend for smooth/flatten/pinch (default 0.5). falloff: smooth|linear|sharp. Returns {affected, maxDisplacement, newSize} — quantified feedback, steer WITHOUT a verification render each stamp. A missed brush is an ERROR (fix center/radius). Edits are seam-safe (welded) and instance-aware; `reset` restores the pre-sculpt geometry. Not supported on skinned models.",
+                params: {
+                    tool: { type: "string", default: "draw", enum: ["draw", "inflate", "smooth", "flatten", "pinch", "grab"] },
+                    center: { type: "array", required: true },
+                    radius: { type: "number", min: 0.000001 },
+                    radius_rel: { type: "number", min: 0.000001, max: 1 },
+                    strength: { type: "number" },
+                    direction: { type: "array" },
+                    falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+                },
+                requiresModel: true,
+                handler: (p) => sculptStamp(v, p),
+            },
+            sculpt_stroke: {
+                description: "Apply the sculpt brush along a stroke in ONE call — far cheaper than N sculpt calls. Give the stroke as explicit `points` (≤64 world-space [x,y,z]; overlap at spacing ≈ radius/2 for a continuous ridge) OR as a parametric `path` with server-side auto-spacing (no external math, no scalloping): {type:'circle', center, axis?=[0,1,0], radius, start_deg?, sweep_deg?=360} for rings/bands/arcs, or {type:'line', from, to}. Same brush params as sculpt.",
+                params: {
+                    points: { type: "array" },
+                    path: { type: "object" },
+                    tool: { type: "string", default: "draw", enum: ["draw", "inflate", "smooth", "flatten", "pinch", "grab"] },
+                    radius: { type: "number", min: 0.000001 },
+                    radius_rel: { type: "number", min: 0.000001, max: 1 },
+                    strength: { type: "number" },
+                    direction: { type: "array" },
+                    falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+                },
+                requiresModel: true,
+                handler: (p) => sculptStroke(v, p),
+            },
+            paint: {
+                description: "Paint ONE brush stamp of color onto the ACTIVE object's texture (creates a real texture layer on first use; the model's existing texture becomes the base when possible). WORLD-space brush like sculpt; radius in world units or radius_rel (0..1 of bounding-sphere radius). color: CSS hex. opacity 0..1 = the MAX alpha of this call (painter semantics: overlapping stamps within one call never exceed it); hardness 0..1 = fraction of the radius at full opacity before falloff scales alpha to 0 at the rim. shape:'square' stamps a crisp axis-aligned quad in the surface's tangent plane (radius = half-side; use hardness 1 for exact edges) — checkers/panels/labels in ONE stamp. max_normal_angle (degrees): skip faces tilted more than this from the stamped face — stops paint wrapping around hard edges (e.g. 45 on a box top). Requires UV coordinates (primitives always have them; STL/PLY do not). Returns {painted, meanAlpha} — meanAlpha is the average applied alpha; < 0.05 means near-invisible paint (raise opacity/hardness) and is flagged in `note`. A missed brush is an ERROR. Paint & sculpt edits are NOT saved by save_scene — export_model (GLB) persists them. clear_paint undoes all paint.",
+                params: {
+                    center: { type: "array", required: true },
+                    radius: { type: "number", min: 0.000001 },
+                    radius_rel: { type: "number", min: 0.000001, max: 1 },
+                    color: { type: "string", required: true },
+                    opacity: { type: "number", min: 0, max: 1 },
+                    hardness: { type: "number", min: 0, max: 1 },
+                    falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+                    shape: { type: "string", enum: ["round", "square"] },
+                    max_normal_angle: { type: "number", min: 1, max: 180 },
+                    texture_size: { type: "number", min: 64, max: 2048 },
+                },
+                requiresModel: true,
+                handler: (p) => paintStamp(v, p),
+            },
+            paint_stroke: {
+                description: "Paint a stroke in ONE call. Give it as explicit `points` (≤64 world-space [x,y,z]; overlap at spacing ≈ radius/2) OR as a parametric `path` with server-side auto-spacing (smooth bands with zero external math): {type:'circle', center, axis?=[0,1,0], radius, start_deg?, sweep_deg?=360} for rings/bands/arcs (e.g. a hat band: circle around the crown's axis), or {type:'line', from, to}. Same params as paint (incl. shape/max_normal_angle).",
+                params: {
+                    points: { type: "array" },
+                    path: { type: "object" },
+                    radius: { type: "number", min: 0.000001 },
+                    radius_rel: { type: "number", min: 0.000001, max: 1 },
+                    color: { type: "string", required: true },
+                    opacity: { type: "number", min: 0, max: 1 },
+                    hardness: { type: "number", min: 0, max: 1 },
+                    falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+                    shape: { type: "string", enum: ["round", "square"] },
+                    max_normal_angle: { type: "number", min: 1, max: 180 },
+                    texture_size: { type: "number", min: 64, max: 2048 },
+                },
+                requiresModel: true,
+                handler: (p) => paintStroke(v, p),
+            },
+            fill_paint: {
+                description: "Flood the ACTIVE object's whole paint layer with one color (a fresh base coat before detailing).",
+                params: {
+                    color: { type: "string", required: true },
+                    texture_size: { type: "number", min: 64, max: 2048 },
+                },
+                requiresModel: true,
+                handler: (p) => fillPaint(v, p),
+            },
+            clear_paint: {
+                description: "Remove ALL paint layers from the ACTIVE object, restoring its pre-paint textures/colors (the paint analog of `reset`).",
+                requiresModel: true,
+                handler: () => clearPaint(v),
+            },
+            batch: {
+                description: "Execute up to 32 commands sequentially in ONE round-trip (halves latency/tokens for sculpt-stroke sessions). commands: [{action, params}, ...]. Stops at the first failure unless continue_on_error. Returns {results:[{ok,...}], completed}. batch cannot nest.",
+                params: {
+                    commands: { type: "array", required: true },
+                    continue_on_error: { type: "boolean", default: false },
+                },
+                handler: async (p) => {
+                    if (p.commands.length === 0 || p.commands.length > 32) {
+                        throw new Error("batch takes 1-32 commands");
+                    }
+                    const results = [];
+                    for (const cmd of p.commands) {
+                        if (cmd && cmd.action === "batch") {
+                            results.push({ ok: false, error: "batch cannot nest" });
+                            if (!p.continue_on_error) break;
+                            continue;
+                        }
+                        const r = await this.execute(cmd);
+                        results.push(r);
+                        if (!r.ok && !p.continue_on_error) break;
+                    }
+                    return { results, completed: results.length };
+                },
+            },
+            pick: {
+                description: "Turn SCREENSHOT coordinates into a world-space surface point: raycast from the CURRENT camera through normalized image coords (x right 0..1, y DOWN 0..1 — top-left origin, exactly as you read pixels off a screenshot). ALWAYS pass the screenshot's width/height — screenshots can have a different aspect than the live canvas, and picking with the wrong aspect lands off-target near the edges. Returns {point, normal, objectId} to feed into sculpt/paint. Only valid while the camera is unchanged since that screenshot — re-pick after any camera move. The agent hand-eye loop: screenshot → spot the feature at (x,y) → pick → sculpt/paint at the returned point.",
+                params: {
+                    x: { type: "number", required: true, min: 0, max: 1 },
+                    y: { type: "number", required: true, min: 0, max: 1 },
+                    width: { type: "number", min: 1 },
+                    height: { type: "number", min: 1 },
+                },
+                requiresModel: true,
+                handler: (p) => pick(v, p.x, p.y, p.width, p.height),
+            },
+            raycast: {
+                description: "Raycast from an explicit world-space origin along a direction; returns the first visible surface hit {point, normal, objectId, distance}. Camera-independent alternative to pick.",
+                params: {
+                    origin: { type: "array", required: true },
+                    direction: { type: "array", required: true },
+                },
+                requiresModel: true,
+                handler: (p) => raycast(v, p.origin, p.direction),
+            },
+
             list_objects: {
-                description: "List every object in the scene: id, name, active flag, visibility, opacity, per-object placement transform, source. Object ids are the handles for all set_object_*/remove_object commands.",
+                description: "List every object in the scene: id, name, active flag, visibility, opacity, per-object placement transform, source, plus delta flags — painted (has paint layers), sculpted (geometry edited by sculpt/bakes), modified (the union: any unexported work) — a precise audit trail without a screenshot. Object ids are the handles for all set_object_*/remove_object commands.",
                 handler: () => ({ objects: v.listObjects(), activeObjectId: v._activeObjectId }),
             },
             set_active_object: {
-                description: "Make an object ACTIVE: all single-object commands (describe_scene, get_mesh_stats, transforms, focus, animation) target the active object. The scene keeps rendering all visible objects.",
+                description: "Make an object ACTIVE: all single-object commands (describe_scene, get_mesh_stats, transforms, focus, animation) target the active object. The scene keeps rendering all visible objects. Returns just {activeObjectId} — use list_objects for the full roster.",
                 params: { id: { type: "number", required: true } },
                 requiresModel: true,
-                handler: (p) => { v.setActiveObject(p.id); return { activeObjectId: p.id, state: v.getState().scene }; },
+                handler: (p) => { v.setActiveObject(p.id); return { activeObjectId: p.id }; },
             },
             remove_object: {
                 description: "Remove ONE object from the scene (disposes its GPU resources). If it was active, the most recently added remaining object becomes active.",
@@ -511,23 +669,25 @@ export class ViewerControlAPI {
                 },
             },
             set_view: {
-                description: "Point the camera at a preset around the model. `fill` (0-1, higher = tighter framing) controls how much of the frame the model occupies.",
+                description: "Point the camera at a preset around the model. `fill` (0-1, higher = tighter framing) controls how much of the frame the model occupies. scope:'scene' frames the WHOLE visible scene instead of the active object (multi-object tableaus).",
                 params: {
                     preset: { type: "string", required: true, enum: ["front", "back", "left", "right", "top", "bottom", "iso"] },
                     fill: { type: "number", min: 0.1, max: 1 },
+                    scope: { type: "string", enum: ["object", "scene"] },
                 },
                 requiresModel: true,
-                handler: (p) => v.setCameraView(p.preset, { fill: p.fill }),
+                handler: (p) => v.setCameraView(p.preset, { fill: p.fill, scope: p.scope }),
             },
             orbit: {
-                description: "Orbit the camera to spherical angles around the model and frame it. azimuth: degrees around Y (0 = front); elevation: degrees above horizon.",
+                description: "Orbit the camera to spherical angles around the model and frame it. azimuth: degrees around Y (0 = front); elevation: degrees above horizon. scope:'scene' orbits/frames the WHOLE visible scene instead of the active object — use it to compose multi-object shots from any angle (frame_all only keeps the current direction).",
                 params: {
                     azimuth: { type: "number", required: true },
                     elevation: { type: "number", default: 15 },
                     fill: { type: "number", min: 0.1, max: 1 },
+                    scope: { type: "string", enum: ["object", "scene"] },
                 },
                 requiresModel: true,
-                handler: (p) => v.orbitTo(p.azimuth, p.elevation, { fill: p.fill }),
+                handler: (p) => v.orbitTo(p.azimuth, p.elevation, { fill: p.fill, scope: p.scope }),
             },
             frame: {
                 description: "Frame the model. Keeps the current view direction by default (keep_direction:false for an iso fit). `fill` (0-1) sets tightness.",

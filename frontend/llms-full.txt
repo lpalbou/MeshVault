@@ -25,17 +25,19 @@ instance.
 
 MCP (Model Context Protocol): if you are an MCP-connected agent, you don't need a
 browser at all — the `meshvault-mcp` server hosts this same viewer headlessly and
-exposes 9 tools: `load_model` (http(s) URL or absolute local file path; loads AND
+exposes 11 tools: `load_model` (http(s) URL or absolute local file path; loads AND
 returns a scene description in one call; multi-file OBJ/FBX/gltf assets load
-textured), `describe_scene`, `viewer_execute`
-({action, params} passthrough to every command in this document),
+textured; `add:true` composes instead of replacing), `describe_scene`,
+`viewer_execute` ({action, params} passthrough to every command in this document),
 `list_viewer_commands`, `get_state`, `compare_models` (geometric 1-vs-N shape
 registration), `screenshot` (returns real MCP image content; `best_view:true` for a
 one-call hero shot; `preset:"studio"|"neutral"|"dark"` pins lighting/background so
-renders are comparable across sessions), `open_in_app` (push your current model +
+renders are comparable across sessions; `ssao:false` + small size = cheap proof
+render for sculpt/paint loops), `save_scene` / `load_scene` (.mvscene manifest
+persistence for composed scenes), `open_in_app` (push your current model +
 camera into the human's running `meshvault` app for live co-review; the app also
-honors `?path=`/`?dir=` deep links), and `get_app_state` (read what the HUMAN is
-looking at — path + camera — to continue their session headless). Install:
+honors `?path=`/`?dir=`/`?scene=` deep links), and `get_app_state` (read what the
+HUMAN is looking at — path + camera — to continue their session headless). Install:
 `pip install "meshvault[mcp]"`, `playwright install chromium`, then wire
 `meshvault-mcp` into your client config. Full setup + behavior notes: docs/mcp.md.
 Without MCP, the local server also offers `GET /api/screenshot` (PNG over plain
@@ -213,26 +215,104 @@ object becomes ACTIVE — every single-object command (describe_scene, get_mesh_
 center/ground/rotate, focus, animation) targets the active object; `describe_scene`
 adds a `scene` section (per-object summaries + totals) whenever objectCount > 1.
 
-- `list_objects` → per-object {id, name, active, visible, opacity, transform, source}.
-- `set_active_object { id }` — retarget single-object commands.
+- `list_objects` → per-object {id, name, active, visible, opacity, transform, source,
+  painted?, modified?} — the `painted`/`modified` flags show which objects carry
+  unexported paint layers / sculpt edits without needing a screenshot.
+- `set_active_object { id }` — retarget single-object commands (returns just
+  {activeObjectId}; use list_objects for the roster).
 - `set_object_transform { id, position?:[x,y,z], quaternion?:[x,y,z,w] |
   rotation?:[x,y,z] Euler°, scale?:number | scale_xyz?:[x,y,z] }` — PLACEMENT lives
   on a per-object wrapper, never baked into vertices; `get_object_transform`,
   `reset_object_transform` read/clear it.
 - `set_object_visible { id, visible }`, `set_object_opacity { id, opacity:0..1 }`
   (ghosting — display-only, exports keep authored materials), `remove_object { id }`.
-- `frame_all` — frame the union of visible objects (presets/orbit frame the ACTIVE
-  object only).
+- `frame_all` — frame the union of visible objects (keeps the current direction).
+  For an ANGLED whole-scene shot use `orbit`/`set_view` with `scope:"scene"`.
 - `get_scene_manifest` — version-1 JSON {objects:[{source, transform, visible,
-  opacity}], lighting, environment, background} for .mvscene persistence.
+  opacity}], lighting, environment, background} for .mvscene persistence. Manifests
+  store SOURCES + placements, not deltas: `unsavedPaint` / `unsavedEdits` list the
+  objects whose paint layers / sculpt edits would be lost — `export_glb` keeps them.
 - Vertex-bake ops normalize the active object in its OWN frame and refuse skinned
   models. GLB export = all visible objects with placements applied.
 
 ================================================================================
+## 5c. Creating: primitives, sculpting, texture painting (the agent hand-eye loop)
+
+Agents can CREATE from nothing: add primitive stock, sculpt it, paint it, verify
+with screenshots. All brushes are WORLD-SPACE; coordinates come from `pick`,
+`raycast`, `get_bounds`, or describe_scene mesh centers.
+
+- `add_primitive { kind: box|sphere|cylinder|cone|torus|plane|capsule, params?,
+  color?:"#rrggbb", name?, transform?, frame?=true }` — procedural stock with
+  sculpt-friendly segment defaults and non-overlapping, paint-safe UVs (box = 3×2
+  face atlas; cylinder/cone = side band + cap islands). `color` is honored exactly
+  (no viewer preview clamps). Unknown `params` keys are REJECTED (typo safety);
+  segments cap at 256/axis, 250k vertices total. Cylinder/cone CAPS are triangle
+  fans — paintable but poor sculpting targets. The primitive becomes ACTIVE and
+  persists in .mvscene manifests by its parameters (no file needed).
+
+- `sculpt { tool: draw|inflate|smooth|flatten|pinch|grab, center:[x,y,z],
+  radius | radius_rel:0..1, strength?, direction?, falloff?: smooth|linear|sharp }`
+  — ONE brush stamp on the ACTIVE object. `radius` is world units; `radius_rel` is
+  a fraction of the object's bounding-sphere radius (scale-free). `strength` is
+  world-units displacement for draw/inflate/grab (default radius*0.25), a 0..1
+  blend for smooth/flatten/pinch (default 0.5). Returns {affected, maxDisplacement,
+  newSize} — quantified feedback to steer WITHOUT a render. A missed brush is an
+  ERROR that says how to fix it. Edits are seam-safe (welded positions), shared-
+  geometry aware (glTF instancing never double-displaces), and correct under any
+  placement incl. non-uniform scale. `reset` restores pre-sculpt geometry. Skinned
+  models are refused.
+- `sculpt_stroke { points:[[x,y,z],...]≤64 | path:{...}, ...same params }` — a whole
+  stroke in ONE call. Explicit points: overlap stamps (spacing ≈ radius/2) for
+  continuity. OR a parametric `path` with server-side auto-spacing (no external
+  math, no scalloping): {type:"circle", center, axis?=[0,1,0], radius, start_deg?,
+  sweep_deg?=360} for rings/bands/arcs, {type:"line", from, to} for segments.
+
+- `paint { center, radius | radius_rel, color:"#rrggbb", opacity?:0..1=1,
+  hardness?:0..1=0.6, falloff?, shape?: round|square, max_normal_angle?:deg,
+  texture_size?:64..2048=1024 }` — paints a real texture layer (CanvasTexture) on
+  the ACTIVE object; the existing texture becomes the base layer when drawable,
+  else the authored base color. `opacity` is the MAX alpha of the call (painter
+  semantics: overlapping stamps within one call never exceed it — no plaid).
+  `hardness` = fraction of radius at full opacity before falloff. `shape:"square"`
+  stamps a crisp axis-aligned quad in the surface tangent plane (radius =
+  half-side; hardness 1 for exact edges) — checkers/panels/labels in one stamp.
+  `max_normal_angle` skips faces tilted more than N° from the stamped face — stops
+  paint wrapping around hard edges (use ~45 on boxes). Returns {painted, meanAlpha};
+  meanAlpha < 0.05 = near-invisible (flagged in `note` — raise opacity/hardness).
+  Colors blend in sRGB and land exactly as requested. Requires UVs (primitives
+  always have them; STL/PLY have none → clear error).
+- `paint_stroke { points≤64 | path:{...}, ...same params }` — a stroke of paint in
+  ONE call; `path` (circle/line, same spec as sculpt_stroke) auto-samples at the
+  right density — e.g. a hat band = one call with {type:"circle", center, axis,
+  radius}.
+- `fill_paint { color, texture_size? }` — flood the whole layer (base coat).
+- `clear_paint` — remove ALL paint layers, restore pre-paint textures/colors.
+- Paint memory is budgeted (~16M texels per session); exceeding it is a clear error.
+
+- `pick { x:0..1, y:0..1, width?, height? }` — screenshot coords → world surface
+  point {point, normal, objectId}. x right, y DOWN, top-left origin — exactly how
+  you read pixels. ALWAYS pass the screenshot's width/height (aspect correction);
+  re-pick after any camera move. THE hand-eye loop: screenshot → spot feature at
+  (px,py) → pick {x:px/w, y:py/h, width:w, height:h} → sculpt/paint at the point.
+- `raycast { origin:[x,y,z], direction:[x,y,z] }` — camera-independent surface
+  query (e.g. origin [x, 2, z], direction [0,-1,0] finds the top face under x,z).
+
+- `batch { commands:[{action,params},...]≤32, continue_on_error?=false }` — run a
+  sequence in ONE round-trip (e.g. 8 raycasts, then 8 paint stamps). Stops at the
+  first failure by default; `batch` cannot nest.
+
+Persistence: sculpt/paint deltas live in the session. `.mvscene` manifests rebuild
+pristine sources (see `unsavedPaint`/`unsavedEdits` warnings); `export_glb` bakes
+sculpted geometry AND painted textures into a self-contained file. Audit trail:
+`list_objects` flags per object — painted (paint layers), sculpted (geometry
+edits), modified (the union = export-dirty).
+
+================================================================================
 ## 6. Camera
 
-- `set_view { preset: front|back|left|right|top|bottom|iso, fill?:0.1..1 }` — world-axis preset. `fill` = framing tightness (higher = tighter).
-- `orbit { azimuth:deg, elevation?:deg=15, fill? }` — spherical angle around the model (azimuth 0 = +Z).
+- `set_view { preset: front|back|left|right|top|bottom|iso, fill?:0.1..1, scope?: object|scene }` — world-axis preset. `fill` = framing tightness (higher = tighter); `scope:"scene"` frames the whole visible scene instead of the active object.
+- `orbit { azimuth:deg, elevation?:deg=15, fill?, scope?: object|scene }` — spherical angle around the model (azimuth 0 = +Z); `scope:"scene"` orbits the whole visible scene (multi-object tableaus).
 - `set_camera { position:[x,y,z], target?:[x,y,z], fov?:1..179 }` — explicit camera placement; mirrors get_camera so a pose captured in one session reproduces exactly in another.
 - `frame { fill?, keep_direction?=true }` — fit the model; keeps the current view direction by default.
 - `reset_camera` — restore the initial framed view (orbit mode).

@@ -61,9 +61,35 @@ def validate_manifest(manifest: dict) -> dict:
         if not isinstance(obj, dict):
             raise HTTPException(status_code=422, detail=f"objects[{i}] must be an object")
         source = obj.get("source")
-        if not isinstance(source, dict) or source.get("kind") not in {"file", "archive", "url"}:
+        if not isinstance(source, dict) or source.get("kind") not in {
+            "file", "archive", "url", "primitive",
+        }:
             raise HTTPException(status_code=422,
-                                detail=f"objects[{i}].source.kind must be file|archive|url")
+                                detail=f"objects[{i}].source.kind must be "
+                                       "file|archive|url|primitive")
+        if source.get("kind") == "primitive":
+            if not isinstance(source.get("primitive"), str) or len(source["primitive"]) > 32:
+                raise HTTPException(status_code=422,
+                                    detail=f"objects[{i}].source.primitive invalid")
+            params = source.get("params")
+            if params is not None:
+                # Defense in depth against crafted manifests: a segment bomb like
+                # {widthSegments: 4096}^3 passes the byte cap but detonates as a
+                # ~100M-vertex build in the shared headless Chromium. The viewer's
+                # add_primitive re-clamps on load; bound the raw data here too.
+                if not isinstance(params, dict) or len(params) > 16:
+                    raise HTTPException(status_code=422,
+                                        detail=f"objects[{i}].source.params must be an object "
+                                               "with at most 16 keys")
+                for key, value in params.items():
+                    if not isinstance(key, str) or len(key) > 32:
+                        raise HTTPException(status_code=422,
+                                            detail=f"objects[{i}].source.params key invalid")
+                    if not isinstance(value, (int, float)) or isinstance(value, bool) \
+                            or not (0 < value <= 4096):
+                        raise HTTPException(status_code=422,
+                                            detail=f"objects[{i}].source.params.{key} must be "
+                                                   "a number in (0, 4096]")
         for key in ("path", "archivePath", "innerPath", "url"):
             value = source.get(key)
             if value is not None and (not isinstance(value, str) or len(value) > 4096):

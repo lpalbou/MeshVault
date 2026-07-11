@@ -27,6 +27,7 @@ import http.server
 import mimetypes
 import secrets
 import threading
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -290,14 +291,25 @@ class HeadlessViewer:
     called from the event loop that first called ensure().
     """
 
-    def __init__(self, *, viewport: tuple[int, int] = (1280, 960),
-                 extra_http_headers: dict | None = None):
+    # Captures resize the canvas per request, so the resting viewport only sets
+    # the idle framebuffer footprint (renderer + composer + SSAO buffers in
+    # SwiftShader RAM) — keep it modest.
+    def __init__(self, *, viewport: tuple[int, int] = (1024, 768),
+                 extra_http_headers: dict | None = None,
+                 idle_close_s: float | None = None):
         self._viewport = viewport
         self._extra_http_headers = extra_http_headers
         self._playwright = None
         self._browser = None
         self._page = None
         self._lock: asyncio.Lock | None = None
+        # Optional resource control: close the browser after this many seconds
+        # without a command; the next ensure() restarts it (~2-4 s). Chromium
+        # holds ~0.6-0.9 GB RSS — a one-shot screenshot must not pin that forever.
+        self._idle_close_s = idle_close_s
+        self._last_used = 0.0
+        self._idle_task = None
+        self._start_url: str | None = None
 
     @property
     def page(self):
@@ -307,9 +319,15 @@ class HeadlessViewer:
     async def ensure(self, url: str,
                      ready_js: str = "() => window.mvReady === true",
                      timeout_ms: int = 30000):
-        """Start (once) and return the viewer page, navigated to `url` and ready."""
+        """Start (once) and return the viewer page, navigated to `url` and ready.
+
+        With idle_close_s set, a reaper task closes the browser after inactivity
+        and this method transparently restarts it on the next call.
+        """
         if self._lock is None:
             self._lock = asyncio.Lock()
+        self._last_used = time.monotonic()
+        self._start_url = url
         async with self._lock:
             if self._page is not None:
                 return self._page
@@ -338,10 +356,39 @@ class HeadlessViewer:
             self._page = await context.new_page()
             await self._page.goto(url, wait_until="load")
             await self._page.wait_for_function(ready_js, timeout=timeout_ms)
+            if self._idle_close_s and self._idle_task is None:
+                self._idle_task = asyncio.create_task(self._idle_reaper())
             return self._page
+
+    async def _idle_reaper(self):
+        """Close the browser after idle_close_s without use (memory back to ~0)."""
+        try:
+            while True:
+                await asyncio.sleep(max(5.0, self._idle_close_s / 4))
+                if self._page is None:
+                    continue
+                if time.monotonic() - self._last_used >= self._idle_close_s:
+                    async with self._lock:
+                        # Re-check under the lock (a request may have just landed).
+                        if time.monotonic() - self._last_used >= self._idle_close_s:
+                            await self._close_browser_only()
+        except asyncio.CancelledError:
+            pass
+
+    async def _close_browser_only(self):
+        if self._browser:
+            await self._browser.close()
+            self._browser = None
+        if self._playwright:
+            await self._playwright.stop()
+            self._playwright = None
+        self._page = None
 
     async def execute(self, action: str, params: dict | None = None) -> dict:
         """Run one control-API command; returns the structured {ok, ...} result."""
+        self._last_used = time.monotonic()
+        if self._page is None and self._start_url:
+            await self.ensure(self._start_url)
         return await self._page.evaluate(
             "([action, params]) => window.mv.execute({ action, params: params || {} })",
             [action, params or {}],
@@ -359,21 +406,24 @@ class HeadlessViewer:
                 raise RuntimeError(f"Preset '{name}' failed at {action}: {r.get('error')}")
 
     async def capture_png(self, width: int, height: int,
-                          transparent: bool = False, hide_ground: bool = False) -> bytes:
-        """Render the current view and return PNG bytes (raises on failure)."""
+                          transparent: bool = False, hide_ground: bool = False,
+                          ssao: bool = True) -> bytes:
+        """Render the current view and return PNG bytes (raises on failure).
+
+        ssao=False skips the SSAO/tone-mapping composer — noticeably faster on
+        SwiftShader, right for small proof renders where fidelity is not the point.
+        """
         result = await self.execute("screenshot", {
             "width": width, "height": height,
             "transparent": transparent, "hideGround": hide_ground,
+            "ssao": ssao,
         })
         if not result.get("ok"):
             raise RuntimeError(result.get("error", "screenshot failed"))
         return base64.b64decode(result["result"].split(",", 1)[1])
 
     async def close(self):
-        if self._browser:
-            await self._browser.close()
-            self._browser = None
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
-        self._page = None
+        if self._idle_task:
+            self._idle_task.cancel()
+            self._idle_task = None
+        await self._close_browser_only()

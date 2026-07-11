@@ -597,9 +597,9 @@ def _structural_delta(ref_desc: dict, cand_desc: dict) -> dict:
 # /api/screenshot endpoint so both surfaces expose identical documented looks).
 
 
-async def _shot(width, height, transparent, hide_ground) -> Image:
+async def _shot(width, height, transparent, hide_ground, ssao=True) -> Image:
     png = await _runtime.viewer.capture_png(
-        width, height, transparent=transparent, hide_ground=hide_ground)
+        width, height, transparent=transparent, hide_ground=hide_ground, ssao=ssao)
     return Image(data=png, format="png")
 
 
@@ -612,6 +612,7 @@ async def screenshot(
     best_view: bool = False,
     views: list[str] | None = None,
     preset: str | None = None,
+    ssao: bool = True,
 ) -> list:
     """Render the model and return PNG image(s), with a JSON metadata text block first.
 
@@ -636,6 +637,15 @@ async def screenshot(
                 mid-gray, for color/texture comparison), "dark" (hero shots on
                 near-black). Sets IBL, key/fill/ambient lights, exposure, and
                 background; the preset stays active for the session afterwards.
+        ssao: render through the SSAO/tone-mapping composer (default). Set False
+              for PROOF renders during sculpt/paint loops — combine with a small
+              size (e.g. 192x192) for a cheap "did that land?" check, and save
+              full-size composed captures for final verification.
+
+    Hand-eye loop: when you spot a feature at pixel (px, py) in a returned image,
+    convert it to a 3D surface point with viewer_execute pick
+    {x: px/width, y: py/height, width, height} — pass THIS screenshot's
+    width/height, and re-pick after any camera move.
     """
     page = await _runtime.page()
     loaded = await page.evaluate("() => window.mv.getState().model.loaded")
@@ -672,7 +682,7 @@ async def screenshot(
                 r = await _mv_execute("orbit", {"azimuth": az, "elevation": el})
             if not r.get("ok"):
                 raise RuntimeError(f"View '{spec}' failed: {r.get('error')}")
-            contents.append(await _shot(width, height, transparent, hide_ground))
+            contents.append(await _shot(width, height, transparent, hide_ground, ssao))
             captured.append(spec)
         meta["views"] = captured
     else:
@@ -682,7 +692,7 @@ async def screenshot(
                 raise RuntimeError(f"find_best_view failed: {r.get('error')}")
             bv = r.get("result") or {}
             meta["best_view"] = {k: bv.get(k) for k in ("azimuth", "elevation", "score")}
-        contents.append(await _shot(width, height, transparent, hide_ground))
+        contents.append(await _shot(width, height, transparent, hide_ground, ssao))
 
     return [json.dumps(meta), *contents]
 
@@ -726,10 +736,26 @@ async def save_scene(path: str, overwrite: bool = False) -> dict:
         return {"ok": False, "error": "Nothing persistable in the scene "
                                       f"(volatile-only: {manifest.get('skippedVolatile')})"}
 
+    # Save-time metadata, not scene data — reported to the caller, not persisted.
+    skipped_volatile = manifest.pop("skippedVolatile", [])
+    unsaved_paint = manifest.pop("unsavedPaint", [])
+    unsaved_edits = manifest.pop("unsavedEdits", [])
+
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(_json.dumps(manifest, indent=2), encoding="utf-8")
-    return {"ok": True, "path": str(target), "objects": len(manifest["objects"]),
-            "skipped_volatile": manifest.get("skippedVolatile", [])}
+    out = {"ok": True, "path": str(target), "objects": len(manifest["objects"]),
+           "skipped_volatile": skipped_volatile}
+    warnings = []
+    if unsaved_paint:
+        warnings.append(f"paint layers on {unsaved_paint}")
+    if unsaved_edits:
+        warnings.append(f"sculpt/geometry edits on {unsaved_edits}")
+    if warnings:
+        out["warning"] = (
+            "NOT persisted in .mvscene manifests (they store sources + "
+            f"placements, not deltas): {'; '.join(warnings)}. "
+            "Use export_model (GLB) to keep sculpted geometry and paint.")
+    return out
 
 
 @mcp.tool()
@@ -770,16 +796,25 @@ async def load_scene(path: str) -> dict:
         loaded, failed = [], []
         for obj in manifest["objects"]:
             src = obj.get("source", {})
-            if src.get("kind") == "file":
-                origin = src.get("path", "")
+            if src.get("kind") == "primitive":
+                result = await _mv_execute("add_primitive", {
+                    "kind": src.get("primitive"),
+                    "params": src.get("params"),
+                    "color": src.get("color"),
+                    "name": obj.get("name"),
+                    "transform": obj.get("transform"),
+                    "frame": False,
+                })
+            elif src.get("kind") == "file":
+                result = await _load_source(src.get("path", ""), obj.get("name"),
+                                            add=True, transform=obj.get("transform"))
             elif src.get("kind") == "url":
-                origin = src.get("url", "")
+                result = await _load_source(src.get("url", ""), obj.get("name"),
+                                            add=True, transform=obj.get("transform"))
             else:
                 failed.append({"name": obj.get("name"),
                                "error": "archive-member sources are app-only"})
                 continue
-            result = await _load_source(origin, obj.get("name"), add=True,
-                                        transform=obj.get("transform"))
             if not result.get("ok"):
                 failed.append({"name": obj.get("name"), "error": result.get("error")})
                 continue

@@ -3,10 +3,10 @@
 Durable planning memory for MeshVault. Records what exists, what is next, what was
 considered, and why priorities are ordered as they are. Treat stale text here as a bug.
 
-Last update: 2026-07-09 (042 shipped: multi-object scene composition — registry with
-active object, wrapper placement + gizmo, `.mvscene` persistence, composed GLB export,
-full MCP parity; designed against 2 pre-implementation adversarial reviews. Same day:
-044 — multi-file texture fix, reverse bridge, `GET /api/screenshot`).
+Last update: 2026-07-11 (045 shipped: AI sculpting + texture painting + primitives +
+the agent hand-eye loop, plus the performance diet — demand-driven rendering to 0.0%
+idle CPU, idle browser shutdown, lazy snapshots. Designed against 3 adversarial
+reviews and validated by 3 live artist-agent MCP sessions).
 
 ---
 
@@ -25,11 +25,19 @@ Next free ID: **0025**.
 
 | State | Count | IDs |
 |-------|------:|-----|
-| completed | 28 | 001–005, 009–014, 017–021, 025, 026, 027, 029, 030, 031, 036, 037, 039, 042, 043, 044 |
+| completed | 29 | 001–005, 009–014, 017–021, 025, 026, 027, 029, 030, 031, 036, 037, 039, 042, 043, 044, 045 |
 | planned | 3 | 006, 007, 008 |
 | proposed | 13 | 015, 016, 022, 023, 024 (partial — endpoint slice shipped in 044, CLI remains), 028, 032, 033, 034, 035, 038 (partial), 040 (parked), 041 (v1 done; v2 rides on 042's set_object_transform) |
 
-Next free ID: **0045**.
+Next free ID: **0046**.
+
+Note: `045` (2026-07-11) shipped AI dynamic sculpting/painting + the performance diet
+in 0.7.0 — 7 primitives with paint-safe UV atlases, 6 seam-safe world-space sculpt
+brushes, texture painting (max-alpha strokes, sRGB-correct, square stamps, edge
+clamping, meanAlpha honesty), pick/raycast hand-eye loop, batch, scene-scoped camera;
+demand-driven rendering (0.0% idle CPU), idle browser shutdown, lazy accessor-decoded
+reset snapshots (also fixes the latent quantized bake→reset corruption). 3
+adversarial reviews + 3 live artist-agent MCP cycles; deferrals recorded in the item.
 
 Note: `042` (2026-07-09) shipped ALL four stages of scene composition in 0.6.0 —
 object registry + placement wrappers + gizmo/panel UX + `.mvscene` persistence +

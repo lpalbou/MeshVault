@@ -1,3 +1,7 @@
+var __defProp = Object.defineProperty;
+var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
+
 // node_modules/three/build/three.module.js
 var REVISION = "170";
 var MOUSE = { LEFT: 0, MIDDLE: 1, RIGHT: 2, ROTATE: 0, DOLLY: 1, PAN: 2 };
@@ -791,17 +795,17 @@ var Matrix3 = class _Matrix3 {
     return this;
   }
   transpose() {
-    let tmp;
+    let tmp2;
     const m = this.elements;
-    tmp = m[1];
+    tmp2 = m[1];
     m[1] = m[3];
-    m[3] = tmp;
-    tmp = m[2];
+    m[3] = tmp2;
+    tmp2 = m[2];
     m[2] = m[6];
-    m[6] = tmp;
-    tmp = m[5];
+    m[6] = tmp2;
+    tmp2 = m[5];
     m[5] = m[7];
-    m[7] = tmp;
+    m[7] = tmp2;
     return this;
   }
   getNormalMatrix(matrix4) {
@@ -3761,25 +3765,25 @@ var Matrix4 = class _Matrix4 {
   }
   transpose() {
     const te2 = this.elements;
-    let tmp;
-    tmp = te2[1];
+    let tmp2;
+    tmp2 = te2[1];
     te2[1] = te2[4];
-    te2[4] = tmp;
-    tmp = te2[2];
+    te2[4] = tmp2;
+    tmp2 = te2[2];
     te2[2] = te2[8];
-    te2[8] = tmp;
-    tmp = te2[6];
+    te2[8] = tmp2;
+    tmp2 = te2[6];
     te2[6] = te2[9];
-    te2[9] = tmp;
-    tmp = te2[3];
+    te2[9] = tmp2;
+    tmp2 = te2[3];
     te2[3] = te2[12];
-    te2[12] = tmp;
-    tmp = te2[7];
+    te2[12] = tmp2;
+    tmp2 = te2[7];
     te2[7] = te2[13];
-    te2[13] = tmp;
-    tmp = te2[11];
+    te2[13] = tmp2;
+    tmp2 = te2[11];
     te2[11] = te2[14];
-    te2[14] = tmp;
+    te2[14] = tmp2;
     return this;
   }
   setPosition(x, y, z) {
@@ -6546,18 +6550,18 @@ var BufferGeometry = class _BufferGeometry extends EventDispatcher {
         );
       }
     }
-    const tmp = new Vector3(), tmp2 = new Vector3();
+    const tmp2 = new Vector3(), tmp22 = new Vector3();
     const n2 = new Vector3(), n22 = new Vector3();
     function handleVertex(v) {
       n2.fromBufferAttribute(normalAttribute, v);
       n22.copy(n2);
       const t2 = tan1[v];
-      tmp.copy(t2);
-      tmp.sub(n2.multiplyScalar(n2.dot(t2))).normalize();
-      tmp2.crossVectors(n22, t2);
-      const test = tmp2.dot(tan2[v]);
+      tmp2.copy(t2);
+      tmp2.sub(n2.multiplyScalar(n2.dot(t2))).normalize();
+      tmp22.crossVectors(n22, t2);
+      const test = tmp22.dot(tan2[v]);
       const w = test < 0 ? -1 : 1;
-      tangentAttribute.setXYZW(v, tmp.x, tmp.y, tmp.z, w);
+      tangentAttribute.setXYZW(v, tmp2.x, tmp2.y, tmp2.z, w);
     }
     for (let i = 0, il = groups.length; i < il; ++i) {
       const group = groups[i];
@@ -7132,9 +7136,9 @@ function cloneUniforms(src) {
 function mergeUniforms(uniforms) {
   const merged = {};
   for (let u2 = 0; u2 < uniforms.length; u2++) {
-    const tmp = cloneUniforms(uniforms[u2]);
-    for (const p in tmp) {
-      merged[p] = tmp[p];
+    const tmp2 = cloneUniforms(uniforms[u2]);
+    for (const p in tmp2) {
+      merged[p] = tmp2[p];
     }
   }
   return merged;
@@ -19761,6 +19765,1091 @@ var Curve = class {
     return this;
   }
 };
+var EllipseCurve = class extends Curve {
+  constructor(aX = 0, aY = 0, xRadius = 1, yRadius = 1, aStartAngle = 0, aEndAngle = Math.PI * 2, aClockwise = false, aRotation = 0) {
+    super();
+    this.isEllipseCurve = true;
+    this.type = "EllipseCurve";
+    this.aX = aX;
+    this.aY = aY;
+    this.xRadius = xRadius;
+    this.yRadius = yRadius;
+    this.aStartAngle = aStartAngle;
+    this.aEndAngle = aEndAngle;
+    this.aClockwise = aClockwise;
+    this.aRotation = aRotation;
+  }
+  getPoint(t2, optionalTarget = new Vector2()) {
+    const point = optionalTarget;
+    const twoPi = Math.PI * 2;
+    let deltaAngle = this.aEndAngle - this.aStartAngle;
+    const samePoints = Math.abs(deltaAngle) < Number.EPSILON;
+    while (deltaAngle < 0) deltaAngle += twoPi;
+    while (deltaAngle > twoPi) deltaAngle -= twoPi;
+    if (deltaAngle < Number.EPSILON) {
+      if (samePoints) {
+        deltaAngle = 0;
+      } else {
+        deltaAngle = twoPi;
+      }
+    }
+    if (this.aClockwise === true && !samePoints) {
+      if (deltaAngle === twoPi) {
+        deltaAngle = -twoPi;
+      } else {
+        deltaAngle = deltaAngle - twoPi;
+      }
+    }
+    const angle = this.aStartAngle + t2 * deltaAngle;
+    let x = this.aX + this.xRadius * Math.cos(angle);
+    let y = this.aY + this.yRadius * Math.sin(angle);
+    if (this.aRotation !== 0) {
+      const cos = Math.cos(this.aRotation);
+      const sin = Math.sin(this.aRotation);
+      const tx = x - this.aX;
+      const ty = y - this.aY;
+      x = tx * cos - ty * sin + this.aX;
+      y = tx * sin + ty * cos + this.aY;
+    }
+    return point.set(x, y);
+  }
+  copy(source) {
+    super.copy(source);
+    this.aX = source.aX;
+    this.aY = source.aY;
+    this.xRadius = source.xRadius;
+    this.yRadius = source.yRadius;
+    this.aStartAngle = source.aStartAngle;
+    this.aEndAngle = source.aEndAngle;
+    this.aClockwise = source.aClockwise;
+    this.aRotation = source.aRotation;
+    return this;
+  }
+  toJSON() {
+    const data = super.toJSON();
+    data.aX = this.aX;
+    data.aY = this.aY;
+    data.xRadius = this.xRadius;
+    data.yRadius = this.yRadius;
+    data.aStartAngle = this.aStartAngle;
+    data.aEndAngle = this.aEndAngle;
+    data.aClockwise = this.aClockwise;
+    data.aRotation = this.aRotation;
+    return data;
+  }
+  fromJSON(json) {
+    super.fromJSON(json);
+    this.aX = json.aX;
+    this.aY = json.aY;
+    this.xRadius = json.xRadius;
+    this.yRadius = json.yRadius;
+    this.aStartAngle = json.aStartAngle;
+    this.aEndAngle = json.aEndAngle;
+    this.aClockwise = json.aClockwise;
+    this.aRotation = json.aRotation;
+    return this;
+  }
+};
+var ArcCurve = class extends EllipseCurve {
+  constructor(aX, aY, aRadius, aStartAngle, aEndAngle, aClockwise) {
+    super(aX, aY, aRadius, aRadius, aStartAngle, aEndAngle, aClockwise);
+    this.isArcCurve = true;
+    this.type = "ArcCurve";
+  }
+};
+function CubicPoly() {
+  let c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+  function init(x0, x1, t0, t1) {
+    c0 = x0;
+    c1 = t0;
+    c2 = -3 * x0 + 3 * x1 - 2 * t0 - t1;
+    c3 = 2 * x0 - 2 * x1 + t0 + t1;
+  }
+  return {
+    initCatmullRom: function(x0, x1, x2, x3, tension) {
+      init(x1, x2, tension * (x2 - x0), tension * (x3 - x1));
+    },
+    initNonuniformCatmullRom: function(x0, x1, x2, x3, dt0, dt1, dt2) {
+      let t1 = (x1 - x0) / dt0 - (x2 - x0) / (dt0 + dt1) + (x2 - x1) / dt1;
+      let t2 = (x2 - x1) / dt1 - (x3 - x1) / (dt1 + dt2) + (x3 - x2) / dt2;
+      t1 *= dt1;
+      t2 *= dt1;
+      init(x1, x2, t1, t2);
+    },
+    calc: function(t2) {
+      const t22 = t2 * t2;
+      const t3 = t22 * t2;
+      return c0 + c1 * t2 + c2 * t22 + c3 * t3;
+    }
+  };
+}
+var tmp = /* @__PURE__ */ new Vector3();
+var px = /* @__PURE__ */ new CubicPoly();
+var py = /* @__PURE__ */ new CubicPoly();
+var pz = /* @__PURE__ */ new CubicPoly();
+var CatmullRomCurve3 = class extends Curve {
+  constructor(points = [], closed = false, curveType = "centripetal", tension = 0.5) {
+    super();
+    this.isCatmullRomCurve3 = true;
+    this.type = "CatmullRomCurve3";
+    this.points = points;
+    this.closed = closed;
+    this.curveType = curveType;
+    this.tension = tension;
+  }
+  getPoint(t2, optionalTarget = new Vector3()) {
+    const point = optionalTarget;
+    const points = this.points;
+    const l = points.length;
+    const p = (l - (this.closed ? 0 : 1)) * t2;
+    let intPoint = Math.floor(p);
+    let weight = p - intPoint;
+    if (this.closed) {
+      intPoint += intPoint > 0 ? 0 : (Math.floor(Math.abs(intPoint) / l) + 1) * l;
+    } else if (weight === 0 && intPoint === l - 1) {
+      intPoint = l - 2;
+      weight = 1;
+    }
+    let p0, p3;
+    if (this.closed || intPoint > 0) {
+      p0 = points[(intPoint - 1) % l];
+    } else {
+      tmp.subVectors(points[0], points[1]).add(points[0]);
+      p0 = tmp;
+    }
+    const p1 = points[intPoint % l];
+    const p2 = points[(intPoint + 1) % l];
+    if (this.closed || intPoint + 2 < l) {
+      p3 = points[(intPoint + 2) % l];
+    } else {
+      tmp.subVectors(points[l - 1], points[l - 2]).add(points[l - 1]);
+      p3 = tmp;
+    }
+    if (this.curveType === "centripetal" || this.curveType === "chordal") {
+      const pow = this.curveType === "chordal" ? 0.5 : 0.25;
+      let dt0 = Math.pow(p0.distanceToSquared(p1), pow);
+      let dt1 = Math.pow(p1.distanceToSquared(p2), pow);
+      let dt2 = Math.pow(p2.distanceToSquared(p3), pow);
+      if (dt1 < 1e-4) dt1 = 1;
+      if (dt0 < 1e-4) dt0 = dt1;
+      if (dt2 < 1e-4) dt2 = dt1;
+      px.initNonuniformCatmullRom(p0.x, p1.x, p2.x, p3.x, dt0, dt1, dt2);
+      py.initNonuniformCatmullRom(p0.y, p1.y, p2.y, p3.y, dt0, dt1, dt2);
+      pz.initNonuniformCatmullRom(p0.z, p1.z, p2.z, p3.z, dt0, dt1, dt2);
+    } else if (this.curveType === "catmullrom") {
+      px.initCatmullRom(p0.x, p1.x, p2.x, p3.x, this.tension);
+      py.initCatmullRom(p0.y, p1.y, p2.y, p3.y, this.tension);
+      pz.initCatmullRom(p0.z, p1.z, p2.z, p3.z, this.tension);
+    }
+    point.set(
+      px.calc(weight),
+      py.calc(weight),
+      pz.calc(weight)
+    );
+    return point;
+  }
+  copy(source) {
+    super.copy(source);
+    this.points = [];
+    for (let i = 0, l = source.points.length; i < l; i++) {
+      const point = source.points[i];
+      this.points.push(point.clone());
+    }
+    this.closed = source.closed;
+    this.curveType = source.curveType;
+    this.tension = source.tension;
+    return this;
+  }
+  toJSON() {
+    const data = super.toJSON();
+    data.points = [];
+    for (let i = 0, l = this.points.length; i < l; i++) {
+      const point = this.points[i];
+      data.points.push(point.toArray());
+    }
+    data.closed = this.closed;
+    data.curveType = this.curveType;
+    data.tension = this.tension;
+    return data;
+  }
+  fromJSON(json) {
+    super.fromJSON(json);
+    this.points = [];
+    for (let i = 0, l = json.points.length; i < l; i++) {
+      const point = json.points[i];
+      this.points.push(new Vector3().fromArray(point));
+    }
+    this.closed = json.closed;
+    this.curveType = json.curveType;
+    this.tension = json.tension;
+    return this;
+  }
+};
+function CatmullRom(t2, p0, p1, p2, p3) {
+  const v0 = (p2 - p0) * 0.5;
+  const v1 = (p3 - p1) * 0.5;
+  const t22 = t2 * t2;
+  const t3 = t2 * t22;
+  return (2 * p1 - 2 * p2 + v0 + v1) * t3 + (-3 * p1 + 3 * p2 - 2 * v0 - v1) * t22 + v0 * t2 + p1;
+}
+function QuadraticBezierP0(t2, p) {
+  const k = 1 - t2;
+  return k * k * p;
+}
+function QuadraticBezierP1(t2, p) {
+  return 2 * (1 - t2) * t2 * p;
+}
+function QuadraticBezierP2(t2, p) {
+  return t2 * t2 * p;
+}
+function QuadraticBezier(t2, p0, p1, p2) {
+  return QuadraticBezierP0(t2, p0) + QuadraticBezierP1(t2, p1) + QuadraticBezierP2(t2, p2);
+}
+function CubicBezierP0(t2, p) {
+  const k = 1 - t2;
+  return k * k * k * p;
+}
+function CubicBezierP1(t2, p) {
+  const k = 1 - t2;
+  return 3 * k * k * t2 * p;
+}
+function CubicBezierP2(t2, p) {
+  return 3 * (1 - t2) * t2 * t2 * p;
+}
+function CubicBezierP3(t2, p) {
+  return t2 * t2 * t2 * p;
+}
+function CubicBezier(t2, p0, p1, p2, p3) {
+  return CubicBezierP0(t2, p0) + CubicBezierP1(t2, p1) + CubicBezierP2(t2, p2) + CubicBezierP3(t2, p3);
+}
+var CubicBezierCurve = class extends Curve {
+  constructor(v0 = new Vector2(), v1 = new Vector2(), v2 = new Vector2(), v3 = new Vector2()) {
+    super();
+    this.isCubicBezierCurve = true;
+    this.type = "CubicBezierCurve";
+    this.v0 = v0;
+    this.v1 = v1;
+    this.v2 = v2;
+    this.v3 = v3;
+  }
+  getPoint(t2, optionalTarget = new Vector2()) {
+    const point = optionalTarget;
+    const v0 = this.v0, v1 = this.v1, v2 = this.v2, v3 = this.v3;
+    point.set(
+      CubicBezier(t2, v0.x, v1.x, v2.x, v3.x),
+      CubicBezier(t2, v0.y, v1.y, v2.y, v3.y)
+    );
+    return point;
+  }
+  copy(source) {
+    super.copy(source);
+    this.v0.copy(source.v0);
+    this.v1.copy(source.v1);
+    this.v2.copy(source.v2);
+    this.v3.copy(source.v3);
+    return this;
+  }
+  toJSON() {
+    const data = super.toJSON();
+    data.v0 = this.v0.toArray();
+    data.v1 = this.v1.toArray();
+    data.v2 = this.v2.toArray();
+    data.v3 = this.v3.toArray();
+    return data;
+  }
+  fromJSON(json) {
+    super.fromJSON(json);
+    this.v0.fromArray(json.v0);
+    this.v1.fromArray(json.v1);
+    this.v2.fromArray(json.v2);
+    this.v3.fromArray(json.v3);
+    return this;
+  }
+};
+var CubicBezierCurve3 = class extends Curve {
+  constructor(v0 = new Vector3(), v1 = new Vector3(), v2 = new Vector3(), v3 = new Vector3()) {
+    super();
+    this.isCubicBezierCurve3 = true;
+    this.type = "CubicBezierCurve3";
+    this.v0 = v0;
+    this.v1 = v1;
+    this.v2 = v2;
+    this.v3 = v3;
+  }
+  getPoint(t2, optionalTarget = new Vector3()) {
+    const point = optionalTarget;
+    const v0 = this.v0, v1 = this.v1, v2 = this.v2, v3 = this.v3;
+    point.set(
+      CubicBezier(t2, v0.x, v1.x, v2.x, v3.x),
+      CubicBezier(t2, v0.y, v1.y, v2.y, v3.y),
+      CubicBezier(t2, v0.z, v1.z, v2.z, v3.z)
+    );
+    return point;
+  }
+  copy(source) {
+    super.copy(source);
+    this.v0.copy(source.v0);
+    this.v1.copy(source.v1);
+    this.v2.copy(source.v2);
+    this.v3.copy(source.v3);
+    return this;
+  }
+  toJSON() {
+    const data = super.toJSON();
+    data.v0 = this.v0.toArray();
+    data.v1 = this.v1.toArray();
+    data.v2 = this.v2.toArray();
+    data.v3 = this.v3.toArray();
+    return data;
+  }
+  fromJSON(json) {
+    super.fromJSON(json);
+    this.v0.fromArray(json.v0);
+    this.v1.fromArray(json.v1);
+    this.v2.fromArray(json.v2);
+    this.v3.fromArray(json.v3);
+    return this;
+  }
+};
+var LineCurve = class extends Curve {
+  constructor(v1 = new Vector2(), v2 = new Vector2()) {
+    super();
+    this.isLineCurve = true;
+    this.type = "LineCurve";
+    this.v1 = v1;
+    this.v2 = v2;
+  }
+  getPoint(t2, optionalTarget = new Vector2()) {
+    const point = optionalTarget;
+    if (t2 === 1) {
+      point.copy(this.v2);
+    } else {
+      point.copy(this.v2).sub(this.v1);
+      point.multiplyScalar(t2).add(this.v1);
+    }
+    return point;
+  }
+  // Line curve is linear, so we can overwrite default getPointAt
+  getPointAt(u2, optionalTarget) {
+    return this.getPoint(u2, optionalTarget);
+  }
+  getTangent(t2, optionalTarget = new Vector2()) {
+    return optionalTarget.subVectors(this.v2, this.v1).normalize();
+  }
+  getTangentAt(u2, optionalTarget) {
+    return this.getTangent(u2, optionalTarget);
+  }
+  copy(source) {
+    super.copy(source);
+    this.v1.copy(source.v1);
+    this.v2.copy(source.v2);
+    return this;
+  }
+  toJSON() {
+    const data = super.toJSON();
+    data.v1 = this.v1.toArray();
+    data.v2 = this.v2.toArray();
+    return data;
+  }
+  fromJSON(json) {
+    super.fromJSON(json);
+    this.v1.fromArray(json.v1);
+    this.v2.fromArray(json.v2);
+    return this;
+  }
+};
+var LineCurve3 = class extends Curve {
+  constructor(v1 = new Vector3(), v2 = new Vector3()) {
+    super();
+    this.isLineCurve3 = true;
+    this.type = "LineCurve3";
+    this.v1 = v1;
+    this.v2 = v2;
+  }
+  getPoint(t2, optionalTarget = new Vector3()) {
+    const point = optionalTarget;
+    if (t2 === 1) {
+      point.copy(this.v2);
+    } else {
+      point.copy(this.v2).sub(this.v1);
+      point.multiplyScalar(t2).add(this.v1);
+    }
+    return point;
+  }
+  // Line curve is linear, so we can overwrite default getPointAt
+  getPointAt(u2, optionalTarget) {
+    return this.getPoint(u2, optionalTarget);
+  }
+  getTangent(t2, optionalTarget = new Vector3()) {
+    return optionalTarget.subVectors(this.v2, this.v1).normalize();
+  }
+  getTangentAt(u2, optionalTarget) {
+    return this.getTangent(u2, optionalTarget);
+  }
+  copy(source) {
+    super.copy(source);
+    this.v1.copy(source.v1);
+    this.v2.copy(source.v2);
+    return this;
+  }
+  toJSON() {
+    const data = super.toJSON();
+    data.v1 = this.v1.toArray();
+    data.v2 = this.v2.toArray();
+    return data;
+  }
+  fromJSON(json) {
+    super.fromJSON(json);
+    this.v1.fromArray(json.v1);
+    this.v2.fromArray(json.v2);
+    return this;
+  }
+};
+var QuadraticBezierCurve = class extends Curve {
+  constructor(v0 = new Vector2(), v1 = new Vector2(), v2 = new Vector2()) {
+    super();
+    this.isQuadraticBezierCurve = true;
+    this.type = "QuadraticBezierCurve";
+    this.v0 = v0;
+    this.v1 = v1;
+    this.v2 = v2;
+  }
+  getPoint(t2, optionalTarget = new Vector2()) {
+    const point = optionalTarget;
+    const v0 = this.v0, v1 = this.v1, v2 = this.v2;
+    point.set(
+      QuadraticBezier(t2, v0.x, v1.x, v2.x),
+      QuadraticBezier(t2, v0.y, v1.y, v2.y)
+    );
+    return point;
+  }
+  copy(source) {
+    super.copy(source);
+    this.v0.copy(source.v0);
+    this.v1.copy(source.v1);
+    this.v2.copy(source.v2);
+    return this;
+  }
+  toJSON() {
+    const data = super.toJSON();
+    data.v0 = this.v0.toArray();
+    data.v1 = this.v1.toArray();
+    data.v2 = this.v2.toArray();
+    return data;
+  }
+  fromJSON(json) {
+    super.fromJSON(json);
+    this.v0.fromArray(json.v0);
+    this.v1.fromArray(json.v1);
+    this.v2.fromArray(json.v2);
+    return this;
+  }
+};
+var QuadraticBezierCurve3 = class extends Curve {
+  constructor(v0 = new Vector3(), v1 = new Vector3(), v2 = new Vector3()) {
+    super();
+    this.isQuadraticBezierCurve3 = true;
+    this.type = "QuadraticBezierCurve3";
+    this.v0 = v0;
+    this.v1 = v1;
+    this.v2 = v2;
+  }
+  getPoint(t2, optionalTarget = new Vector3()) {
+    const point = optionalTarget;
+    const v0 = this.v0, v1 = this.v1, v2 = this.v2;
+    point.set(
+      QuadraticBezier(t2, v0.x, v1.x, v2.x),
+      QuadraticBezier(t2, v0.y, v1.y, v2.y),
+      QuadraticBezier(t2, v0.z, v1.z, v2.z)
+    );
+    return point;
+  }
+  copy(source) {
+    super.copy(source);
+    this.v0.copy(source.v0);
+    this.v1.copy(source.v1);
+    this.v2.copy(source.v2);
+    return this;
+  }
+  toJSON() {
+    const data = super.toJSON();
+    data.v0 = this.v0.toArray();
+    data.v1 = this.v1.toArray();
+    data.v2 = this.v2.toArray();
+    return data;
+  }
+  fromJSON(json) {
+    super.fromJSON(json);
+    this.v0.fromArray(json.v0);
+    this.v1.fromArray(json.v1);
+    this.v2.fromArray(json.v2);
+    return this;
+  }
+};
+var SplineCurve = class extends Curve {
+  constructor(points = []) {
+    super();
+    this.isSplineCurve = true;
+    this.type = "SplineCurve";
+    this.points = points;
+  }
+  getPoint(t2, optionalTarget = new Vector2()) {
+    const point = optionalTarget;
+    const points = this.points;
+    const p = (points.length - 1) * t2;
+    const intPoint = Math.floor(p);
+    const weight = p - intPoint;
+    const p0 = points[intPoint === 0 ? intPoint : intPoint - 1];
+    const p1 = points[intPoint];
+    const p2 = points[intPoint > points.length - 2 ? points.length - 1 : intPoint + 1];
+    const p3 = points[intPoint > points.length - 3 ? points.length - 1 : intPoint + 2];
+    point.set(
+      CatmullRom(weight, p0.x, p1.x, p2.x, p3.x),
+      CatmullRom(weight, p0.y, p1.y, p2.y, p3.y)
+    );
+    return point;
+  }
+  copy(source) {
+    super.copy(source);
+    this.points = [];
+    for (let i = 0, l = source.points.length; i < l; i++) {
+      const point = source.points[i];
+      this.points.push(point.clone());
+    }
+    return this;
+  }
+  toJSON() {
+    const data = super.toJSON();
+    data.points = [];
+    for (let i = 0, l = this.points.length; i < l; i++) {
+      const point = this.points[i];
+      data.points.push(point.toArray());
+    }
+    return data;
+  }
+  fromJSON(json) {
+    super.fromJSON(json);
+    this.points = [];
+    for (let i = 0, l = json.points.length; i < l; i++) {
+      const point = json.points[i];
+      this.points.push(new Vector2().fromArray(point));
+    }
+    return this;
+  }
+};
+var Curves = /* @__PURE__ */ Object.freeze({
+  __proto__: null,
+  ArcCurve,
+  CatmullRomCurve3,
+  CubicBezierCurve,
+  CubicBezierCurve3,
+  EllipseCurve,
+  LineCurve,
+  LineCurve3,
+  QuadraticBezierCurve,
+  QuadraticBezierCurve3,
+  SplineCurve
+});
+var CurvePath = class extends Curve {
+  constructor() {
+    super();
+    this.type = "CurvePath";
+    this.curves = [];
+    this.autoClose = false;
+  }
+  add(curve) {
+    this.curves.push(curve);
+  }
+  closePath() {
+    const startPoint = this.curves[0].getPoint(0);
+    const endPoint = this.curves[this.curves.length - 1].getPoint(1);
+    if (!startPoint.equals(endPoint)) {
+      const lineType = startPoint.isVector2 === true ? "LineCurve" : "LineCurve3";
+      this.curves.push(new Curves[lineType](endPoint, startPoint));
+    }
+    return this;
+  }
+  // To get accurate point with reference to
+  // entire path distance at time t,
+  // following has to be done:
+  // 1. Length of each sub path have to be known
+  // 2. Locate and identify type of curve
+  // 3. Get t for the curve
+  // 4. Return curve.getPointAt(t')
+  getPoint(t2, optionalTarget) {
+    const d = t2 * this.getLength();
+    const curveLengths = this.getCurveLengths();
+    let i = 0;
+    while (i < curveLengths.length) {
+      if (curveLengths[i] >= d) {
+        const diff = curveLengths[i] - d;
+        const curve = this.curves[i];
+        const segmentLength = curve.getLength();
+        const u2 = segmentLength === 0 ? 0 : 1 - diff / segmentLength;
+        return curve.getPointAt(u2, optionalTarget);
+      }
+      i++;
+    }
+    return null;
+  }
+  // We cannot use the default THREE.Curve getPoint() with getLength() because in
+  // THREE.Curve, getLength() depends on getPoint() but in THREE.CurvePath
+  // getPoint() depends on getLength
+  getLength() {
+    const lens = this.getCurveLengths();
+    return lens[lens.length - 1];
+  }
+  // cacheLengths must be recalculated.
+  updateArcLengths() {
+    this.needsUpdate = true;
+    this.cacheLengths = null;
+    this.getCurveLengths();
+  }
+  // Compute lengths and cache them
+  // We cannot overwrite getLengths() because UtoT mapping uses it.
+  getCurveLengths() {
+    if (this.cacheLengths && this.cacheLengths.length === this.curves.length) {
+      return this.cacheLengths;
+    }
+    const lengths = [];
+    let sums = 0;
+    for (let i = 0, l = this.curves.length; i < l; i++) {
+      sums += this.curves[i].getLength();
+      lengths.push(sums);
+    }
+    this.cacheLengths = lengths;
+    return lengths;
+  }
+  getSpacedPoints(divisions = 40) {
+    const points = [];
+    for (let i = 0; i <= divisions; i++) {
+      points.push(this.getPoint(i / divisions));
+    }
+    if (this.autoClose) {
+      points.push(points[0]);
+    }
+    return points;
+  }
+  getPoints(divisions = 12) {
+    const points = [];
+    let last;
+    for (let i = 0, curves = this.curves; i < curves.length; i++) {
+      const curve = curves[i];
+      const resolution = curve.isEllipseCurve ? divisions * 2 : curve.isLineCurve || curve.isLineCurve3 ? 1 : curve.isSplineCurve ? divisions * curve.points.length : divisions;
+      const pts = curve.getPoints(resolution);
+      for (let j = 0; j < pts.length; j++) {
+        const point = pts[j];
+        if (last && last.equals(point)) continue;
+        points.push(point);
+        last = point;
+      }
+    }
+    if (this.autoClose && points.length > 1 && !points[points.length - 1].equals(points[0])) {
+      points.push(points[0]);
+    }
+    return points;
+  }
+  copy(source) {
+    super.copy(source);
+    this.curves = [];
+    for (let i = 0, l = source.curves.length; i < l; i++) {
+      const curve = source.curves[i];
+      this.curves.push(curve.clone());
+    }
+    this.autoClose = source.autoClose;
+    return this;
+  }
+  toJSON() {
+    const data = super.toJSON();
+    data.autoClose = this.autoClose;
+    data.curves = [];
+    for (let i = 0, l = this.curves.length; i < l; i++) {
+      const curve = this.curves[i];
+      data.curves.push(curve.toJSON());
+    }
+    return data;
+  }
+  fromJSON(json) {
+    super.fromJSON(json);
+    this.autoClose = json.autoClose;
+    this.curves = [];
+    for (let i = 0, l = json.curves.length; i < l; i++) {
+      const curve = json.curves[i];
+      this.curves.push(new Curves[curve.type]().fromJSON(curve));
+    }
+    return this;
+  }
+};
+var Path = class extends CurvePath {
+  constructor(points) {
+    super();
+    this.type = "Path";
+    this.currentPoint = new Vector2();
+    if (points) {
+      this.setFromPoints(points);
+    }
+  }
+  setFromPoints(points) {
+    this.moveTo(points[0].x, points[0].y);
+    for (let i = 1, l = points.length; i < l; i++) {
+      this.lineTo(points[i].x, points[i].y);
+    }
+    return this;
+  }
+  moveTo(x, y) {
+    this.currentPoint.set(x, y);
+    return this;
+  }
+  lineTo(x, y) {
+    const curve = new LineCurve(this.currentPoint.clone(), new Vector2(x, y));
+    this.curves.push(curve);
+    this.currentPoint.set(x, y);
+    return this;
+  }
+  quadraticCurveTo(aCPx, aCPy, aX, aY) {
+    const curve = new QuadraticBezierCurve(
+      this.currentPoint.clone(),
+      new Vector2(aCPx, aCPy),
+      new Vector2(aX, aY)
+    );
+    this.curves.push(curve);
+    this.currentPoint.set(aX, aY);
+    return this;
+  }
+  bezierCurveTo(aCP1x, aCP1y, aCP2x, aCP2y, aX, aY) {
+    const curve = new CubicBezierCurve(
+      this.currentPoint.clone(),
+      new Vector2(aCP1x, aCP1y),
+      new Vector2(aCP2x, aCP2y),
+      new Vector2(aX, aY)
+    );
+    this.curves.push(curve);
+    this.currentPoint.set(aX, aY);
+    return this;
+  }
+  splineThru(pts) {
+    const npts = [this.currentPoint.clone()].concat(pts);
+    const curve = new SplineCurve(npts);
+    this.curves.push(curve);
+    this.currentPoint.copy(pts[pts.length - 1]);
+    return this;
+  }
+  arc(aX, aY, aRadius, aStartAngle, aEndAngle, aClockwise) {
+    const x0 = this.currentPoint.x;
+    const y0 = this.currentPoint.y;
+    this.absarc(
+      aX + x0,
+      aY + y0,
+      aRadius,
+      aStartAngle,
+      aEndAngle,
+      aClockwise
+    );
+    return this;
+  }
+  absarc(aX, aY, aRadius, aStartAngle, aEndAngle, aClockwise) {
+    this.absellipse(aX, aY, aRadius, aRadius, aStartAngle, aEndAngle, aClockwise);
+    return this;
+  }
+  ellipse(aX, aY, xRadius, yRadius, aStartAngle, aEndAngle, aClockwise, aRotation) {
+    const x0 = this.currentPoint.x;
+    const y0 = this.currentPoint.y;
+    this.absellipse(aX + x0, aY + y0, xRadius, yRadius, aStartAngle, aEndAngle, aClockwise, aRotation);
+    return this;
+  }
+  absellipse(aX, aY, xRadius, yRadius, aStartAngle, aEndAngle, aClockwise, aRotation) {
+    const curve = new EllipseCurve(aX, aY, xRadius, yRadius, aStartAngle, aEndAngle, aClockwise, aRotation);
+    if (this.curves.length > 0) {
+      const firstPoint = curve.getPoint(0);
+      if (!firstPoint.equals(this.currentPoint)) {
+        this.lineTo(firstPoint.x, firstPoint.y);
+      }
+    }
+    this.curves.push(curve);
+    const lastPoint = curve.getPoint(1);
+    this.currentPoint.copy(lastPoint);
+    return this;
+  }
+  copy(source) {
+    super.copy(source);
+    this.currentPoint.copy(source.currentPoint);
+    return this;
+  }
+  toJSON() {
+    const data = super.toJSON();
+    data.currentPoint = this.currentPoint.toArray();
+    return data;
+  }
+  fromJSON(json) {
+    super.fromJSON(json);
+    this.currentPoint.fromArray(json.currentPoint);
+    return this;
+  }
+};
+var LatheGeometry = class _LatheGeometry extends BufferGeometry {
+  constructor(points = [new Vector2(0, -0.5), new Vector2(0.5, 0), new Vector2(0, 0.5)], segments = 12, phiStart = 0, phiLength = Math.PI * 2) {
+    super();
+    this.type = "LatheGeometry";
+    this.parameters = {
+      points,
+      segments,
+      phiStart,
+      phiLength
+    };
+    segments = Math.floor(segments);
+    phiLength = clamp(phiLength, 0, Math.PI * 2);
+    const indices = [];
+    const vertices = [];
+    const uvs = [];
+    const initNormals = [];
+    const normals = [];
+    const inverseSegments = 1 / segments;
+    const vertex2 = new Vector3();
+    const uv = new Vector2();
+    const normal = new Vector3();
+    const curNormal = new Vector3();
+    const prevNormal = new Vector3();
+    let dx = 0;
+    let dy = 0;
+    for (let j = 0; j <= points.length - 1; j++) {
+      switch (j) {
+        case 0:
+          dx = points[j + 1].x - points[j].x;
+          dy = points[j + 1].y - points[j].y;
+          normal.x = dy * 1;
+          normal.y = -dx;
+          normal.z = dy * 0;
+          prevNormal.copy(normal);
+          normal.normalize();
+          initNormals.push(normal.x, normal.y, normal.z);
+          break;
+        case points.length - 1:
+          initNormals.push(prevNormal.x, prevNormal.y, prevNormal.z);
+          break;
+        default:
+          dx = points[j + 1].x - points[j].x;
+          dy = points[j + 1].y - points[j].y;
+          normal.x = dy * 1;
+          normal.y = -dx;
+          normal.z = dy * 0;
+          curNormal.copy(normal);
+          normal.x += prevNormal.x;
+          normal.y += prevNormal.y;
+          normal.z += prevNormal.z;
+          normal.normalize();
+          initNormals.push(normal.x, normal.y, normal.z);
+          prevNormal.copy(curNormal);
+      }
+    }
+    for (let i = 0; i <= segments; i++) {
+      const phi = phiStart + i * inverseSegments * phiLength;
+      const sin = Math.sin(phi);
+      const cos = Math.cos(phi);
+      for (let j = 0; j <= points.length - 1; j++) {
+        vertex2.x = points[j].x * sin;
+        vertex2.y = points[j].y;
+        vertex2.z = points[j].x * cos;
+        vertices.push(vertex2.x, vertex2.y, vertex2.z);
+        uv.x = i / segments;
+        uv.y = j / (points.length - 1);
+        uvs.push(uv.x, uv.y);
+        const x = initNormals[3 * j + 0] * sin;
+        const y = initNormals[3 * j + 1];
+        const z = initNormals[3 * j + 0] * cos;
+        normals.push(x, y, z);
+      }
+    }
+    for (let i = 0; i < segments; i++) {
+      for (let j = 0; j < points.length - 1; j++) {
+        const base = j + i * points.length;
+        const a = base;
+        const b = base + points.length;
+        const c = base + points.length + 1;
+        const d = base + 1;
+        indices.push(a, b, d);
+        indices.push(c, d, b);
+      }
+    }
+    this.setIndex(indices);
+    this.setAttribute("position", new Float32BufferAttribute(vertices, 3));
+    this.setAttribute("uv", new Float32BufferAttribute(uvs, 2));
+    this.setAttribute("normal", new Float32BufferAttribute(normals, 3));
+  }
+  copy(source) {
+    super.copy(source);
+    this.parameters = Object.assign({}, source.parameters);
+    return this;
+  }
+  static fromJSON(data) {
+    return new _LatheGeometry(data.points, data.segments, data.phiStart, data.phiLength);
+  }
+};
+var CapsuleGeometry = class _CapsuleGeometry extends LatheGeometry {
+  constructor(radius = 1, length = 1, capSegments = 4, radialSegments = 8) {
+    const path = new Path();
+    path.absarc(0, -length / 2, radius, Math.PI * 1.5, 0);
+    path.absarc(0, length / 2, radius, 0, Math.PI * 0.5);
+    super(path.getPoints(capSegments), radialSegments);
+    this.type = "CapsuleGeometry";
+    this.parameters = {
+      radius,
+      length,
+      capSegments,
+      radialSegments
+    };
+  }
+  static fromJSON(data) {
+    return new _CapsuleGeometry(data.radius, data.length, data.capSegments, data.radialSegments);
+  }
+};
+var CylinderGeometry = class _CylinderGeometry extends BufferGeometry {
+  constructor(radiusTop = 1, radiusBottom = 1, height = 1, radialSegments = 32, heightSegments = 1, openEnded = false, thetaStart = 0, thetaLength = Math.PI * 2) {
+    super();
+    this.type = "CylinderGeometry";
+    this.parameters = {
+      radiusTop,
+      radiusBottom,
+      height,
+      radialSegments,
+      heightSegments,
+      openEnded,
+      thetaStart,
+      thetaLength
+    };
+    const scope = this;
+    radialSegments = Math.floor(radialSegments);
+    heightSegments = Math.floor(heightSegments);
+    const indices = [];
+    const vertices = [];
+    const normals = [];
+    const uvs = [];
+    let index = 0;
+    const indexArray = [];
+    const halfHeight = height / 2;
+    let groupStart = 0;
+    generateTorso();
+    if (openEnded === false) {
+      if (radiusTop > 0) generateCap(true);
+      if (radiusBottom > 0) generateCap(false);
+    }
+    this.setIndex(indices);
+    this.setAttribute("position", new Float32BufferAttribute(vertices, 3));
+    this.setAttribute("normal", new Float32BufferAttribute(normals, 3));
+    this.setAttribute("uv", new Float32BufferAttribute(uvs, 2));
+    function generateTorso() {
+      const normal = new Vector3();
+      const vertex2 = new Vector3();
+      let groupCount = 0;
+      const slope = (radiusBottom - radiusTop) / height;
+      for (let y = 0; y <= heightSegments; y++) {
+        const indexRow = [];
+        const v = y / heightSegments;
+        const radius = v * (radiusBottom - radiusTop) + radiusTop;
+        for (let x = 0; x <= radialSegments; x++) {
+          const u2 = x / radialSegments;
+          const theta = u2 * thetaLength + thetaStart;
+          const sinTheta = Math.sin(theta);
+          const cosTheta = Math.cos(theta);
+          vertex2.x = radius * sinTheta;
+          vertex2.y = -v * height + halfHeight;
+          vertex2.z = radius * cosTheta;
+          vertices.push(vertex2.x, vertex2.y, vertex2.z);
+          normal.set(sinTheta, slope, cosTheta).normalize();
+          normals.push(normal.x, normal.y, normal.z);
+          uvs.push(u2, 1 - v);
+          indexRow.push(index++);
+        }
+        indexArray.push(indexRow);
+      }
+      for (let x = 0; x < radialSegments; x++) {
+        for (let y = 0; y < heightSegments; y++) {
+          const a = indexArray[y][x];
+          const b = indexArray[y + 1][x];
+          const c = indexArray[y + 1][x + 1];
+          const d = indexArray[y][x + 1];
+          if (radiusTop > 0 || y !== 0) {
+            indices.push(a, b, d);
+            groupCount += 3;
+          }
+          if (radiusBottom > 0 || y !== heightSegments - 1) {
+            indices.push(b, c, d);
+            groupCount += 3;
+          }
+        }
+      }
+      scope.addGroup(groupStart, groupCount, 0);
+      groupStart += groupCount;
+    }
+    function generateCap(top) {
+      const centerIndexStart = index;
+      const uv = new Vector2();
+      const vertex2 = new Vector3();
+      let groupCount = 0;
+      const radius = top === true ? radiusTop : radiusBottom;
+      const sign2 = top === true ? 1 : -1;
+      for (let x = 1; x <= radialSegments; x++) {
+        vertices.push(0, halfHeight * sign2, 0);
+        normals.push(0, sign2, 0);
+        uvs.push(0.5, 0.5);
+        index++;
+      }
+      const centerIndexEnd = index;
+      for (let x = 0; x <= radialSegments; x++) {
+        const u2 = x / radialSegments;
+        const theta = u2 * thetaLength + thetaStart;
+        const cosTheta = Math.cos(theta);
+        const sinTheta = Math.sin(theta);
+        vertex2.x = radius * sinTheta;
+        vertex2.y = halfHeight * sign2;
+        vertex2.z = radius * cosTheta;
+        vertices.push(vertex2.x, vertex2.y, vertex2.z);
+        normals.push(0, sign2, 0);
+        uv.x = cosTheta * 0.5 + 0.5;
+        uv.y = sinTheta * 0.5 * sign2 + 0.5;
+        uvs.push(uv.x, uv.y);
+        index++;
+      }
+      for (let x = 0; x < radialSegments; x++) {
+        const c = centerIndexStart + x;
+        const i = centerIndexEnd + x;
+        if (top === true) {
+          indices.push(i, i + 1, c);
+        } else {
+          indices.push(i + 1, i, c);
+        }
+        groupCount += 3;
+      }
+      scope.addGroup(groupStart, groupCount, top === true ? 1 : 2);
+      groupStart += groupCount;
+    }
+  }
+  copy(source) {
+    super.copy(source);
+    this.parameters = Object.assign({}, source.parameters);
+    return this;
+  }
+  static fromJSON(data) {
+    return new _CylinderGeometry(data.radiusTop, data.radiusBottom, data.height, data.radialSegments, data.heightSegments, data.openEnded, data.thetaStart, data.thetaLength);
+  }
+};
+var ConeGeometry = class _ConeGeometry extends CylinderGeometry {
+  constructor(radius = 1, height = 1, radialSegments = 32, heightSegments = 1, openEnded = false, thetaStart = 0, thetaLength = Math.PI * 2) {
+    super(0, radius, height, radialSegments, heightSegments, openEnded, thetaStart, thetaLength);
+    this.type = "ConeGeometry";
+    this.parameters = {
+      radius,
+      height,
+      radialSegments,
+      heightSegments,
+      openEnded,
+      thetaStart,
+      thetaLength
+    };
+  }
+  static fromJSON(data) {
+    return new _ConeGeometry(data.radius, data.height, data.radialSegments, data.heightSegments, data.openEnded, data.thetaStart, data.thetaLength);
+  }
+};
 var Earcut = {
   triangulate: function(data, holeIndices, dim = 2) {
     const hasHoles = holeIndices && holeIndices.length;
@@ -20050,8 +21139,8 @@ function getLeftmost(start) {
   } while (p !== start);
   return leftmost;
 }
-function pointInTriangle(ax, ay, bx, by, cx, cy, px, py) {
-  return (cx - px) * (ay - py) >= (ax - px) * (cy - py) && (ax - px) * (by - py) >= (bx - px) * (ay - py) && (bx - px) * (cy - py) >= (cx - px) * (by - py);
+function pointInTriangle(ax, ay, bx, by, cx, cy, px2, py2) {
+  return (cx - px2) * (ay - py2) >= (ax - px2) * (cy - py2) && (ax - px2) * (by - py2) >= (bx - px2) * (ay - py2) && (bx - px2) * (cy - py2) >= (cx - px2) * (by - py2);
 }
 function isValidDiagonal(a, b) {
   return a.next.i !== b.i && a.prev.i !== b.i && !intersectsPolygon(a, b) && // dones't intersect other edges
@@ -20096,9 +21185,9 @@ function locallyInside(a, b) {
 }
 function middleInside(a, b) {
   let p = a, inside = false;
-  const px = (a.x + b.x) / 2, py = (a.y + b.y) / 2;
+  const px2 = (a.x + b.x) / 2, py2 = (a.y + b.y) / 2;
   do {
-    if (p.y > py !== p.next.y > py && p.next.y !== p.y && px < (p.next.x - p.x) * (py - p.y) / (p.next.y - p.y) + p.x)
+    if (p.y > py2 !== p.next.y > py2 && p.next.y !== p.y && px2 < (p.next.x - p.x) * (py2 - p.y) / (p.next.y - p.y) + p.x)
       inside = !inside;
     p = p.next;
   } while (p !== a);
@@ -20267,6 +21356,66 @@ var SphereGeometry = class _SphereGeometry extends BufferGeometry {
   }
   static fromJSON(data) {
     return new _SphereGeometry(data.radius, data.widthSegments, data.heightSegments, data.phiStart, data.phiLength, data.thetaStart, data.thetaLength);
+  }
+};
+var TorusGeometry = class _TorusGeometry extends BufferGeometry {
+  constructor(radius = 1, tube = 0.4, radialSegments = 12, tubularSegments = 48, arc = Math.PI * 2) {
+    super();
+    this.type = "TorusGeometry";
+    this.parameters = {
+      radius,
+      tube,
+      radialSegments,
+      tubularSegments,
+      arc
+    };
+    radialSegments = Math.floor(radialSegments);
+    tubularSegments = Math.floor(tubularSegments);
+    const indices = [];
+    const vertices = [];
+    const normals = [];
+    const uvs = [];
+    const center = new Vector3();
+    const vertex2 = new Vector3();
+    const normal = new Vector3();
+    for (let j = 0; j <= radialSegments; j++) {
+      for (let i = 0; i <= tubularSegments; i++) {
+        const u2 = i / tubularSegments * arc;
+        const v = j / radialSegments * Math.PI * 2;
+        vertex2.x = (radius + tube * Math.cos(v)) * Math.cos(u2);
+        vertex2.y = (radius + tube * Math.cos(v)) * Math.sin(u2);
+        vertex2.z = tube * Math.sin(v);
+        vertices.push(vertex2.x, vertex2.y, vertex2.z);
+        center.x = radius * Math.cos(u2);
+        center.y = radius * Math.sin(u2);
+        normal.subVectors(vertex2, center).normalize();
+        normals.push(normal.x, normal.y, normal.z);
+        uvs.push(i / tubularSegments);
+        uvs.push(j / radialSegments);
+      }
+    }
+    for (let j = 1; j <= radialSegments; j++) {
+      for (let i = 1; i <= tubularSegments; i++) {
+        const a = (tubularSegments + 1) * j + i - 1;
+        const b = (tubularSegments + 1) * (j - 1) + i - 1;
+        const c = (tubularSegments + 1) * (j - 1) + i;
+        const d = (tubularSegments + 1) * j + i;
+        indices.push(a, b, d);
+        indices.push(b, c, d);
+      }
+    }
+    this.setIndex(indices);
+    this.setAttribute("position", new Float32BufferAttribute(vertices, 3));
+    this.setAttribute("normal", new Float32BufferAttribute(normals, 3));
+    this.setAttribute("uv", new Float32BufferAttribute(uvs, 2));
+  }
+  copy(source) {
+    super.copy(source);
+    this.parameters = Object.assign({}, source.parameters);
+    return this;
+  }
+  static fromJSON(data) {
+    return new _TorusGeometry(data.radius, data.tube, data.radialSegments, data.tubularSegments, data.arc);
   }
 };
 var ShadowMaterial = class extends Material {
@@ -27098,9 +28247,9 @@ var GeometryParser = class {
               if (currentWeight > comparedWeight) {
                 comparedWeightArray[comparedWeightIndex] = currentWeight;
                 currentWeight = comparedWeight;
-                const tmp = wIndex[comparedWeightIndex];
+                const tmp2 = wIndex[comparedWeightIndex];
                 wIndex[comparedWeightIndex] = currentIndex;
-                currentIndex = tmp;
+                currentIndex = tmp2;
               }
             });
           });
@@ -39712,9 +40861,9 @@ var EffectComposer = class {
     this.clock = new Clock();
   }
   swapBuffers() {
-    const tmp = this.readBuffer;
+    const tmp2 = this.readBuffer;
     this.readBuffer = this.writeBuffer;
-    this.writeBuffer = tmp;
+    this.writeBuffer = tmp2;
   }
   addPass(pass) {
     this.passes.push(pass);
@@ -40890,6 +42039,782 @@ var OutputPass = class extends Pass {
   }
 };
 
+// frontend/js/viewer/sculpt.js
+var FALLOFFS = {
+  // t = distance / radius in [0, 1] → weight in [0, 1]
+  smooth: (t2) => (1 - t2 * t2) * (1 - t2 * t2),
+  // C1 dome (default)
+  linear: (t2) => 1 - t2,
+  sharp: (t2) => (1 - t2) * (1 - t2)
+};
+function activeMeshes(viewer) {
+  const model = viewer._currentModel;
+  if (!model) throw new Error("No model loaded. load / add_model / add_primitive first.");
+  const meshes = [];
+  model.traverse((c) => {
+    if (c.isMesh && c.geometry) meshes.push(c);
+  });
+  if (meshes.length === 0) throw new Error("Active object has no meshes.");
+  return meshes;
+}
+function assertNotSkinned(viewer) {
+  const entry = viewer._activeEntry();
+  if (entry && entry.skinned) {
+    throw new Error(
+      "Sculpting/painting skinned (rigged) models is not supported \u2014 vertex edits corrupt the bind pose. Use set_object_transform to place it, or sculpt a primitive/static mesh instead."
+    );
+  }
+}
+function ensureMutable(geometry) {
+  for (const name of ["position", "normal"]) {
+    const attr = geometry.getAttribute(name);
+    if (!attr) continue;
+    if (attr.isInterleavedBufferAttribute || attr.normalized || !(attr.array instanceof Float32Array)) {
+      const out = new Float32Array(attr.count * attr.itemSize);
+      for (let i = 0; i < attr.count; i++) {
+        out[i * attr.itemSize] = attr.getX(i);
+        if (attr.itemSize > 1) out[i * attr.itemSize + 1] = attr.getY(i);
+        if (attr.itemSize > 2) out[i * attr.itemSize + 2] = attr.getZ(i);
+      }
+      geometry.setAttribute(name, new BufferAttribute(out, attr.itemSize));
+    }
+  }
+}
+function getWeld(geometry) {
+  if (geometry.userData._mvSculpt) return geometry.userData._mvSculpt;
+  const pos = geometry.getAttribute("position");
+  geometry.computeBoundingBox();
+  const diag = geometry.boundingBox ? geometry.boundingBox.getSize(new Vector3()).length() || 1 : 1;
+  const quant = diag * 1e-6;
+  const byKey = /* @__PURE__ */ new Map();
+  const canonical = new Int32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) {
+    const k = `${Math.round(pos.getX(i) / quant)}_${Math.round(pos.getY(i) / quant)}_${Math.round(pos.getZ(i) / quant)}`;
+    const seen = byKey.get(k);
+    if (seen !== void 0) canonical[i] = seen;
+    else {
+      byKey.set(k, i);
+      canonical[i] = i;
+    }
+  }
+  const members = /* @__PURE__ */ new Map();
+  for (let i = 0; i < pos.count; i++) {
+    const c = canonical[i];
+    let list = members.get(c);
+    if (!list) {
+      list = [];
+      members.set(c, list);
+    }
+    list.push(i);
+  }
+  const neighbors = /* @__PURE__ */ new Map();
+  const index = geometry.getIndex();
+  const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const link = (a, b) => {
+    if (a === b) return;
+    let s = neighbors.get(a);
+    if (!s) {
+      s = /* @__PURE__ */ new Set();
+      neighbors.set(a, s);
+    }
+    s.add(b);
+  };
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const a = canonical[idxOf(t2, 0)], b = canonical[idxOf(t2, 1)], c = canonical[idxOf(t2, 2)];
+    link(a, b);
+    link(b, a);
+    link(b, c);
+    link(c, b);
+    link(a, c);
+    link(c, a);
+  }
+  const weld = { canonical, members, neighbors };
+  geometry.userData._mvSculpt = weld;
+  return weld;
+}
+function gatherWelds(mesh, weld, centerWorld, radius, falloffFn) {
+  const pos = mesh.geometry.getAttribute("position");
+  const m = mesh.matrixWorld;
+  const v = new Vector3();
+  const hits = [];
+  const r22 = radius * radius;
+  for (const [c] of weld.members) {
+    v.fromBufferAttribute(pos, c).applyMatrix4(m);
+    const d2 = v.distanceToSquared(centerWorld);
+    if (d2 > r22) continue;
+    hits.push({ c, world: v.clone(), w: falloffFn(Math.sqrt(d2) / radius) });
+  }
+  return hits;
+}
+function averageWorldNormal(mesh, weld, hits) {
+  if (!mesh.geometry.getAttribute("normal")) mesh.geometry.computeVertexNormals();
+  const nAttr = mesh.geometry.getAttribute("normal");
+  const nm = new Matrix3().getNormalMatrix(mesh.matrixWorld);
+  const n2 = new Vector3();
+  const acc = new Vector3();
+  for (const h of hits) {
+    n2.set(0, 0, 0);
+    for (const i of weld.members.get(h.c)) {
+      n2.x += nAttr.getX(i);
+      n2.y += nAttr.getY(i);
+      n2.z += nAttr.getZ(i);
+    }
+    n2.applyMatrix3(nm);
+    if (n2.lengthSq() > 1e-12) acc.addScaledVector(n2.normalize(), h.w);
+  }
+  return acc.lengthSq() > 1e-12 ? acc.normalize() : new Vector3(0, 1, 0);
+}
+function weldWorldNormal(mesh, weld, c, nm, out) {
+  const nAttr = mesh.geometry.getAttribute("normal");
+  out.set(0, 0, 0);
+  for (const i of weld.members.get(c)) {
+    out.x += nAttr.getX(i);
+    out.y += nAttr.getY(i);
+    out.z += nAttr.getZ(i);
+  }
+  out.applyMatrix3(nm);
+  return out.lengthSq() > 1e-12 ? out.normalize() : out.set(0, 1, 0);
+}
+function writeWeldWorld(mesh, weld, c, worldPos, inv, tmp2) {
+  const pos = mesh.geometry.getAttribute("position");
+  tmp2.copy(worldPos).applyMatrix4(inv);
+  for (const i of weld.members.get(c)) {
+    pos.setXYZ(i, tmp2.x, tmp2.y, tmp2.z);
+  }
+}
+function stampGeometry(viewer, mesh, opts, stats) {
+  const geometry = mesh.geometry;
+  ensureMutable(geometry);
+  const weld = getWeld(geometry);
+  const falloffFn = FALLOFFS[opts.falloff || "smooth"];
+  const center = opts._centerV;
+  const hits = gatherWelds(mesh, weld, center, opts.radius, falloffFn);
+  if (hits.length === 0) return 0;
+  const tool = opts.tool || "draw";
+  const strength = opts.strength !== void 0 ? opts.strength : tool === "smooth" || tool === "flatten" || tool === "pinch" ? 0.5 : opts.radius * 0.25;
+  const inv = new Matrix4().copy(mesh.matrixWorld).invert();
+  const tmp2 = new Vector3();
+  const pos = geometry.getAttribute("position");
+  if (tool === "draw" || tool === "grab") {
+    const dir = opts.direction ? new Vector3(...opts.direction).normalize() : tool === "draw" ? averageWorldNormal(mesh, weld, hits) : new Vector3(0, 1, 0);
+    for (const h of hits) {
+      const d = strength * h.w;
+      stats.maxDisplacement = Math.max(stats.maxDisplacement, Math.abs(d));
+      writeWeldWorld(mesh, weld, h.c, h.world.addScaledVector(dir, d), inv, tmp2);
+    }
+  } else if (tool === "inflate") {
+    const nm = new Matrix3().getNormalMatrix(mesh.matrixWorld);
+    const n2 = new Vector3();
+    for (const h of hits) {
+      weldWorldNormal(mesh, weld, h.c, nm, n2);
+      const d = strength * h.w;
+      stats.maxDisplacement = Math.max(stats.maxDisplacement, Math.abs(d));
+      writeWeldWorld(mesh, weld, h.c, h.world.addScaledVector(n2, d), inv, tmp2);
+    }
+  } else if (tool === "smooth") {
+    const m = mesh.matrixWorld;
+    const nb = new Vector3();
+    const lambda = Math.min(0.5, 0.5 * strength);
+    const moves = [];
+    for (const h of hits) {
+      const ns = weld.neighbors.get(h.c);
+      if (!ns || ns.size === 0) continue;
+      nb.set(0, 0, 0);
+      for (const other of ns) {
+        nb.add(tmp2.fromBufferAttribute(pos, other).applyMatrix4(m));
+      }
+      nb.divideScalar(ns.size);
+      const target = h.world.clone().lerp(nb, lambda * h.w);
+      moves.push([h.c, target, target.distanceTo(h.world)]);
+    }
+    for (const [c, target, d] of moves) {
+      stats.maxDisplacement = Math.max(stats.maxDisplacement, d);
+      writeWeldWorld(mesh, weld, c, target, inv, tmp2);
+    }
+  } else if (tool === "flatten") {
+    const planeNormal = opts.direction ? new Vector3(...opts.direction).normalize() : averageWorldNormal(mesh, weld, hits);
+    const centroid = new Vector3();
+    let wSum = 0;
+    for (const h of hits) {
+      centroid.addScaledVector(h.world, h.w);
+      wSum += h.w;
+    }
+    centroid.divideScalar(Math.max(1e-9, wSum));
+    for (const h of hits) {
+      const dist = tmp2.copy(h.world).sub(centroid).dot(planeNormal);
+      const target = h.world.clone().addScaledVector(planeNormal, -dist);
+      const blended = h.world.clone().lerp(target, strength * h.w);
+      stats.maxDisplacement = Math.max(stats.maxDisplacement, blended.distanceTo(h.world));
+      writeWeldWorld(mesh, weld, h.c, blended, inv, tmp2);
+    }
+  } else if (tool === "pinch") {
+    for (const h of hits) {
+      const blended = h.world.clone().lerp(center, strength * h.w * 0.5);
+      stats.maxDisplacement = Math.max(stats.maxDisplacement, blended.distanceTo(h.world));
+      writeWeldWorld(mesh, weld, h.c, blended, inv, tmp2);
+    }
+  } else {
+    throw new Error(`Unknown tool '${tool}'. Use draw|inflate|smooth|flatten|pinch|grab.`);
+  }
+  return hits.length;
+}
+function finalizeSculpt(viewer, touchedGeometries) {
+  for (const geometry of touchedGeometries) {
+    geometry.getAttribute("position").needsUpdate = true;
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+  }
+  const entry = viewer._activeEntry();
+  if (entry) {
+    entry.modified = true;
+    entry.sculpted = true;
+    entry.stats = viewer._computeStats(entry.model);
+    viewer._lastStats = entry.stats;
+  }
+  viewer.invalidate();
+}
+function resolveRadius(viewer, opts, command) {
+  if (opts.radius > 0) return opts.radius;
+  if (opts.radius_rel > 0) {
+    const model = viewer._currentModel;
+    const box = new Box3().setFromObject(model);
+    const sphereR = box.isEmpty() ? 0 : box.getSize(new Vector3()).length() / 2;
+    if (sphereR > 0) return opts.radius_rel * sphereR;
+  }
+  throw new Error(
+    `${command} requires radius > 0 (world units) or radius_rel > 0 (fraction of the active object's bounding-sphere radius).`
+  );
+}
+function applyStamps(viewer, opts, points) {
+  assertNotSkinned(viewer);
+  const meshes = activeMeshes(viewer);
+  opts.radius = resolveRadius(viewer, opts, "sculpt");
+  if (!FALLOFFS[opts.falloff || "smooth"]) {
+    throw new Error(`Unknown falloff '${opts.falloff}'. Use smooth|linear|sharp.`);
+  }
+  const entry = viewer._activeEntry();
+  viewer._ensureResetSnapshot(entry);
+  const stats = { maxDisplacement: 0 };
+  let affected = 0;
+  const touched = /* @__PURE__ */ new Set();
+  const seenGeometries = /* @__PURE__ */ new Set();
+  for (const p of points) {
+    opts._centerV = new Vector3(...p);
+    seenGeometries.clear();
+    for (const mesh of meshes) {
+      if (seenGeometries.has(mesh.geometry)) continue;
+      seenGeometries.add(mesh.geometry);
+      mesh.updateMatrixWorld(true);
+      const n2 = stampGeometry(viewer, mesh, opts, stats);
+      if (n2 > 0) {
+        affected += n2;
+        touched.add(mesh.geometry);
+      }
+    }
+  }
+  if (touched.size === 0) {
+    throw new Error(
+      "Brush touched no vertices. Check center (world coords \u2014 use pick, raycast or get_bounds) and radius (or radius_rel); or the mesh is too coarse here (primitives: raise segment params)."
+    );
+  }
+  finalizeSculpt(viewer, touched);
+  const r42 = (v) => Math.round(v * 1e4) / 1e4;
+  const s = entry && entry.stats ? entry.stats : null;
+  return {
+    tool: opts.tool || "draw",
+    stamps: points.length,
+    affected,
+    maxDisplacement: r42(stats.maxDisplacement),
+    // Post-sculpt object size — quantified feedback so the agent can steer
+    // WITHOUT paying a 10-60 s SwiftShader verification render every stamp.
+    newSize: s ? [r42(s.width), r42(s.height), r42(s.depth)] : null
+  };
+}
+function sculptStamp(viewer, opts) {
+  return applyStamps(viewer, opts, [opts.center]);
+}
+function pathToPoints(path, brushRadius) {
+  if (!path || typeof path !== "object" || Array.isArray(path)) {
+    throw new Error("path must be an object like {type:'circle'|'line', ...}");
+  }
+  const spacing = Math.max(1e-9, brushRadius / 2);
+  const clampCount = (n2) => Math.max(2, Math.min(64, Math.ceil(n2)));
+  if (path.type === "circle") {
+    const c = path.center;
+    if (!Array.isArray(c) || c.length !== 3) {
+      throw new Error("path.circle requires center: [x,y,z]");
+    }
+    if (!(path.radius > 0)) throw new Error("path.circle requires radius > 0");
+    const axis = Array.isArray(path.axis) && path.axis.length === 3 ? new Vector3(...path.axis).normalize() : new Vector3(0, 1, 0);
+    if (axis.lengthSq() < 1e-12) throw new Error("path.circle axis must be non-zero");
+    const sweep = path.sweep_deg !== void 0 ? Math.max(1, Math.min(360, path.sweep_deg)) : 360;
+    const start = (path.start_deg || 0) * Math.PI / 180;
+    const sweepRad = sweep * Math.PI / 180;
+    const arcLen = path.radius * sweepRad;
+    const closed = sweep >= 360;
+    const count = clampCount(arcLen / spacing + (closed ? 0 : 1));
+    const seed = Math.abs(axis.x) < 0.9 ? new Vector3(1, 0, 0) : new Vector3(0, 0, 1);
+    const u2 = seed.clone().addScaledVector(axis, -axis.dot(seed)).normalize();
+    const v = new Vector3().crossVectors(axis, u2);
+    const points = [];
+    for (let i = 0; i < count; i++) {
+      const t2 = closed ? i / count : i / (count - 1);
+      const ang = start + t2 * sweepRad;
+      points.push([
+        c[0] + path.radius * (Math.cos(ang) * u2.x + Math.sin(ang) * v.x),
+        c[1] + path.radius * (Math.cos(ang) * u2.y + Math.sin(ang) * v.y),
+        c[2] + path.radius * (Math.cos(ang) * u2.z + Math.sin(ang) * v.z)
+      ]);
+    }
+    return points;
+  }
+  if (path.type === "line") {
+    const { from, to } = path;
+    if (!Array.isArray(from) || from.length !== 3 || !Array.isArray(to) || to.length !== 3) {
+      throw new Error("path.line requires from: [x,y,z] and to: [x,y,z]");
+    }
+    const len = Math.hypot(to[0] - from[0], to[1] - from[1], to[2] - from[2]);
+    const count = clampCount(len / spacing + 1);
+    const points = [];
+    for (let i = 0; i < count; i++) {
+      const t2 = i / (count - 1);
+      points.push([
+        from[0] + (to[0] - from[0]) * t2,
+        from[1] + (to[1] - from[1]) * t2,
+        from[2] + (to[2] - from[2]) * t2
+      ]);
+    }
+    return points;
+  }
+  throw new Error(`Unknown path.type '${path.type}'. Use circle|line.`);
+}
+function strokePoints(viewer, opts, command) {
+  if (opts.points !== void 0 && opts.path !== void 0) {
+    throw new Error(`${command}: pass either points OR path, not both`);
+  }
+  if (opts.path !== void 0) {
+    opts.radius = resolveRadius(viewer, opts, command);
+    return pathToPoints(opts.path, opts.radius);
+  }
+  const points = opts.points || [];
+  if (!Array.isArray(points) || points.length === 0) {
+    throw new Error(`${command} requires points: [[x,y,z], ...] or path: {type, ...}`);
+  }
+  if (points.length > 64) throw new Error(`${command}: max 64 points per call`);
+  return points;
+}
+function sculptStroke(viewer, opts) {
+  return applyStamps(viewer, opts, strokePoints(viewer, opts, "sculpt_stroke"));
+}
+var PAINT_DEFAULT_SIZE = 1024;
+var PAINT_MAX_SIZE = 2048;
+var PAINT_TEXEL_BUDGET = 16 * 1024 * 1024;
+var paintTexelsAllocated = 0;
+function paintTargetMaterial(mesh) {
+  const stash = mesh._mvOriginalMaterial || mesh.material;
+  if (Array.isArray(stash)) {
+    throw new Error(
+      "This mesh uses multiple materials (material array) \u2014 painting it is not supported yet. Paint single-material meshes or primitives."
+    );
+  }
+  return stash;
+}
+function ensurePaintLayer(viewer, mesh, size) {
+  let material = paintTargetMaterial(mesh);
+  if (material.userData._mvPaint) return material.userData._mvPaint;
+  let shared = false;
+  for (const entry of viewer._objects) {
+    entry.model.traverse((c) => {
+      if (c !== mesh && c.isMesh) {
+        const m = c._mvOriginalMaterial || c.material;
+        if (m === material) shared = true;
+      }
+    });
+  }
+  if (shared) {
+    const clone = material.clone();
+    clone.userData = { ...material.userData };
+    if (mesh._mvOriginalMaterial) mesh._mvOriginalMaterial = clone;
+    else mesh.material = clone;
+    material = clone;
+  }
+  const dim = Math.min(PAINT_MAX_SIZE, Math.max(64, size || PAINT_DEFAULT_SIZE));
+  if (paintTexelsAllocated + dim * dim > PAINT_TEXEL_BUDGET) {
+    throw new Error(
+      `Paint memory budget exceeded (${Math.round(PAINT_TEXEL_BUDGET / 1e6)}M texels). Use a smaller texture_size, paint fewer meshes, or clear_paint unused layers.`
+    );
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = dim;
+  const ctx = canvas.getContext("2d");
+  const prevMap = material.map || null;
+  const img = prevMap && prevMap.image ? prevMap.image : null;
+  const drawable = img && (typeof HTMLImageElement !== "undefined" && img instanceof HTMLImageElement || typeof HTMLCanvasElement !== "undefined" && img instanceof HTMLCanvasElement || typeof ImageBitmap !== "undefined" && img instanceof ImageBitmap);
+  let baseColor = material.userData._mvAuthored && material.userData._mvAuthored.color ? material.userData._mvAuthored.color : "#" + (material.color ? material.color.getHexString() : "808080");
+  if (drawable) {
+    try {
+      ctx.drawImage(img, 0, 0, dim, dim);
+    } catch {
+      ctx.fillStyle = baseColor;
+      ctx.fillRect(0, 0, dim, dim);
+    }
+  } else {
+    ctx.fillStyle = baseColor;
+    ctx.fillRect(0, 0, dim, dim);
+    if (material.color) material.color.set(16777215);
+  }
+  const texture = new CanvasTexture(canvas);
+  texture.colorSpace = SRGBColorSpace;
+  texture.flipY = prevMap ? prevMap.flipY : true;
+  if (prevMap) {
+    texture.wrapS = prevMap.wrapS;
+    texture.wrapT = prevMap.wrapT;
+  }
+  material.map = texture;
+  material.needsUpdate = true;
+  paintTexelsAllocated += dim * dim;
+  const layer = {
+    canvas,
+    ctx,
+    texture,
+    size: dim,
+    flipY: texture.flipY,
+    prevMap,
+    // kept (NOT disposed) for clear_paint
+    prevColor: baseColor
+  };
+  material.userData._mvPaint = layer;
+  return layer;
+}
+function clearPaint(viewer) {
+  const meshes = activeMeshes(viewer);
+  let cleared = 0;
+  for (const mesh of meshes) {
+    const stash = mesh._mvOriginalMaterial || mesh.material;
+    const material = Array.isArray(stash) ? null : stash;
+    const layer = material && material.userData._mvPaint;
+    if (!layer) continue;
+    material.map = layer.prevMap || null;
+    if (!layer.prevMap && material.color) material.color.set(layer.prevColor);
+    material.needsUpdate = true;
+    layer.texture.dispose();
+    paintTexelsAllocated = Math.max(0, paintTexelsAllocated - layer.size * layer.size);
+    delete material.userData._mvPaint;
+    cleared++;
+  }
+  const entry = viewer._activeEntry();
+  if (entry && cleared > 0 && !entry.sculpted && paintedMeshNames(entry.model).length === 0) {
+    entry.modified = false;
+  }
+  viewer.invalidate();
+  return { clearedMeshes: cleared };
+}
+function uvToPixel(layer, u2, v) {
+  const x = u2 * layer.size;
+  const y = layer.flipY ? (1 - v) * layer.size : v * layer.size;
+  return [x, y];
+}
+function paintStamp(viewer, opts) {
+  return paintPoints(viewer, opts, [opts.center]);
+}
+function paintStroke(viewer, opts) {
+  return paintPoints(viewer, opts, strokePoints(viewer, opts, "paint_stroke"));
+}
+function paintPoints(viewer, opts, points) {
+  assertNotSkinned(viewer);
+  const meshes = activeMeshes(viewer);
+  const radius = resolveRadius(viewer, opts, "paint");
+  const color = new Color(opts.color !== void 0 ? String(opts.color) : "#ff3333");
+  const opacity = opts.opacity !== void 0 ? Math.max(0, Math.min(1, opts.opacity)) : 1;
+  const hardness = opts.hardness !== void 0 ? Math.max(0, Math.min(1, opts.hardness)) : 0.6;
+  const falloffFn = FALLOFFS[opts.falloff || "smooth"] || FALLOFFS.smooth;
+  const square = opts.shape === "square";
+  if (opts.shape !== void 0 && opts.shape !== "round" && opts.shape !== "square") {
+    throw new Error(`Unknown shape '${opts.shape}'. Use round|square.`);
+  }
+  const maxNormalDeg = opts.max_normal_angle;
+  const cosClamp = maxNormalDeg !== void 0 ? Math.cos(Math.max(1, Math.min(180, maxNormalDeg)) * Math.PI / 180) : null;
+  let pixels = 0;
+  let alphaSum = 0;
+  const paintedLayers = /* @__PURE__ */ new Set();
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const p = new Vector3();
+  const center = new Vector3();
+  const triN = new Vector3(), refN = new Vector3();
+  const tang1 = new Vector3(), tang2 = new Vector3();
+  const e1 = new Vector3(), e2 = new Vector3();
+  const reachScale = square ? Math.SQRT2 : 1;
+  const r22 = radius * radius * reachScale * reachScale;
+  let uvLess = 0;
+  for (const mesh of meshes) {
+    const geometry = mesh.geometry;
+    const uvAttr = geometry.getAttribute("uv");
+    if (!uvAttr) {
+      uvLess++;
+      continue;
+    }
+    mesh.updateMatrixWorld(true);
+    const m = mesh.matrixWorld;
+    const pos = geometry.getAttribute("position");
+    const index = geometry.getIndex();
+    const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+    const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+    let layer = null;
+    const acc = /* @__PURE__ */ new Map();
+    let minPX = Infinity, maxPX = -Infinity, minPY = Infinity, maxPY = -Infinity;
+    for (const pt of points) {
+      center.set(pt[0], pt[1], pt[2]);
+      const candidates = [];
+      let anchorD2 = Infinity;
+      for (let t2 = 0; t2 < triCount; t2++) {
+        const i0 = idxOf(t2, 0), i1 = idxOf(t2, 1), i2 = idxOf(t2, 2);
+        a.fromBufferAttribute(pos, i0).applyMatrix4(m);
+        b.fromBufferAttribute(pos, i1).applyMatrix4(m);
+        c.fromBufferAttribute(pos, i2).applyMatrix4(m);
+        p.copy(a).add(b).add(c).divideScalar(3);
+        const triR = Math.max(a.distanceTo(p), b.distanceTo(p), c.distanceTo(p));
+        const reach = radius * reachScale + triR;
+        const d2 = p.distanceToSquared(center);
+        if (d2 > reach * reach) continue;
+        candidates.push(t2);
+        if (d2 < anchorD2) {
+          anchorD2 = d2;
+          e1.copy(b).sub(a);
+          e2.copy(c).sub(a);
+          refN.copy(e1.cross(e2)).normalize();
+        }
+      }
+      if (candidates.length === 0) continue;
+      if (square || cosClamp !== null) {
+        const seed = Math.abs(refN.x) < 0.9 ? new Vector3(1, 0, 0) : new Vector3(0, 0, 1);
+        tang1.copy(seed).addScaledVector(refN, -refN.dot(seed)).normalize();
+        tang2.crossVectors(refN, tang1);
+      }
+      for (const t2 of candidates) {
+        const i0 = idxOf(t2, 0), i1 = idxOf(t2, 1), i2 = idxOf(t2, 2);
+        a.fromBufferAttribute(pos, i0).applyMatrix4(m);
+        b.fromBufferAttribute(pos, i1).applyMatrix4(m);
+        c.fromBufferAttribute(pos, i2).applyMatrix4(m);
+        if (cosClamp !== null) {
+          e1.copy(b).sub(a);
+          e2.copy(c).sub(a);
+          triN.copy(e1.cross(e2)).normalize();
+          if (triN.dot(refN) < cosClamp) continue;
+        }
+        layer = layer || ensurePaintLayer(viewer, mesh, opts.texture_size);
+        const [u0, v0] = uvToPixel(layer, uvAttr.getX(i0), uvAttr.getY(i0));
+        const [u1, v1] = uvToPixel(layer, uvAttr.getX(i1), uvAttr.getY(i1));
+        const [u2, v2] = uvToPixel(layer, uvAttr.getX(i2), uvAttr.getY(i2));
+        const dim = layer.size;
+        const minU = Math.max(0, Math.floor(Math.min(u0, u1, u2)));
+        const maxU = Math.min(dim - 1, Math.ceil(Math.max(u0, u1, u2)));
+        const minV = Math.max(0, Math.floor(Math.min(v0, v1, v2)));
+        const maxV = Math.min(dim - 1, Math.ceil(Math.max(v0, v1, v2)));
+        if (maxU < minU || maxV < minV) continue;
+        if ((maxU - minU) * (maxV - minV) > dim * dim) continue;
+        const denom = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2);
+        if (Math.abs(denom) < 1e-9) continue;
+        for (let py2 = minV; py2 <= maxV; py2++) {
+          for (let px2 = minU; px2 <= maxU; px2++) {
+            const l0 = ((v1 - v2) * (px2 + 0.5 - u2) + (u2 - u1) * (py2 + 0.5 - v2)) / denom;
+            const l1 = ((v2 - v0) * (px2 + 0.5 - u2) + (u0 - u2) * (py2 + 0.5 - v2)) / denom;
+            const l2 = 1 - l0 - l1;
+            if (l0 < -0.02 || l1 < -0.02 || l2 < -0.02) continue;
+            p.set(
+              a.x * l0 + b.x * l1 + c.x * l2,
+              a.y * l0 + b.y * l1 + c.y * l2,
+              a.z * l0 + b.z * l1 + c.z * l2
+            );
+            const d2 = p.distanceToSquared(center);
+            if (d2 > r22) continue;
+            let tN;
+            if (square) {
+              p.sub(center);
+              const du = Math.abs(p.dot(tang1));
+              const dv = Math.abs(p.dot(tang2));
+              tN = Math.max(du, dv) / radius;
+              if (tN > 1) continue;
+            } else {
+              tN = Math.sqrt(d2) / radius;
+              if (tN > 1) continue;
+            }
+            const soft = tN <= hardness ? 1 : falloffFn((tN - hardness) / Math.max(1e-6, 1 - hardness));
+            const alpha = opacity * soft;
+            if (alpha <= 4e-3) continue;
+            const key = py2 * dim + px2;
+            const prev = acc.get(key);
+            if (prev === void 0 || alpha > prev) acc.set(key, alpha);
+            if (px2 < minPX) minPX = px2;
+            if (px2 > maxPX) maxPX = px2;
+            if (py2 < minPY) minPY = py2;
+            if (py2 > maxPY) maxPY = py2;
+          }
+        }
+      }
+    }
+    if (layer && acc.size > 0) {
+      const hex = parseInt(color.getHexString(), 16);
+      const cr = hex >> 16 & 255, cg = hex >> 8 & 255, cb = hex & 255;
+      const dim = layer.size;
+      const w = maxPX - minPX + 1;
+      const img = layer.ctx.getImageData(minPX, minPY, w, maxPY - minPY + 1);
+      const data = img.data;
+      for (const [key, alpha] of acc) {
+        const px2 = key % dim;
+        const py2 = (key - px2) / dim;
+        const o = ((py2 - minPY) * w + (px2 - minPX)) * 4;
+        data[o] = Math.round(data[o] * (1 - alpha) + cr * alpha);
+        data[o + 1] = Math.round(data[o + 1] * (1 - alpha) + cg * alpha);
+        data[o + 2] = Math.round(data[o + 2] * (1 - alpha) + cb * alpha);
+        data[o + 3] = 255;
+        alphaSum += alpha;
+      }
+      layer.ctx.putImageData(img, minPX, minPY);
+      pixels += acc.size;
+      paintedLayers.add(layer);
+    }
+  }
+  if (uvLess > 0 && paintedLayers.size === 0 && pixels === 0) {
+    throw new Error(
+      "The touched meshes have no UV coordinates, so texture painting has nowhere to land. Paint works on primitives (add_primitive) and UV-mapped models; STL/PLY meshes have no UVs."
+    );
+  }
+  if (pixels === 0) {
+    throw new Error(
+      "Brush touched no surface. Check center (world coords \u2014 use pick, raycast or get_bounds) and radius (or radius_rel)."
+    );
+  }
+  for (const layer of paintedLayers) layer.texture.needsUpdate = true;
+  const entry = viewer._activeEntry();
+  if (entry) entry.modified = true;
+  viewer.invalidate();
+  const meanAlpha = Math.round(alphaSum / pixels * 1e3) / 1e3;
+  const result = {
+    painted: pixels,
+    // Honest visibility feedback: how strongly the average touched texel
+    // actually changed. Low meanAlpha = technically-painted-but-invisible —
+    // catch it HERE instead of spending a verification render (T1 finding).
+    meanAlpha,
+    meshes: paintedLayers.size,
+    stamps: points.length,
+    color: "#" + color.getHexString()
+  };
+  const notes = [];
+  if (meanAlpha < 0.05) {
+    notes.push(`meanAlpha ${meanAlpha} \u2014 this paint is nearly invisible. Raise opacity and/or hardness (soft falloff scales alpha toward 0 at the rim).`);
+  }
+  const mode = viewer.getRenderMode && viewer.getRenderMode();
+  if (mode === "solid" || mode === "normals") {
+    notes.push(`Render mode '${mode}' hides textures \u2014 set_render_mode textured to SEE the paint.`);
+  }
+  if (notes.length) result.note = notes.join(" ");
+  return result;
+}
+function fillPaint(viewer, opts) {
+  assertNotSkinned(viewer);
+  const meshes = activeMeshes(viewer);
+  const color = new Color(opts.color !== void 0 ? String(opts.color) : "#808080");
+  let filled = 0;
+  for (const mesh of meshes) {
+    if (!mesh.geometry.getAttribute("uv")) continue;
+    const layer = ensurePaintLayer(viewer, mesh, opts.texture_size);
+    layer.ctx.fillStyle = "#" + color.getHexString();
+    layer.ctx.fillRect(0, 0, layer.size, layer.size);
+    layer.texture.needsUpdate = true;
+    filled++;
+  }
+  if (filled === 0) {
+    throw new Error("No UV-mapped meshes to paint (see paint's UV requirement).");
+  }
+  const entry = viewer._activeEntry();
+  if (entry) entry.modified = true;
+  viewer.invalidate();
+  return { filledMeshes: filled, color: "#" + color.getHexString() };
+}
+function paintedMeshNames(model) {
+  const names = [];
+  if (!model) return names;
+  model.traverse((c) => {
+    if (!c.isMesh) return;
+    const stash = c._mvOriginalMaterial || c.material;
+    const m = Array.isArray(stash) ? stash[0] : stash;
+    if (m && m.userData && m.userData._mvPaint) names.push(c.name || "(unnamed)");
+  });
+  return names;
+}
+function releasePaintBudget(model) {
+  if (!model) return;
+  model.traverse((c) => {
+    if (!c.isMesh) return;
+    for (const stash of [c._mvOriginalMaterial, c.material]) {
+      const mats = Array.isArray(stash) ? stash : stash ? [stash] : [];
+      for (const m of mats) {
+        const layer = m && m.userData && m.userData._mvPaint;
+        if (!layer) continue;
+        paintTexelsAllocated = Math.max(
+          0,
+          paintTexelsAllocated - layer.size * layer.size
+        );
+        delete m.userData._mvPaint;
+      }
+    }
+  });
+}
+function pick(viewer, x, y, width, height) {
+  const cam = viewer._camera;
+  const prevAspect = cam.aspect;
+  if (width && height) {
+    cam.aspect = width / height;
+    cam.updateProjectionMatrix();
+  }
+  try {
+    const raycaster = new Raycaster();
+    raycaster.setFromCamera(
+      new Vector2(x * 2 - 1, -(y * 2 - 1)),
+      cam
+    );
+    return castInto(viewer, raycaster);
+  } finally {
+    if (width && height) {
+      cam.aspect = prevAspect;
+      cam.updateProjectionMatrix();
+    }
+  }
+}
+function raycast(viewer, origin, direction) {
+  const raycaster = new Raycaster(
+    new Vector3(...origin),
+    new Vector3(...direction).normalize()
+  );
+  return castInto(viewer, raycaster);
+}
+function castInto(viewer, raycaster) {
+  viewer._scene.updateMatrixWorld(true);
+  const hits = raycaster.intersectObjects(viewer._visibleMeshes(), false);
+  if (hits.length === 0) {
+    return {
+      hit: false,
+      hint: "Ray hit nothing. frame_all or orbit first so the target is in view, then pick coordinates read off a FRESH screenshot (pass its width/height)."
+    };
+  }
+  const h = hits[0];
+  const entry = viewer._entryForNode(h.object);
+  const n2 = h.face ? h.face.normal.clone().applyMatrix3(
+    new Matrix3().getNormalMatrix(h.object.matrixWorld)
+  ).normalize() : null;
+  const r42 = (v) => Math.round(v * 1e4) / 1e4;
+  return {
+    hit: true,
+    point: [r42(h.point.x), r42(h.point.y), r42(h.point.z)],
+    normal: n2 ? [r42(n2.x), r42(n2.y), r42(n2.z)] : null,
+    distance: r42(h.distance),
+    objectId: entry ? entry.id : null,
+    objectName: entry ? entry.name : null
+  };
+}
+
 // frontend/js/viewer_3d.js
 function describeLoadError(err2) {
   if (!err2) return "Unknown error";
@@ -40902,7 +42827,7 @@ function describeLoadError(err2) {
     return String(err2);
   }
 }
-var Viewer3D = class {
+var _Viewer3D = class _Viewer3D {
   /**
    * @param {HTMLElement} container - The container element for the 3D canvas
    * @param {Function} onInfoUpdate - Callback to update viewer info (vertices, faces)
@@ -40977,7 +42902,10 @@ var Viewer3D = class {
   }
   set _modelModified(value) {
     const entry = this._activeEntry();
-    if (entry) entry.modified = !!value;
+    if (entry) {
+      entry.modified = !!value;
+      if (value) entry.sculpted = true;
+    }
   }
   _activeEntry() {
     if (this._activeObjectId == null) return null;
@@ -41068,6 +42996,212 @@ var Viewer3D = class {
     else this._updateSceneRig(this._visibleUnionBox());
     return { ...entry.stats, objectId: entry.id };
   }
+  /**
+   * Add a procedural primitive as a scene object (backlog 045 — the sculpting
+   * starting stock). Primitives are first-class objects: they persist in
+   * manifests via their {kind:"primitive"} source and rebuild without files.
+   * Default segment densities are chosen for SCULPTABILITY — a 12-triangle box
+   * cannot deform.
+   */
+  addPrimitive(kind, options = {}) {
+    const { geometry, params } = this._buildPrimitiveGeometry(kind, options.params || {});
+    const color = options.color !== void 0 ? options.color : "#9aa4b0";
+    const material = new MeshStandardMaterial({
+      color,
+      roughness: 0.7,
+      metalness: 0,
+      side: DoubleSide
+    });
+    material.userData._mvKeepColor = true;
+    const mesh = new Mesh(geometry, material);
+    mesh.name = kind;
+    const group = new Group();
+    group.name = `${kind}_primitive`;
+    group.add(mesh);
+    const entry = this._insertEntry(group, "", `.${kind}`, {
+      name: options.name || kind,
+      source: { kind: "primitive", primitive: kind, params, color }
+    });
+    if (options.transform) this.setObjectTransform(entry.id, options.transform);
+    if (options.frame !== false) this.frameAll();
+    else this._updateSceneRig(this._visibleUnionBox());
+    return { ...entry.stats, objectId: entry.id, kind, params };
+  }
+  _buildPrimitiveGeometry(kind, p) {
+    const allowed = _Viewer3D.PRIMITIVE_PARAMS[kind];
+    if (!allowed) {
+      throw new Error(
+        `Unknown primitive '${kind}'. Use box|sphere|cylinder|cone|torus|plane|capsule.`
+      );
+    }
+    const unknown = Object.keys(p).filter((k) => !allowed.includes(k));
+    if (unknown.length > 0) {
+      throw new Error(
+        `Unknown param(s) for ${kind}: ${unknown.join(", ")}. Allowed: ${allowed.join(", ")}.`
+      );
+    }
+    const seg = (v, def) => Math.max(1, Math.min(256, Math.round(v !== void 0 ? v : def)));
+    const num = (v, def) => typeof v === "number" && v > 0 ? v : def;
+    let geometry, params;
+    switch (kind) {
+      case "box": {
+        params = {
+          width: num(p.width, 1),
+          height: num(p.height, 1),
+          depth: num(p.depth, 1),
+          segments: seg(p.segments, 24)
+        };
+        geometry = new BoxGeometry(
+          params.width,
+          params.height,
+          params.depth,
+          params.segments,
+          params.segments,
+          params.segments
+        );
+        this._atlasGroupUVs(geometry, [
+          [0, 0.5, 1 / 3, 0.5],
+          [1 / 3, 0.5, 1 / 3, 0.5],
+          [2 / 3, 0.5, 1 / 3, 0.5],
+          [0, 0, 1 / 3, 0.5],
+          [1 / 3, 0, 1 / 3, 0.5],
+          [2 / 3, 0, 1 / 3, 0.5]
+        ]);
+        break;
+      }
+      case "sphere": {
+        params = {
+          radius: num(p.radius, 0.5),
+          widthSegments: seg(p.widthSegments, 64),
+          heightSegments: seg(p.heightSegments, 48)
+        };
+        geometry = new SphereGeometry(
+          params.radius,
+          params.widthSegments,
+          params.heightSegments
+        );
+        break;
+      }
+      case "cylinder": {
+        params = {
+          radiusTop: num(p.radiusTop, num(p.radius, 0.5)),
+          radiusBottom: num(p.radiusBottom, num(p.radius, 0.5)),
+          height: num(p.height, 1),
+          radialSegments: seg(p.radialSegments, 64),
+          heightSegments: seg(p.heightSegments, 32)
+        };
+        geometry = new CylinderGeometry(
+          params.radiusTop,
+          params.radiusBottom,
+          params.height,
+          params.radialSegments,
+          params.heightSegments
+        );
+        this._atlasGroupUVs(geometry, [
+          [0, 0.5, 1, 0.5],
+          [0, 0, 0.5, 0.5],
+          [0.5, 0, 0.5, 0.5]
+        ]);
+        break;
+      }
+      case "cone": {
+        params = {
+          radius: num(p.radius, 0.5),
+          height: num(p.height, 1),
+          radialSegments: seg(p.radialSegments, 64),
+          heightSegments: seg(p.heightSegments, 32)
+        };
+        geometry = new ConeGeometry(
+          params.radius,
+          params.height,
+          params.radialSegments,
+          params.heightSegments
+        );
+        this._atlasGroupUVs(geometry, [
+          [0, 0.5, 1, 0.5],
+          [0, 0, 0.5, 0.5],
+          [0.5, 0, 0.5, 0.5]
+        ]);
+        break;
+      }
+      case "torus": {
+        params = {
+          radius: num(p.radius, 0.5),
+          tube: num(p.tube, 0.2),
+          radialSegments: seg(p.radialSegments, 48),
+          tubularSegments: seg(p.tubularSegments, 96)
+        };
+        geometry = new TorusGeometry(
+          params.radius,
+          params.tube,
+          params.radialSegments,
+          params.tubularSegments
+        );
+        break;
+      }
+      case "plane": {
+        params = {
+          width: num(p.width, 1),
+          height: num(p.height, 1),
+          widthSegments: seg(p.widthSegments, 48),
+          heightSegments: seg(p.heightSegments, 48)
+        };
+        geometry = new PlaneGeometry(
+          params.width,
+          params.height,
+          params.widthSegments,
+          params.heightSegments
+        );
+        break;
+      }
+      case "capsule": {
+        params = {
+          radius: num(p.radius, 0.3),
+          length: num(p.length, 0.6),
+          capSegments: seg(p.capSegments, 24),
+          radialSegments: seg(p.radialSegments, 64)
+        };
+        geometry = new CapsuleGeometry(
+          params.radius,
+          params.length,
+          params.capSegments,
+          params.radialSegments
+        );
+        break;
+      }
+    }
+    const count = geometry.getAttribute("position").count;
+    if (count > 25e4) {
+      geometry.dispose();
+      throw new Error(
+        `Primitive too dense (${count.toLocaleString()} vertices > 250k). Lower the segment counts.`
+      );
+    }
+    return { geometry, params };
+  }
+  /** Remap each geometry GROUP's UVs into its own atlas rect
+   *  [uOffset, vOffset, uScale, vScale] so paint on one face/cap never bleeds
+   *  onto another. Vertices are not shared across groups in three's builders. */
+  _atlasGroupUVs(geometry, rects) {
+    const uv = geometry.getAttribute("uv");
+    const index = geometry.getIndex();
+    if (!uv || !geometry.groups || geometry.groups.length === 0) return;
+    const seen = /* @__PURE__ */ new Set();
+    geometry.groups.forEach((group, gi) => {
+      const rect = rects[Math.min(gi, rects.length - 1)];
+      for (let i = group.start; i < group.start + group.count; i++) {
+        const vi = index ? index.getX(i) : i;
+        if (seen.has(vi)) continue;
+        seen.add(vi);
+        uv.setXY(
+          vi,
+          rect[0] + uv.getX(vi) * rect[2],
+          rect[1] + uv.getY(vi) * rect[3]
+        );
+      }
+    });
+    geometry.clearGroups();
+  }
   /** Fetch + parse a model WITHOUT touching the scene (shared by load/add). */
   async _parseModel(url, extension, options = {}) {
     const ext = extension.toLowerCase();
@@ -41132,13 +43266,12 @@ var Viewer3D = class {
     };
     this._objects.push(entry);
     this._activeObjectId = id;
+    const janitorId = entry.id;
     setTimeout(() => {
-      if (this._objects.some((e) => e.model === object)) {
-        this._sanitizeObjectTextures(object);
-      }
+      const live = this._objects.find((e) => e.id === janitorId);
+      if (live) this._sanitizeObjectTextures(live.model);
     }, 8e3);
     this._setupAnimationsForEntry(entry);
-    this._saveOriginalGeometryForEntry(entry);
     this._applySceneSettings();
     this._applyEnvironment();
     entry.stats = this._computeStats(object);
@@ -41158,6 +43291,7 @@ var Viewer3D = class {
    * so removed objects never pin geometry copies in memory.
    */
   _disposeEntry(entry) {
+    releasePaintBudget(entry.model);
     entry.model.traverse((child) => {
       if (child.isMesh && child._mvOriginalMaterial) {
         const override = child.material;
@@ -41198,18 +43332,27 @@ var Viewer3D = class {
   // ---- registry public surface (control API + app UI) ----------------------
   /** Summaries of every object (id, name, active, visibility, opacity, source). */
   listObjects() {
-    return this._objects.map((e) => ({
-      id: e.id,
-      name: e.name,
-      active: e.id === this._activeObjectId,
-      visible: e.visible,
-      opacity: e.opacity,
-      skinned: e.skinned,
-      source: e.source,
-      vertices: e.stats ? e.stats.vertices : 0,
-      faces: e.stats ? e.stats.faces : 0,
-      transform: this._transformOf(e)
-    }));
+    return this._objects.map((e) => {
+      const painted = paintedMeshNames(e.model);
+      return {
+        id: e.id,
+        name: e.name,
+        active: e.id === this._activeObjectId,
+        visible: e.visible,
+        opacity: e.opacity,
+        skinned: e.skinned,
+        source: e.source,
+        vertices: e.stats ? e.stats.vertices : 0,
+        faces: e.stats ? e.stats.faces : 0,
+        // Delta flags: which objects carry unexported work, introspectable
+        // without a screenshot. painted = paint layers; sculpted =
+        // geometry edits (sculpt/bakes); modified = the union (export-dirty).
+        painted: painted.length > 0 || void 0,
+        sculpted: e.sculpted || void 0,
+        modified: e.modified || void 0,
+        transform: this._transformOf(e)
+      };
+    });
   }
   /** Make an object active (single-object commands target it). */
   setActiveObject(id) {
@@ -41373,7 +43516,11 @@ var Viewer3D = class {
   getSceneManifest() {
     const objects = [];
     const skipped = [];
+    const unsavedPaint = [];
+    const unsavedEdits = [];
     for (const e of this._objects) {
+      if (paintedMeshNames(e.model).length > 0) unsavedPaint.push(e.name);
+      if (e.modified) unsavedEdits.push(e.name);
       if (!e.source || e.source.kind === "volatile") {
         skipped.push(e.name);
         continue;
@@ -41390,6 +43537,8 @@ var Viewer3D = class {
       version: 1,
       objects,
       skippedVolatile: skipped,
+      unsavedPaint,
+      unsavedEdits,
       lighting: this.getLightSettings(),
       environment: this.getEnvironment(),
       background: this._background
@@ -41449,6 +43598,7 @@ var Viewer3D = class {
   }
   /** Play the clip at `index` on the ACTIVE object (stops its other clips). */
   playAnimation(index) {
+    this.invalidate();
     const anim = this._activeAnimation;
     if (!anim || !anim.actions[index]) return;
     for (const a of anim.actions) a.stop();
@@ -41461,6 +43611,7 @@ var Viewer3D = class {
   }
   /** Pause or resume the active object's clip. Returns the new playing state. */
   toggleAnimationPlay() {
+    this.invalidate();
     const anim = this._activeAnimation;
     if (!anim || !anim.activeAction) return false;
     anim.activeAction.paused = !anim.activeAction.paused;
@@ -41468,6 +43619,7 @@ var Viewer3D = class {
     return anim.playing;
   }
   setAnimationPlaying(playing) {
+    this.invalidate();
     const anim = this._activeAnimation;
     if (!anim || !anim.activeAction) return;
     anim.activeAction.paused = !playing;
@@ -41491,6 +43643,7 @@ var Viewer3D = class {
   }
   /** Seek the active clip to `seconds` (pauses so the frame holds). */
   setAnimationTime(seconds) {
+    this.invalidate();
     const anim = this._activeAnimation;
     if (!anim || !anim.activeAction || !anim.mixer) return;
     anim.activeAction.paused = true;
@@ -41771,10 +43924,13 @@ var Viewer3D = class {
     this._renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this._renderer.shadowMap.enabled = true;
     this._renderer.shadowMap.type = PCFSoftShadowMap;
+    this._renderer.shadowMap.autoUpdate = false;
+    this._renderer.shadowMap.needsUpdate = true;
     this._renderer.toneMapping = ACESFilmicToneMapping;
     this._renderer.toneMappingExposure = 1.2;
     this._renderer.outputColorSpace = SRGBColorSpace;
     this._container.appendChild(this._renderer.domElement);
+    DefaultLoadingManager.onLoad = () => this.invalidate();
   }
   _initControls() {
     this._controls = new OrbitControls(
@@ -41789,6 +43945,7 @@ var Viewer3D = class {
     this._controls.maxDistance = 1e3;
     this._controls.target.set(0, 0.5, 0);
     this._controls.update();
+    this._controls.addEventListener("change", () => this.invalidate());
   }
   /**
    * Initialize right-click-to-set-pivot behavior.
@@ -41893,6 +44050,7 @@ var Viewer3D = class {
     return this._measurePoints[0].distanceTo(this._measurePoints[1]);
   }
   _clearMeasurement() {
+    this.invalidate();
     this._measurePoints = [];
     while (this._measureGroup.children.length) {
       const child = this._measureGroup.children.pop();
@@ -41902,6 +44060,7 @@ var Viewer3D = class {
     }
   }
   _addMeasurePoint(point) {
+    this.invalidate();
     if (this._measurePoints.length >= 2) this._clearMeasurement();
     this._measurePoints.push(point);
     const r = this._measureMarkerRadius();
@@ -42119,6 +44278,7 @@ var Viewer3D = class {
    * @param {'orbit'|'fpv'} mode
    */
   setNavMode(mode) {
+    this.invalidate();
     if (mode === this._navMode) return;
     this._keysPressed.clear();
     if (mode === "fpv") {
@@ -42182,6 +44342,7 @@ var Viewer3D = class {
    * @param {number[]} [target] - [x,y,z]; defaults to current target
    */
   setCamera(position, target, fov2) {
+    this.invalidate();
     if (this._navMode === "fpv") this.setNavMode("orbit");
     this._camera.position.set(position[0], position[1], position[2]);
     if (target) this._controls.target.set(target[0], target[1], target[2]);
@@ -42365,9 +44526,17 @@ var Viewer3D = class {
     const f = fill ? Math.max(0.1, Math.min(1, fill)) : 0.55;
     return base / f;
   }
-  /** Place the camera along a unit direction, framed to fill the current model. */
-  _placeCamera(dir, fill, up) {
-    const box = new Box3().setFromObject(this._currentModel);
+  /** Place the camera along a unit direction, framed to fill the current model —
+   *  or the whole visible scene with scope:"scene" (multi-object tableaus need
+   *  angled shots without hand-computed set_camera positions). */
+  _placeCamera(dir, fill, up, scope) {
+    let box = null;
+    if (scope === "scene") {
+      box = this._visibleUnionBox();
+    }
+    if (!box || box.isEmpty()) {
+      box = new Box3().setFromObject(this._currentModel);
+    }
     const size = box.getSize(new Vector3());
     const center = box.getCenter(new Vector3());
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
@@ -42515,7 +44684,7 @@ var Viewer3D = class {
     };
     const d = dirs[preset];
     if (!d) return false;
-    return this._placeCamera(new Vector3(d[0], d[1], d[2]), opts.fill);
+    return this._placeCamera(new Vector3(d[0], d[1], d[2]), opts.fill, null, opts.scope);
   }
   /**
    * Orbit the camera to spherical angles around the model center and frame it.
@@ -42532,7 +44701,7 @@ var Viewer3D = class {
       Math.sin(el),
       Math.cos(el) * Math.cos(az)
     );
-    return this._placeCamera(dir, opts.fill);
+    return this._placeCamera(dir, opts.fill, null, opts.scope);
   }
   /**
    * Frame the model. By default keeps the CURRENT view direction (so "front then
@@ -42747,6 +44916,7 @@ var Viewer3D = class {
    * Original materials are preserved and restored when returning to 'shaded'.
    */
   setRenderMode(mode) {
+    this.invalidate();
     if (this._objects.length === 0) return false;
     const alias = {
       textured: "textured",
@@ -42874,6 +45044,7 @@ var Viewer3D = class {
   }
   /** Enable/disable/adjust exponential scene fog. */
   setFog(opts = {}) {
+    this.invalidate();
     if (opts.enabled === false) {
       this._scene.fog = null;
       return true;
@@ -43069,6 +45240,7 @@ var Viewer3D = class {
    * @param {boolean} [opts.asBackground] - show the environment as the background
    */
   setEnvironment(opts = {}) {
+    this.invalidate();
     if (opts.enabled !== void 0) this._environmentEnabled = !!opts.enabled;
     if (opts.intensity !== void 0) this._environmentIntensity = opts.intensity;
     this._applyEnvironment();
@@ -43129,6 +45301,7 @@ var Viewer3D = class {
   _loadOBJ(url, options = {}) {
     return new Promise((resolve, reject) => {
       const manager = new LoadingManager();
+      manager.onLoad = () => this.invalidate();
       const relatedFiles = options.relatedFiles || [];
       const mtlFile = relatedFiles.find(
         (f) => f.toLowerCase().endsWith(".mtl")
@@ -43176,6 +45349,7 @@ var Viewer3D = class {
   _loadFBX(url, options = {}) {
     return new Promise((resolve, reject) => {
       const manager = new LoadingManager();
+      manager.onLoad = () => this.invalidate();
       const relatedFiles = options.relatedFiles || [];
       const sourcePath = options.sourcePath || null;
       const textureMap = {};
@@ -43319,11 +45493,11 @@ var Viewer3D = class {
       const matName = mat.name || "";
       let changed = false;
       this._sanitizeMaterialTextureSlots(mat);
-      const pick = (slot) => this._pickBestTextureEntry(textureEntries, matName, slot);
+      const pick2 = (slot) => this._pickBestTextureEntry(textureEntries, matName, slot);
       const currentMapName = this._extractTextureFilename(mat.map);
       const mapLooksWrong = this._isLikelyNonColorTextureName(currentMapName);
       if (!this._isUsableTexture(mat.map) || mapLooksWrong) {
-        const entry = pick("map");
+        const entry = pick2("map");
         const tex = await this._loadTextureFromAbsPath(
           entry?.path,
           SRGBColorSpace,
@@ -43337,7 +45511,7 @@ var Viewer3D = class {
         }
       }
       if (!this._isUsableTexture(mat.normalMap)) {
-        const entry = pick("normalMap");
+        const entry = pick2("normalMap");
         const tex = await this._loadTextureFromAbsPath(
           entry?.path,
           LinearSRGBColorSpace,
@@ -43352,7 +45526,7 @@ var Viewer3D = class {
         }
       }
       if (!this._isUsableTexture(mat.aoMap)) {
-        const entry = pick("aoMap");
+        const entry = pick2("aoMap");
         const tex = await this._loadTextureFromAbsPath(
           entry?.path,
           LinearSRGBColorSpace,
@@ -43366,7 +45540,7 @@ var Viewer3D = class {
         }
       }
       if (mat.roughness !== void 0 && !this._isUsableTexture(mat.roughnessMap)) {
-        const entry = pick("roughnessMap");
+        const entry = pick2("roughnessMap");
         const tex = await this._loadTextureFromAbsPath(
           entry?.path,
           LinearSRGBColorSpace,
@@ -43379,7 +45553,7 @@ var Viewer3D = class {
         }
       }
       if (mat.metalness !== void 0 && !this._isUsableTexture(mat.metalnessMap)) {
-        const entry = pick("metalnessMap");
+        const entry = pick2("metalnessMap");
         const tex = await this._loadTextureFromAbsPath(
           entry?.path,
           LinearSRGBColorSpace,
@@ -43392,7 +45566,7 @@ var Viewer3D = class {
         }
       }
       if (!this._isUsableTexture(mat.bumpMap)) {
-        const entry = pick("bumpMap");
+        const entry = pick2("bumpMap");
         const tex = await this._loadTextureFromAbsPath(
           entry?.path,
           LinearSRGBColorSpace,
@@ -43405,7 +45579,7 @@ var Viewer3D = class {
         }
       }
       if (!this._isUsableTexture(mat.emissiveMap)) {
-        const entry = pick("emissiveMap");
+        const entry = pick2("emissiveMap");
         const tex = await this._loadTextureFromAbsPath(
           entry?.path,
           SRGBColorSpace,
@@ -43525,11 +45699,15 @@ var Viewer3D = class {
    */
   _sanitizeObjectTextures(object, settled = true) {
     if (!object) return;
+    let changed = false;
     object.traverse((child) => {
       if (!child.isMesh || !child.material) return;
       const mats = Array.isArray(child.material) ? child.material : [child.material];
-      for (const m of mats) this._sanitizeMaterialTextureSlots(m, settled);
+      for (const m of mats) {
+        if (this._sanitizeMaterialTextureSlots(m, settled)) changed = true;
+      }
     });
+    if (changed) this.invalidate();
   }
   _isTextureFilePath(path) {
     const lower = path.toLowerCase();
@@ -43988,6 +46166,7 @@ var Viewer3D = class {
   _fixDarkColor(material) {
     let changed = false;
     this._sanitizeMaterialTextureSlots(material);
+    if (material.userData && material.userData._mvKeepColor) return false;
     if (material.transparent && !material.alphaMap && material.opacity < 0.2) {
       material.transparent = false;
       material.opacity = 1;
@@ -44047,6 +46226,7 @@ var Viewer3D = class {
    * single-object loads pass the object's own box (unchanged behavior).
    */
   _frameToBox(box) {
+    this.invalidate();
     if (!box || box.isEmpty()) return;
     this._preFocusClip = null;
     this._updateSceneRig(box);
@@ -44077,6 +46257,7 @@ var Viewer3D = class {
    * its shadow otherwise).
    */
   _updateSceneRig(box) {
+    this.invalidate();
     if (!box || box.isEmpty()) return;
     const size = box.getSize(new Vector3());
     const center = box.getCenter(new Vector3());
@@ -44111,6 +46292,7 @@ var Viewer3D = class {
    * Uses spherical coordinates orbiting around the model center.
    */
   _updateKeyLightPosition() {
+    this.invalidate();
     const r = this._keyLightRadius;
     const az = this._keyLightAzimuth;
     const el = this._keyLightElevation;
@@ -44139,19 +46321,23 @@ var Viewer3D = class {
   }
   /** Set key light intensity (0-3). Default: 1.2. */
   setKeyLightIntensity(value) {
+    this.invalidate();
     this._keyLight.intensity = value;
   }
   /** Set fill light intensity (0-2). Default: 0.5. */
   setFillLightIntensity(value) {
+    this.invalidate();
     this._fillLight.intensity = value;
   }
   /** Set ambient light intensity (0-2). Default: 0.3. */
   setAmbientIntensity(value) {
+    this.invalidate();
     this._ambientLight.intensity = value;
     this._hemiLight.intensity = value * 2;
   }
   /** Set tone mapping exposure (0.3-4). Default: 1.2. */
   setExposure(value) {
+    this.invalidate();
     this._renderer.toneMappingExposure = value;
   }
   /**
@@ -44159,8 +46345,10 @@ var Viewer3D = class {
    * @param {number} scale - Scale factor (e.g., 0.25, 0.5, 1.0, 2.0)
    */
   setModelScale(scale) {
+    this.invalidate();
     const entry = this._activeEntry();
     if (entry) {
+      this._ensureResetSnapshot(entry);
       entry.model.scale.setScalar(scale);
       entry.modelScale = scale;
     }
@@ -44173,6 +46361,7 @@ var Viewer3D = class {
    * @param {boolean} enabled - Whether to show wireframe
    */
   setWireframe(enabled) {
+    this.invalidate();
     for (const entry of this._objects) {
       entry.model.traverse((child) => {
         if (child.isMesh && child.material) {
@@ -44197,6 +46386,7 @@ var Viewer3D = class {
    * @param {boolean} enabled
    */
   setNormalsVisible(enabled) {
+    this.invalidate();
     this._clearNormalsHelpers();
     if (enabled && this._objects.length > 0) {
       this._normalsHelpers = [];
@@ -44237,6 +46427,7 @@ var Viewer3D = class {
    * @param {string} hex - CSS hex color (e.g. "#1a1a1a")
    */
   setBackground(hex) {
+    this.invalidate();
     const color = new Color(hex);
     if (!this._envAsBackground) this._scene.background = color;
     if (this._scene.fog) this._scene.fog.color.copy(color);
@@ -44261,6 +46452,7 @@ var Viewer3D = class {
    * @param {boolean} visible
    */
   setGridVisible(visible) {
+    this.invalidate();
     this._gridVisible = visible;
     if (this._grid) this._grid.visible = visible;
   }
@@ -44273,6 +46465,7 @@ var Viewer3D = class {
    * @param {boolean} visible
    */
   setAxisVisible(visible) {
+    this.invalidate();
     this._axisVisible = visible;
     this._axisGroup.visible = visible;
   }
@@ -44287,17 +46480,37 @@ var Viewer3D = class {
    * Save a snapshot of all geometry positions + mesh transforms
    * so we can restore them on Reset.
    */
-  /** Per-entry geometry snapshot (Reset support). See _insertEntry. */
+  /** Per-entry geometry snapshot (Reset support). See _insertEntry.
+   *
+   * Positions are snapshotted THROUGH THE ACCESSOR (getX/getY/getZ), never as a
+   * raw array copy: quantized attributes (KHR_mesh_quantization Int16) would
+   * snapshot raw integers and restore ±32767-range garbage into the dequantized
+   * float buffer after any bake/sculpt; interleaved attributes would snapshot
+   * the whole stride-packed buffer and silently fail the restore. Decoded
+   * floats restore correctly into ANY later attribute layout via setXYZ. */
+  /** Take the Reset snapshot if this entry doesn't have one yet. Called at
+   *  every geometry-mutating entry point (bakes, scale, sculpt) — unmodified
+   *  models never pay the snapshot's memory. */
+  _ensureResetSnapshot(entry) {
+    if (entry && !entry.originalState) this._saveOriginalGeometryForEntry(entry);
+  }
   _saveOriginalGeometryForEntry(entry) {
     const items = [];
     entry.model.updateMatrixWorld(true);
     entry.model.traverse((child) => {
       if (child.isMesh && child.geometry) {
         const posAttr = child.geometry.attributes.position;
+        const positions = new Float32Array(posAttr.count * 3);
+        for (let i = 0; i < posAttr.count; i++) {
+          positions[i * 3] = posAttr.getX(i);
+          positions[i * 3 + 1] = posAttr.getY(i);
+          positions[i * 3 + 2] = posAttr.getZ(i);
+        }
         items.push({
           mesh: child,
           geometry: child.geometry,
-          positions: new Float32Array(posAttr.array),
+          count: posAttr.count,
+          positions,
           position: child.position.clone(),
           rotation: child.rotation.clone(),
           scale: child.scale.clone()
@@ -44322,27 +46535,41 @@ var Viewer3D = class {
    * undoes bakes since the last geometry-modifying operation instead.
    */
   resetModel() {
+    this.invalidate();
     const entry = this._activeEntry();
     if (!entry || !entry.originalState) return;
     const snap = entry.originalState;
+    const restoredGeometries = /* @__PURE__ */ new Set();
     for (const saved of snap.items) {
       if (saved.mesh.geometry !== saved.geometry) continue;
       const posAttr = saved.mesh.geometry.attributes.position;
-      if (!posAttr || posAttr.array.length !== saved.positions.length) continue;
-      posAttr.array.set(saved.positions);
-      posAttr.needsUpdate = true;
+      if (!posAttr || posAttr.count !== saved.count) continue;
+      if (!restoredGeometries.has(saved.geometry)) {
+        restoredGeometries.add(saved.geometry);
+        for (let i = 0; i < saved.count; i++) {
+          posAttr.setXYZ(
+            i,
+            saved.positions[i * 3],
+            saved.positions[i * 3 + 1],
+            saved.positions[i * 3 + 2]
+          );
+        }
+        posAttr.needsUpdate = true;
+        saved.mesh.geometry.computeVertexNormals();
+        saved.mesh.geometry.computeBoundingBox();
+        saved.mesh.geometry.computeBoundingSphere();
+      }
       saved.mesh.position.copy(saved.position);
       saved.mesh.rotation.copy(saved.rotation);
       saved.mesh.scale.copy(saved.scale);
       saved.mesh.updateMatrix();
-      saved.mesh.geometry.computeVertexNormals();
-      saved.mesh.geometry.computeBoundingBox();
-      saved.mesh.geometry.computeBoundingSphere();
     }
     entry.model.position.copy(snap.rootPos);
     entry.model.rotation.copy(snap.rootRot);
     entry.model.scale.copy(snap.rootScale);
-    entry.modified = false;
+    entry.modelScale = snap.rootScale.x;
+    entry.sculpted = false;
+    entry.modified = paintedMeshNames(entry.model).length > 0;
   }
   /**
    * Bake the active object's transforms into vertex positions, RELATIVE TO ITS
@@ -44364,6 +46591,7 @@ var Viewer3D = class {
         "Transform baking (center/ground/rotate/orient/simplify) is not supported for skinned/animated models \u2014 it corrupts the bind pose. Use set_object_transform to place the object instead."
       );
     }
+    this._ensureResetSnapshot(entry);
     const model = entry.model;
     entry.wrapper.updateMatrixWorld(true);
     const wrapperInv = new Matrix4().copy(entry.wrapper.matrixWorld).invert();
@@ -44522,7 +46750,7 @@ var Viewer3D = class {
     if (hadNormals) this.setNormalsVisible(true);
     const entry = this._activeEntry();
     if (entry) {
-      this._saveOriginalGeometryForEntry(entry);
+      entry.originalState = null;
       entry.stats = this._computeStats(entry.model);
       this._lastStats = entry.stats;
       this._onInfoUpdate(entry.stats);
@@ -44819,7 +47047,7 @@ var Viewer3D = class {
     if (hadNormals) this.setNormalsVisible(true);
     const entry = this._activeEntry();
     if (entry) {
-      this._saveOriginalGeometryForEntry(entry);
+      entry.originalState = null;
       entry.stats = this._computeStats(entry.model);
       this._lastStats = entry.stats;
       this._onInfoUpdate(entry.stats);
@@ -45007,6 +47235,7 @@ var Viewer3D = class {
       cam.aspect = prevAspect;
       cam.updateProjectionMatrix();
     }
+    this.invalidate();
     return dataUrl;
   }
   screenshot(opts = {}) {
@@ -45192,17 +47421,63 @@ var Viewer3D = class {
   // ==========================================
   // Render Loop
   // ==========================================
+  /**
+   * DEMAND-DRIVEN rendering (resource priority: stay lightweight).
+   *
+   * The old loop rendered 60fps forever — in the headless MCP harness that
+   * meant SwiftShader software-rendering an unchanged frame continuously
+   * (measured: ~140% CPU while completely idle; an orphaned session burned
+   * 19 CPU-hours overnight). Now a frame renders only when something asks
+   * for one (invalidate()), an animation is playing, or FPV input is active;
+   * after ~0.75s with nothing to do the rAF loop STOPS entirely and resumes
+   * on the next invalidation. OrbitControls damping keeps itself alive via
+   * its 'change' events; synchronous captures (screenshot/scoring) render
+   * explicitly and are unaffected.
+   */
   _startRenderLoop() {
+    this._renderRequested = true;
+    this._idleFrames = 0;
+    this._renderLoopActive = false;
+    this._resumeRenderLoop();
+  }
+  /** Request a repaint (and shadow refresh); restarts the loop if stopped. */
+  invalidate() {
+    this._renderRequested = true;
+    if (this._renderer && this._renderer.shadowMap) {
+      this._renderer.shadowMap.needsUpdate = true;
+    }
+    this._resumeRenderLoop();
+  }
+  _resumeRenderLoop() {
+    if (this._renderLoopActive) return;
+    this._renderLoopActive = true;
+    this._clock.getDelta();
     const animate = () => {
+      if (!this._renderLoopActive) return;
       this._animationId = requestAnimationFrame(animate);
+      const activeAnim = this._activeAnimation;
+      const animating = !!(activeAnim && activeAnim.mixer && activeAnim.playing);
+      const fpvActive = this._navMode === "fpv" && (this._keysPressed.size > 0 || this._fpvMouseDown);
+      if (!this._renderRequested && !animating && !fpvActive) {
+        if (++this._idleFrames > 45) {
+          this._renderLoopActive = false;
+          if (this._animationId) {
+            cancelAnimationFrame(this._animationId);
+            this._animationId = null;
+          }
+        }
+        return;
+      }
+      this._idleFrames = 0;
+      this._renderRequested = false;
       const delta = this._clock.getDelta();
       this._applyFPVMovement(delta);
       if (this._controls.enabled) {
         this._controls.update();
       }
-      const activeAnim = this._activeAnimation;
-      if (activeAnim && activeAnim.mixer) {
+      if (animating) {
         activeAnim.mixer.update(delta);
+        this._renderer.shadowMap.needsUpdate = true;
       }
       if (this._clip && this._clip.axis === "camera") {
         const plane = this._computeClipPlane();
@@ -45213,6 +47488,7 @@ var Viewer3D = class {
     animate();
   }
   _onResize() {
+    this.invalidate();
     const width = this._container.clientWidth;
     const height = this._container.clientHeight;
     if (width === 0 || height === 0) return;
@@ -45236,7 +47512,9 @@ var Viewer3D = class {
   _computeStats(object) {
     let bufferVerts = 0;
     let faces = 0;
-    const uniqueSet = /* @__PURE__ */ new Set();
+    const byX = /* @__PURE__ */ new Map();
+    const quant = 1e5;
+    let uniqueVerts = 0;
     object.traverse((child) => {
       if (child.isMesh && child.geometry) {
         const geo = child.geometry;
@@ -45244,8 +47522,23 @@ var Viewer3D = class {
         if (posAttr) {
           bufferVerts += posAttr.count;
           for (let i = 0; i < posAttr.count; i++) {
-            const key = `${posAttr.getX(i).toFixed(5)},${posAttr.getY(i).toFixed(5)},${posAttr.getZ(i).toFixed(5)}`;
-            uniqueSet.add(key);
+            const x = Math.round(posAttr.getX(i) * quant);
+            const y = Math.round(posAttr.getY(i) * quant);
+            const z = Math.round(posAttr.getZ(i) * quant);
+            let byY = byX.get(x);
+            if (!byY) {
+              byY = /* @__PURE__ */ new Map();
+              byX.set(x, byY);
+            }
+            let zs = byY.get(y);
+            if (!zs) {
+              zs = /* @__PURE__ */ new Set();
+              byY.set(y, zs);
+            }
+            if (!zs.has(z)) {
+              zs.add(z);
+              uniqueVerts++;
+            }
           }
         }
         if (geo.index) {
@@ -45255,7 +47548,6 @@ var Viewer3D = class {
         }
       }
     });
-    const uniqueVerts = uniqueSet.size;
     const box = new Box3().setFromObject(object);
     const size = box.getSize(new Vector3());
     return {
@@ -45268,6 +47560,25 @@ var Viewer3D = class {
     };
   }
 };
+/** Allowed params per primitive kind — unknown keys are REJECTED (a typo like
+ *  `radiu` must not silently produce a default shape with ok:true). */
+__publicField(_Viewer3D, "PRIMITIVE_PARAMS", {
+  box: ["width", "height", "depth", "segments"],
+  sphere: ["radius", "widthSegments", "heightSegments"],
+  cylinder: [
+    "radius",
+    "radiusTop",
+    "radiusBottom",
+    "height",
+    "radialSegments",
+    "heightSegments"
+  ],
+  cone: ["radius", "height", "radialSegments", "heightSegments"],
+  torus: ["radius", "tube", "radialSegments", "tubularSegments"],
+  plane: ["width", "height", "widthSegments", "heightSegments"],
+  capsule: ["radius", "length", "capSegments", "radialSegments"]
+});
+var Viewer3D = _Viewer3D;
 
 // frontend/js/viewer/describe_scene.js
 var CHECK_TRIANGLE_BUDGET = 3e5;
@@ -45459,6 +47770,9 @@ function collectMaterials(meshes) {
         modifiedByViewer,
         maps,
         textures,
+        // Agent-painted layer (CanvasTexture) vs authored texture — lets a
+        // material audit distinguish the two.
+        painted: !!(mat.userData && mat.userData._mvPaint) || void 0,
         transparent: !!mat.transparent,
         doubleSided: mat.side === DoubleSide,
         meshes: [m.name]
@@ -45530,6 +47844,7 @@ function materialSummaries(materials, maxItems) {
     modifiedByViewer: m.modifiedByViewer || void 0,
     maps: m.maps,
     textures: Object.keys(m.textures).length ? m.textures : void 0,
+    painted: m.painted,
     transparent: m.transparent,
     doubleSided: m.doubleSided
   }));
@@ -46085,6 +48400,7 @@ var ViewerControlAPI = class {
     try {
       const result = await def.handler(validation.values);
       this._emit("executed", { action: command.action, params });
+      if (this._viewer.invalidate) this._viewer.invalidate();
       return { ok: true, result: result === void 0 ? null : result };
     } catch (err2) {
       const message = String(err2 && err2.message ? err2.message : err2);
@@ -46405,17 +48721,162 @@ var ViewerControlAPI = class {
           return { stats: result, objectId: result.objectId, scene: v.getState().scene };
         }
       },
+      add_primitive: {
+        description: "Add a procedural primitive to the scene as a new object (sculpting stock / scene building block). kind: box|sphere|cylinder|cone|torus|plane|capsule. params (all optional, sensible sculptable defaults; unknown keys rejected): box {width,height,depth,segments} \xB7 sphere {radius,widthSegments,heightSegments} \xB7 cylinder {radius|radiusTop+radiusBottom,height,radialSegments,heightSegments} \xB7 cone {radius,height,radialSegments,heightSegments} \xB7 torus {radius,tube,radialSegments,tubularSegments} \xB7 plane {width,height,widthSegments,heightSegments} \xB7 capsule {radius,length,capSegments,radialSegments}. Higher segments = finer sculpting (cap 256/axis, 250k vertices). Note: cylinder/cone CAPS are triangle fans \u2014 paintable but poor sculpting targets (no interior vertices); sculpt sides or use sphere/capsule. UVs are non-overlapping (paint-safe). color is CSS hex, honored exactly. transform places it immediately. The primitive becomes ACTIVE and persists in .mvscene manifests without any file.",
+        params: {
+          kind: { type: "string", required: true, enum: ["box", "sphere", "cylinder", "cone", "torus", "plane", "capsule"] },
+          params: { type: "object" },
+          color: { type: "string" },
+          name: { type: "string" },
+          transform: { type: "object" },
+          frame: { type: "boolean", default: true }
+        },
+        handler: (p) => {
+          const result = v.addPrimitive(p.kind, {
+            params: p.params,
+            color: p.color,
+            name: p.name,
+            transform: p.transform,
+            frame: p.frame
+          });
+          this._emit("object_added", { objectId: result.objectId, name: p.name || p.kind });
+          return result;
+        }
+      },
+      // --- sculpting & painting (backlog 045) ---
+      sculpt: {
+        description: "Apply ONE sculpting brush stamp to the ACTIVE object, in WORLD coordinates (get them from pick, get_bounds, or describe_scene mesh centers). tool: draw (displace along the surface's average normal, or `direction`), inflate (along each vertex's own normal), smooth (relax bumps), flatten (toward the local plane), pinch (pull toward center), grab (move by `direction`*strength). radius: world units \u2014 or radius_rel (0..1, fraction of the object's bounding-sphere radius; scale-free). strength: world-units displacement for draw/inflate/grab (default radius*0.25); 0..1 blend for smooth/flatten/pinch (default 0.5). falloff: smooth|linear|sharp. Returns {affected, maxDisplacement, newSize} \u2014 quantified feedback, steer WITHOUT a verification render each stamp. A missed brush is an ERROR (fix center/radius). Edits are seam-safe (welded) and instance-aware; `reset` restores the pre-sculpt geometry. Not supported on skinned models.",
+        params: {
+          tool: { type: "string", default: "draw", enum: ["draw", "inflate", "smooth", "flatten", "pinch", "grab"] },
+          center: { type: "array", required: true },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          strength: { type: "number" },
+          direction: { type: "array" },
+          falloff: { type: "string", enum: ["smooth", "linear", "sharp"] }
+        },
+        requiresModel: true,
+        handler: (p) => sculptStamp(v, p)
+      },
+      sculpt_stroke: {
+        description: "Apply the sculpt brush along a stroke in ONE call \u2014 far cheaper than N sculpt calls. Give the stroke as explicit `points` (\u226464 world-space [x,y,z]; overlap at spacing \u2248 radius/2 for a continuous ridge) OR as a parametric `path` with server-side auto-spacing (no external math, no scalloping): {type:'circle', center, axis?=[0,1,0], radius, start_deg?, sweep_deg?=360} for rings/bands/arcs, or {type:'line', from, to}. Same brush params as sculpt.",
+        params: {
+          points: { type: "array" },
+          path: { type: "object" },
+          tool: { type: "string", default: "draw", enum: ["draw", "inflate", "smooth", "flatten", "pinch", "grab"] },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          strength: { type: "number" },
+          direction: { type: "array" },
+          falloff: { type: "string", enum: ["smooth", "linear", "sharp"] }
+        },
+        requiresModel: true,
+        handler: (p) => sculptStroke(v, p)
+      },
+      paint: {
+        description: "Paint ONE brush stamp of color onto the ACTIVE object's texture (creates a real texture layer on first use; the model's existing texture becomes the base when possible). WORLD-space brush like sculpt; radius in world units or radius_rel (0..1 of bounding-sphere radius). color: CSS hex. opacity 0..1 = the MAX alpha of this call (painter semantics: overlapping stamps within one call never exceed it); hardness 0..1 = fraction of the radius at full opacity before falloff scales alpha to 0 at the rim. shape:'square' stamps a crisp axis-aligned quad in the surface's tangent plane (radius = half-side; use hardness 1 for exact edges) \u2014 checkers/panels/labels in ONE stamp. max_normal_angle (degrees): skip faces tilted more than this from the stamped face \u2014 stops paint wrapping around hard edges (e.g. 45 on a box top). Requires UV coordinates (primitives always have them; STL/PLY do not). Returns {painted, meanAlpha} \u2014 meanAlpha is the average applied alpha; < 0.05 means near-invisible paint (raise opacity/hardness) and is flagged in `note`. A missed brush is an ERROR. Paint & sculpt edits are NOT saved by save_scene \u2014 export_model (GLB) persists them. clear_paint undoes all paint.",
+        params: {
+          center: { type: "array", required: true },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          color: { type: "string", required: true },
+          opacity: { type: "number", min: 0, max: 1 },
+          hardness: { type: "number", min: 0, max: 1 },
+          falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+          shape: { type: "string", enum: ["round", "square"] },
+          max_normal_angle: { type: "number", min: 1, max: 180 },
+          texture_size: { type: "number", min: 64, max: 2048 }
+        },
+        requiresModel: true,
+        handler: (p) => paintStamp(v, p)
+      },
+      paint_stroke: {
+        description: "Paint a stroke in ONE call. Give it as explicit `points` (\u226464 world-space [x,y,z]; overlap at spacing \u2248 radius/2) OR as a parametric `path` with server-side auto-spacing (smooth bands with zero external math): {type:'circle', center, axis?=[0,1,0], radius, start_deg?, sweep_deg?=360} for rings/bands/arcs (e.g. a hat band: circle around the crown's axis), or {type:'line', from, to}. Same params as paint (incl. shape/max_normal_angle).",
+        params: {
+          points: { type: "array" },
+          path: { type: "object" },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          color: { type: "string", required: true },
+          opacity: { type: "number", min: 0, max: 1 },
+          hardness: { type: "number", min: 0, max: 1 },
+          falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+          shape: { type: "string", enum: ["round", "square"] },
+          max_normal_angle: { type: "number", min: 1, max: 180 },
+          texture_size: { type: "number", min: 64, max: 2048 }
+        },
+        requiresModel: true,
+        handler: (p) => paintStroke(v, p)
+      },
+      fill_paint: {
+        description: "Flood the ACTIVE object's whole paint layer with one color (a fresh base coat before detailing).",
+        params: {
+          color: { type: "string", required: true },
+          texture_size: { type: "number", min: 64, max: 2048 }
+        },
+        requiresModel: true,
+        handler: (p) => fillPaint(v, p)
+      },
+      clear_paint: {
+        description: "Remove ALL paint layers from the ACTIVE object, restoring its pre-paint textures/colors (the paint analog of `reset`).",
+        requiresModel: true,
+        handler: () => clearPaint(v)
+      },
+      batch: {
+        description: "Execute up to 32 commands sequentially in ONE round-trip (halves latency/tokens for sculpt-stroke sessions). commands: [{action, params}, ...]. Stops at the first failure unless continue_on_error. Returns {results:[{ok,...}], completed}. batch cannot nest.",
+        params: {
+          commands: { type: "array", required: true },
+          continue_on_error: { type: "boolean", default: false }
+        },
+        handler: async (p) => {
+          if (p.commands.length === 0 || p.commands.length > 32) {
+            throw new Error("batch takes 1-32 commands");
+          }
+          const results = [];
+          for (const cmd of p.commands) {
+            if (cmd && cmd.action === "batch") {
+              results.push({ ok: false, error: "batch cannot nest" });
+              if (!p.continue_on_error) break;
+              continue;
+            }
+            const r = await this.execute(cmd);
+            results.push(r);
+            if (!r.ok && !p.continue_on_error) break;
+          }
+          return { results, completed: results.length };
+        }
+      },
+      pick: {
+        description: "Turn SCREENSHOT coordinates into a world-space surface point: raycast from the CURRENT camera through normalized image coords (x right 0..1, y DOWN 0..1 \u2014 top-left origin, exactly as you read pixels off a screenshot). ALWAYS pass the screenshot's width/height \u2014 screenshots can have a different aspect than the live canvas, and picking with the wrong aspect lands off-target near the edges. Returns {point, normal, objectId} to feed into sculpt/paint. Only valid while the camera is unchanged since that screenshot \u2014 re-pick after any camera move. The agent hand-eye loop: screenshot \u2192 spot the feature at (x,y) \u2192 pick \u2192 sculpt/paint at the returned point.",
+        params: {
+          x: { type: "number", required: true, min: 0, max: 1 },
+          y: { type: "number", required: true, min: 0, max: 1 },
+          width: { type: "number", min: 1 },
+          height: { type: "number", min: 1 }
+        },
+        requiresModel: true,
+        handler: (p) => pick(v, p.x, p.y, p.width, p.height)
+      },
+      raycast: {
+        description: "Raycast from an explicit world-space origin along a direction; returns the first visible surface hit {point, normal, objectId, distance}. Camera-independent alternative to pick.",
+        params: {
+          origin: { type: "array", required: true },
+          direction: { type: "array", required: true }
+        },
+        requiresModel: true,
+        handler: (p) => raycast(v, p.origin, p.direction)
+      },
       list_objects: {
-        description: "List every object in the scene: id, name, active flag, visibility, opacity, per-object placement transform, source. Object ids are the handles for all set_object_*/remove_object commands.",
+        description: "List every object in the scene: id, name, active flag, visibility, opacity, per-object placement transform, source, plus delta flags \u2014 painted (has paint layers), sculpted (geometry edited by sculpt/bakes), modified (the union: any unexported work) \u2014 a precise audit trail without a screenshot. Object ids are the handles for all set_object_*/remove_object commands.",
         handler: () => ({ objects: v.listObjects(), activeObjectId: v._activeObjectId })
       },
       set_active_object: {
-        description: "Make an object ACTIVE: all single-object commands (describe_scene, get_mesh_stats, transforms, focus, animation) target the active object. The scene keeps rendering all visible objects.",
+        description: "Make an object ACTIVE: all single-object commands (describe_scene, get_mesh_stats, transforms, focus, animation) target the active object. The scene keeps rendering all visible objects. Returns just {activeObjectId} \u2014 use list_objects for the full roster.",
         params: { id: { type: "number", required: true } },
         requiresModel: true,
         handler: (p) => {
           v.setActiveObject(p.id);
-          return { activeObjectId: p.id, state: v.getState().scene };
+          return { activeObjectId: p.id };
         }
       },
       remove_object: {
@@ -46511,23 +48972,25 @@ var ViewerControlAPI = class {
         }
       },
       set_view: {
-        description: "Point the camera at a preset around the model. `fill` (0-1, higher = tighter framing) controls how much of the frame the model occupies.",
+        description: "Point the camera at a preset around the model. `fill` (0-1, higher = tighter framing) controls how much of the frame the model occupies. scope:'scene' frames the WHOLE visible scene instead of the active object (multi-object tableaus).",
         params: {
           preset: { type: "string", required: true, enum: ["front", "back", "left", "right", "top", "bottom", "iso"] },
-          fill: { type: "number", min: 0.1, max: 1 }
+          fill: { type: "number", min: 0.1, max: 1 },
+          scope: { type: "string", enum: ["object", "scene"] }
         },
         requiresModel: true,
-        handler: (p) => v.setCameraView(p.preset, { fill: p.fill })
+        handler: (p) => v.setCameraView(p.preset, { fill: p.fill, scope: p.scope })
       },
       orbit: {
-        description: "Orbit the camera to spherical angles around the model and frame it. azimuth: degrees around Y (0 = front); elevation: degrees above horizon.",
+        description: "Orbit the camera to spherical angles around the model and frame it. azimuth: degrees around Y (0 = front); elevation: degrees above horizon. scope:'scene' orbits/frames the WHOLE visible scene instead of the active object \u2014 use it to compose multi-object shots from any angle (frame_all only keeps the current direction).",
         params: {
           azimuth: { type: "number", required: true },
           elevation: { type: "number", default: 15 },
-          fill: { type: "number", min: 0.1, max: 1 }
+          fill: { type: "number", min: 0.1, max: 1 },
+          scope: { type: "string", enum: ["object", "scene"] }
         },
         requiresModel: true,
-        handler: (p) => v.orbitTo(p.azimuth, p.elevation, { fill: p.fill })
+        handler: (p) => v.orbitTo(p.azimuth, p.elevation, { fill: p.fill, scope: p.scope })
       },
       frame: {
         description: "Frame the model. Keeps the current view direction by default (keep_direction:false for an iso fit). `fill` (0-1) sets tightness.",

@@ -151,11 +151,15 @@ A single, self-describing command surface designed to be driven by AI agents or 
 - `listCommands()` — every action with its parameter schema (discoverable with no prior knowledge).
 - `getState()` / `getSceneInfo()` — JSON snapshots (model, camera+fov+presets, display, animation; per-mesh/material).
 - `on(event, cb)` — `loaded`, `error`, `animations`, `measurement`, `executed`.
-- Commands: `load`/`unload`, `get_camera`/`set_camera`/`set_view`/`orbit`/`frame`/`reset_camera`/`set_nav_mode`,
+- Commands: `load`/`unload`, `get_camera`/`set_camera`/`set_view`/`orbit`/`frame`/`reset_camera`/`set_nav_mode`
+  (`orbit`/`set_view` take `scope:"scene"` for whole-tableau framing),
   `score_views`/`find_best_view`/`auto_upright` (semantic-front discovery + camera uprighting),
   `focus` (frame a part by stable mesh id / name / world point — rescales clip planes so tiny parts stay visible),
   `set_render_mode` (textured/solid/wireframe/normals)/`set_wireframe`/`set_grid`/`set_axes`/`set_normals`/`set_clip`/`set_fog`/`set_background`/`set_scale`/`set_lighting`/`set_environment`/`get_environment` (IBL),
   `center`/`ground`/`auto_orient`/`rotate`/`simplify`/`recompute_normals`/`reset`,
+  `add_model`/`list_objects`/`set_active_object`/`set_object_transform`/`set_object_visible`/`set_object_opacity`/`remove_object`/`frame_all`/`get_scene_manifest` (scene composition),
+  `add_primitive`/`sculpt`/`sculpt_stroke`/`paint`/`paint_stroke`/`fill_paint`/`clear_paint`/`pick`/`raycast`/`batch`
+  (creation: primitives, world-space sculpt brushes, texture-paint layers, screenshot-to-surface picking — see `viewer/sculpt.js`),
   `play_animation`/`pause_animation`/`set_animation_time`/`set_animation_speed`,
   `measure`/`set_measure_mode`, `export_obj`/`export_glb`,
   `screenshot`/`capture_views`/`turntable` (hero shots: resolution, transparency, fog/ground/SSAO control),
@@ -163,6 +167,15 @@ A single, self-describing command surface designed to be driven by AI agents or 
   Model-dependent commands return `{ok:false}` when no model is loaded; unknown params are rejected.
 - Agent docs are served at `/llms.txt` (index) and `/llms-full.txt` (full command reference);
   MCP access is documented in [MCP Server](mcp.md).
+
+### `viewer/sculpt.js` — sculpting, painting, picking (backlog 045)
+World-space brush engine for agent-driven creation: welded canonical-position
+displacement (seam-safe inflate/smooth), shared-geometry dedup (glTF instancing),
+falloff kernels, UV-space triangle rasterization for paint with per-call max-alpha
+accumulation and sRGB-correct blending, square tangent-plane stamps + hard-edge
+normal clamping, per-session paint texel budget, and camera/world raycast picking
+with screenshot-aspect correction. Rendering is demand-driven: the rAF loop parks
+after ~0.75 s idle (0.0% CPU) and every mutating command invalidates exactly once.
 
 ### `viewer/standalone.js` — `createViewer(container, options)`
 Instantiates the engine + control API with a client-only resolver and exposes
