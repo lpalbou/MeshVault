@@ -1,7 +1,36 @@
 # 0048 — Commit the browser E2E suites into the repo
 
-- **State**: planned
+- **State**: completed
 - **Created**: 2026-07-11
+- **Completed**: 2026-07-12 (v0.8.0)
+
+## Completion
+
+`tests/e2e/` now holds the full regression net — grown well past the 68
+checks this item was filed about, because the 050/053/054 cycles added their
+own suites:
+
+| file | checks | covers |
+|------|-------:|--------|
+| `test_sculpt_paint.py` | 33 | primitives, brushes+reset, paint atlas isolation, meanAlpha, pick/raycast, batch, manifest |
+| `test_articulation_timeline.py` | 35 | pivots, parenting, keyframes, animated-GLB round-trip, detect/split, simplify_region, fix_mesh, repair brushes, tiers |
+| `test_symmetry_heal.py` | 26 | detect_symmetry (determinism, tie-breaks, staleness), mirror_paint chirality, undo_paint, cycle-2 regressions |
+| `test_edit_ui.py` | 20 | human UI arbitration matrix, gesture undo, keyframe authoring, ESC/guards |
+| `test_brush_gestures.py` | 12 | cycle-2 UI regressions (FPV, panels, invert, opacity composition) + undo_group ledger |
+| `test_vflip_roundtrip.py` | 1 | the v0.7.0 GLB→GLB UV data-loss regression, now SELF-CONTAINED (paint→export→reload→export, V-range bit-equal — no machine-local portrait fixture) |
+
+Mechanics per the item: `mv_app` session fixture (`conftest.py`) uses
+`MESHVAULT_E2E_URL`/`MESHVAULT_E2E_TOKEN` against a running app or spins up
+its OWN uvicorn server (ephemeral port, `/tmp` root, token auth) — no
+reliance on `/tmp` scripts or a pre-running app; `pytest -m e2e` marker
+(opt-in via `MESHVAULT_E2E=1`, so plain `pytest tests/` self-skips — 7
+skipped, CI-safe); `scripts/e2e.sh` runner; release workflow gained an `e2e`
+job (chromium + SwiftShader + built bundles) gating `build` alongside the
+Python test matrix.
+
+Verified: `scripts/e2e.sh` green from the repo with an OWNED server —
+7 passed in 182 s. Default `pytest tests/` unchanged (109 passed + e2e
+skips).
 - **Origin**: 045–047 consolidation. The two Playwright smoke harnesses that
   validated every capability cycle (68 checks total) live in `/tmp` — one
   reboot deletes the only regression net for the entire agent surface.

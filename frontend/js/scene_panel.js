@@ -149,8 +149,11 @@ export class ScenePanel {
             downPos = null;
             if (wasDrag) return;
             // Selection only matters in composed scenes; measurement owns clicks
-            // in measure mode; the gizmo handles its own pointer interactions.
-            if (v._objects.length < 2 || v._measureMode || this._gizmo.dragging) return;
+            // in measure mode; the gizmo handles its own pointer interactions;
+            // edit tool modes own left-clicks entirely (054 — a zero-move click
+            // in sculpt mode must not stamp AND retarget the brush).
+            if (v._objects.length < 2 || v._measureMode || this._gizmo.dragging
+                || (v._toolMode && v._toolMode !== "none")) return;
 
             const rect = canvas.getBoundingClientRect();
             mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;

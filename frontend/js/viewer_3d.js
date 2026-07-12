@@ -39,6 +39,7 @@ import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { SSAOPass } from "three/addons/postprocessing/SSAOPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { clonePaintLayer, paintBudgetInfo, paintedMeshNames, releasePaintBudget } from "./viewer/sculpt.js";
+import { releaseSymmetryCache } from "./viewer/symmetry.js";
 import { restoreTimeline, sampleTimeline, serializeTimeline, tickTimeline, timelineState } from "./viewer/timeline.js";
 
 /**
@@ -639,6 +640,7 @@ export class Viewer3D {
         // Return painted-texel budget BEFORE materials are disposed (the layer
         // records live on material.userData).
         releasePaintBudget(entry.model);
+        releaseSymmetryCache(entry);
         entry.model.traverse((child) => {
             if (child.isMesh && child._mvOriginalMaterial) {
                 const override = child.material;
@@ -1220,27 +1222,66 @@ export class Viewer3D {
             this.invalidate();
             return { exploded: false, restored };
         }
+        // Repeated explode calls re-derive from the SAVED base placements
+        // instead of compounding: restore everything first.
+        for (const e of this._objects) {
+            if (!e._explodeBase) e._explodeBase = e.logical.p.clone();
+            else { e.logical.p.copy(e._explodeBase); this._composeWrapper(e); }
+        }
         const sceneBox = this._visibleUnionBox();
         if (!sceneBox) throw new Error("Nothing visible to explode.");
         const sceneCenter = sceneBox.getCenter(new THREE.Vector3());
         const sceneRadius = sceneBox.getSize(new THREE.Vector3()).length() / 2 || 1;
+        // Per-entry boxes must be MODEL-scoped: a parent's wrapper subtree
+        // contains its children's wrappers, so _entryWorldBox would give the
+        // parent the UNION box — every part then shares one centroid/direction
+        // and nothing separates (the parented-lid gauntlet finding).
+        const ownBox = (e) => {
+            e.model.updateMatrixWorld(true);
+            return new THREE.Box3().setFromObject(e.model);
+        };
         const preCenters = new Map();
         for (const e of this._objects) {
-            const box = this._entryWorldBox(e);
+            const box = ownBox(e);
             if (!box.isEmpty()) preCenters.set(e.id, box.getCenter(new THREE.Vector3()));
         }
+        // Hierarchy-aware application (gauntlet finding: a parented lid never
+        // separated — logical.p is PARENT-relative, so adding a WORLD direction
+        // to it is wrong under a parent, and the parent's own displacement
+        // drags the child with it). Process parents first; give each entry an
+        // exact WORLD center target and convert the remaining delta into its
+        // parent's frame.
+        const depthOf = (e) => {
+            let d = 0, pid = e.parentId, guard = 0;
+            while (pid !== null && pid !== undefined && guard++ < 64) {
+                const pe = this._objects.find((o) => o.id === pid);
+                if (!pe) break;
+                d++; pid = pe.parentId;
+            }
+            return d;
+        };
+        const ordered = [...this._objects].sort((a, b) => depthOf(a) - depthOf(b));
         const moved = [];
-        for (const e of this._objects) {
-            if (!e._explodeBase) e._explodeBase = e.logical.p.clone();
-            const box = this._entryWorldBox(e);
-            if (box.isEmpty()) continue;
-            const dir = box.getCenter(new THREE.Vector3()).sub(sceneCenter);
+        const invLin = new THREE.Matrix3();
+        for (const e of ordered) {
+            const pre = preCenters.get(e.id);
+            if (!pre) continue;
+            const dir = pre.clone().sub(sceneCenter);
             if (dir.lengthSq() < 1e-9) dir.set(0, 1, 0);
             dir.normalize();
-            // Offset from the SAVED base so repeated explode calls re-derive
-            // instead of compounding.
-            e.logical.p.copy(e._explodeBase)
-                .addScaledVector(dir, sceneRadius * factor * 0.6);
+            const target = pre.clone().addScaledVector(dir, sceneRadius * factor * 0.6);
+            // Current center AFTER ancestors moved (matrices refreshed by each
+            // _composeWrapper), so the child lands on ITS target, not on
+            // "parent's displacement + a mangled local offset".
+            const nowCenter = ownBox(e).getCenter(new THREE.Vector3());
+            const worldDelta = target.sub(nowCenter);
+            const parentNode = e.wrapper.parent;
+            if (parentNode) {
+                parentNode.updateMatrixWorld(true);
+                invLin.setFromMatrix4(parentNode.matrixWorld).invert();
+                worldDelta.applyMatrix3(invLin);
+            }
+            e.logical.p.add(worldDelta);
             this._composeWrapper(e);
             moved.push({ entry: e, dir });
         }
@@ -1249,7 +1290,7 @@ export class Viewer3D {
         // still overlapping; increase the factor).
         const post = [];
         for (const { entry: e, dir } of moved) {
-            const box = this._entryWorldBox(e);
+            const box = ownBox(e);   // model-scoped, not the subtree union
             const c = box.getCenter(new THREE.Vector3());
             const before = preCenters.get(e.id);
             post.push({ e, box });
@@ -1594,15 +1635,9 @@ export class Viewer3D {
      * Ensures clean slate: camera, navigation mode, FPV angles, scale, keys.
      */
     _resetViewerState() {
-        // Switch back to orbit mode if in FPV
-        if (this._navMode === "fpv") {
-            this._navMode = "orbit";
-            this._controls.enabled = true;
-            this._fpvMouseDown = false;
-            this._container.dispatchEvent(new CustomEvent("navmodechange", {
-                detail: { mode: "orbit" }
-            }));
-        }
+        // Switch back to orbit mode if in FPV (setNavMode owns the transition
+        // AND the navmodechange notification — never bypass it).
+        if (this._navMode === "fpv") this.setNavMode("orbit");
 
         // Clear keyboard state
         this._keysPressed.clear();
@@ -2416,6 +2451,13 @@ export class Viewer3D {
 
         this._navMode = mode;
         this._fpvMouseDown = false;
+        // Notify from the OWNER, both directions (gauntlet finding: only the
+        // →orbit call sites dispatched, so tool modes never learned about →fpv
+        // and a human could paint while flying; per-call-site notification is
+        // exactly the "some caller forgot" bug class).
+        this._container.dispatchEvent(new CustomEvent("navmodechange", {
+            detail: { mode },
+        }));
     }
 
     /** Get the current navigation mode. */
@@ -2434,15 +2476,10 @@ export class Viewer3D {
         this._controls.enabled = true;
         this._controls.update();
 
-        // Reset to orbit mode
+        // Reset to orbit mode (setNavMode owns transition + notification).
         if (this._navMode === "fpv") {
-            this._navMode = "orbit";
-            this._fpvMouseDown = false;
+            this.setNavMode("orbit");
             this._keysPressed.clear();
-            // Notify the UI toggle (via custom event)
-            this._container.dispatchEvent(new CustomEvent("navmodechange", {
-                detail: { mode: "orbit" }
-            }));
         }
     }
 

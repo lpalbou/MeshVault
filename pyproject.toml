@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "meshvault"
-version = "0.7.0"
+version = "0.8.0"
 description = "A professional 3D asset browser for rapid browsing, previewing, and managing OBJ/FBX files"
 authors = ["Laurent-Philippe Albou <contact@abstractcore.ai>"]
 license = "MIT"
@@ -71,6 +71,7 @@ meshvault-mcp = "backend.mcp_server:main"
 testpaths = ["tests"]
 markers = [
     "integration: end-to-end / Playwright / WebGL tests (skipped by default)",
+    "e2e: browser E2E suites for the agent/edit surface (opt-in: MESHVAULT_E2E=1 or MESHVAULT_E2E_URL; see scripts/e2e.sh)",
 ]
 
 [build-system]

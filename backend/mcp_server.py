@@ -40,9 +40,7 @@ from pydantic import Field
 from backend.headless_viewer import (
     SUPPORTED_EXTENSIONS,
     VIEW_PRESETS,
-    HeadlessViewer,
-    LocalModelServer,
-    companion_files,
+    HeadlessSession,
 )
 
 # Hard cap for server-side URL downloads (CORS fallback) — keeps a hostile/mistyped URL
@@ -53,28 +51,16 @@ MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 # through the dedicated tool, which returns proper MCP image content).
 MAX_RESULT_STRING = 2000
 
-FRONTEND_ROOT = Path(__file__).resolve().parent.parent / "frontend"
-
-HARNESS_HTML = """<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>MeshVault MCP host</title>
-<style>html,body,#app{margin:0;width:100%;height:100%;overflow:hidden;background:#33373f}</style>
-</head><body><div id="app"></div>
-<script type="module">
-import { createViewer } from "./dist/meshvault-viewer.js";
-window.mv = createViewer(document.getElementById("app"));
-window.mvReady = true;
-</script></body></html>"""
-
-
 class _Runtime:
-    """Lazily-started loopback model server + shared HeadlessViewer hosting the page."""
+    """Lazily-started HeadlessSession (loopback model server + shared headless
+    viewer page) plus the MCP-specific state: URL download tempdir and the
+    last-loaded local file (open_in_app's subject)."""
 
     def __init__(self):
-        # Serves the harness, the viewer bundle + decoders, and registered models
-        # WITH their directory companions (the untextured multi-file fix) — see
-        # backend/headless_viewer.py.
-        self._server = LocalModelServer(HARNESS_HTML, static_root=FRONTEND_ROOT)
-        self._viewer = HeadlessViewer()
+        # The session serves the harness, the viewer bundle + decoders, and
+        # registered models WITH their directory companions (the untextured
+        # multi-file fix) — see backend/headless_viewer.py.
+        self.session = HeadlessSession()
         self._tmpdir = tempfile.TemporaryDirectory(prefix="meshvault_mcp_")
         # Local file behind the currently loaded model (None for direct URL loads).
         # open_in_app uses it to push "what the agent is looking at" into the app.
@@ -82,21 +68,17 @@ class _Runtime:
 
     @property
     def base_url(self):
-        return self._server.base_url
+        return self.session.base_url
 
     async def page(self):
-        if self._viewer.page is not None:
-            return self._viewer.page
-        self._server.start()
-        # HeadlessViewer serializes concurrent ensure() calls internally.
-        return await self._viewer.ensure(self.base_url + "/")
+        return await self.session.page()
 
     @property
-    def viewer(self) -> HeadlessViewer:
-        return self._viewer
+    def viewer(self):
+        return self.session.viewer
 
     def register_local_file(self, file_path: Path) -> str:
-        return self._server.register(file_path)
+        return self.session.register(file_path)
 
     def download_to_temp(self, url: str) -> Path:
         """Server-side fetch for CORS-blocked URLs; size-capped, into the runtime tempdir.
@@ -120,8 +102,7 @@ class _Runtime:
         return target
 
     async def close(self):
-        await self._viewer.close()
-        self._server.shutdown()
+        await self.session.close()
         self._tmpdir.cleanup()
 
 
@@ -279,25 +260,11 @@ async def _load_source(source: str, name: str | None = None,
         if result.get("ok"):
             _runtime.last_local_model = local
         return result
+    # Local file: the session's shared load path (validation, registration,
+    # companion discovery — what makes multi-file assets load TEXTURED).
     path = Path(source).expanduser()
-    if not path.is_absolute():
-        return {"ok": False, "error": f"Local path must be absolute: {source}"}
-    if path.is_dir():
-        return {"ok": False, "error": f"Path is a directory, not a model file: {path}"}
-    if not path.is_file():
-        return {"ok": False, "error": f"File not found: {path}"}
-    ext = path.suffix.lower()
-    if ext not in SUPPORTED_EXTENSIONS:
-        return {"ok": False, "error": f"Unsupported format '{ext}'. "
-                                      f"Supported: {' '.join(sorted(SUPPORTED_EXTENSIONS))}"}
-    await _runtime.page()  # ensure base_url exists before registering
-    url = _runtime.register_local_file(path)
-    # Companion refs (OBJ→mtllib, FBX→textures) resolve as sibling URLs under the
-    # model's token directory — this is what makes multi-file assets load TEXTURED.
-    related = companion_files(path)
-    result = await _mv_execute(
-        action, params(url, ext, name or path.name,
-                       {"kind": "file", "path": str(path)}, related))
+    result = await _runtime.session.load_local(
+        path, name=name, add=add, transform=transform)
     if result.get("ok"):
         _runtime.last_local_model = path
     return result
@@ -929,8 +896,6 @@ async def export_model(
     target = Path(path).expanduser()
     if not target.is_absolute():
         return {"ok": False, "error": f"Path must be absolute: {path}"}
-    if target.suffix.lower() != ".glb":
-        target = target.with_name(target.name + ".glb")
 
     tiers = {"low": 512, "medium": 1024, "high": 2048, "xhigh": 4096}
     tex: int | None = None
@@ -945,30 +910,16 @@ async def export_model(
             if not (64 <= tex <= 4096):
                 return {"ok": False, "error": "texture_size must be 64-4096"}
 
-    params: dict = {}
-    if animation is not None:
-        params["animation"] = animation
-    if tex is not None:
-        params["texture_size"] = tex
+    # The session fetches the data URL in-process and writes to disk (the
+    # viewer_execute tool path truncates strings >2 KB — a GLB is megabytes).
+    out = await _runtime.session.export_glb_to_file(
+        target, animation=animation, texture_size=tex)
+    if not out.get("ok"):
+        return out
 
-    # Fetch the data URL DIRECTLY via the page (the viewer_execute tool path
-    # truncates strings >2 KB — a GLB is megabytes).
     page = await _runtime.page()
-    result = await page.evaluate(
-        "([p]) => window.mv.execute({ action: 'export_glb', params: p })", [params])
-    if not result.get("ok"):
-        return {"ok": False, "error": result.get("error", "export failed")}
-    data_url = result.get("result")
-    if not data_url:
-        return {"ok": False, "error": "Nothing to export (no visible objects)."}
-
-    glb = base64.b64decode(data_url.split(",", 1)[1])
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(glb)
-
-    out = {"ok": True, "path": str(target), "bytes": len(glb)}
     tl_state = await page.evaluate("() => window.mv.getState().timeline")
-    if tl_state and tl_state.get("tracks") and params.get("animation") is not False:
+    if tl_state and tl_state.get("tracks") and animation is not False:
         out["animation"] = {"tracks": tl_state["tracks"],
                             "duration": tl_state.get("duration")}
         out["verify"] = ("load_model the exported path and check "

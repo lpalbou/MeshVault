@@ -1913,10 +1913,74 @@ html, body {
 .scene-object-btn:hover { color: #fff; background: rgba(255,255,255,0.08); }
 .scene-object-opacity { width: 54px; }
 
-/* ---- Scene timeline bar (backlog 046) ---- */
+/* ---- Scene timeline bar (backlog 046; authoring 054) ---- */
 .timeline-bar { gap: 10px; }
 .timeline-label { font-size: 12px; opacity: 0.75; white-space: nowrap; }
-.timeline-scrub-wrap { position: relative; flex: 1; display: flex; align-items: center; }
+.timeline-scrub-wrap { position: relative; flex: 1; display: flex; align-items: center; min-width: 160px; }
 .timeline-scrub-wrap .anim-scrub { width: 100%; }
-.timeline-ticks { position: absolute; left: 0; right: 0; top: -4px; height: 4px; pointer-events: none; }
-.timeline-tick { position: absolute; width: 2px; height: 4px; background: #e8b84a; border-radius: 1px; transform: translateX(-1px); }
+/* Ticks are clickable (seek) and right-clickable (delete) since 054. */
+.timeline-ticks { position: absolute; left: 0; right: 0; top: -6px; height: 8px; pointer-events: none; }
+.timeline-tick {
+    position: absolute; width: 4px; height: 8px; background: #e8b84a;
+    border-radius: 1px; transform: translateX(-2px);
+    pointer-events: auto; cursor: pointer;
+}
+.timeline-tick:hover { background: #ffd873; }
+.timeline-key {
+    color: #e8574a; font-size: 14px; line-height: 1; padding: 2px 8px;
+}
+.timeline-key:hover { color: #ff7a6e; }
+.timeline-duration {
+    width: 56px; background: rgba(255, 255, 255, 0.07); color: #d7dbe0;
+    border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 4px;
+    font-size: 11px; padding: 2px 4px;
+}
+.timeline-empty-hint { font-size: 11px; opacity: 0.5; white-space: nowrap; }
+.timeline-tick-menu {
+    position: fixed; z-index: 300; display: flex; flex-direction: column;
+    background: rgba(22, 33, 62, 0.97); border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 6px; padding: 4px; backdrop-filter: blur(10px);
+    box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+}
+.timeline-tick-menu-row {
+    background: none; border: none; color: #d7dbe0; font-size: 12px;
+    padding: 5px 10px; text-align: left; cursor: pointer; border-radius: 4px;
+    white-space: nowrap;
+}
+.timeline-tick-menu-row:hover { background: rgba(232, 87, 74, 0.25); color: #fff; }
+
+/* ---- Edit panel: human sculpt/paint (backlog 054) ---- */
+/* Anchored top-LEFT of the viewer (direct container child) — the right
+   column belongs to the materials/lights/scene panels; sharing the lights
+   anchor buried whichever opened second, making brush-vs-light iteration
+   modal (gauntlet finding). */
+.edit-panel { top: 12px; left: 12px; right: auto; z-index: 40; }
+.edit-tabs { display: flex; gap: 4px; }
+.edit-tab {
+    background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255,255,255,0.1);
+    color: #9aa1a9; font-size: 12px; padding: 3px 12px; border-radius: 5px;
+    cursor: pointer;
+}
+.edit-tab.active { background: rgba(74, 158, 255, 0.25); color: #fff; border-color: rgba(74,158,255,0.5); }
+.edit-tools { display: flex; flex-wrap: wrap; gap: 4px; }
+.edit-tool-btn { text-transform: capitalize; font-size: 11px; padding: 3px 9px; }
+.edit-tool-btn.active { background: rgba(74, 158, 255, 0.3); color: #fff; }
+.edit-banner {
+    font-size: 11px; line-height: 1.45; color: #ffce6b;
+    background: rgba(232, 184, 74, 0.1); border: 1px solid rgba(232, 184, 74, 0.25);
+    border-radius: 6px; padding: 6px 8px; margin-bottom: 8px;
+}
+.edit-actions { display: flex; gap: 6px; margin: 8px 0 2px; }
+.edit-status { font-size: 11px; opacity: 0.65; min-height: 14px; margin-top: 6px; }
+.edit-budget { font-size: 11px; opacity: 0.55; margin-top: 2px; }
+.edit-budget.warn { color: #ffce6b; opacity: 1; }
+#edit-color { width: 42px; height: 26px; padding: 0; border: none; background: none; cursor: pointer; }
+
+/* Brush ring cursor — follows the pointer in tool mode, world-radius sized. */
+#edit-brush-cursor {
+    position: absolute; pointer-events: none; z-index: 60;
+    border: 1.5px solid rgba(74, 158, 255, 0.9); border-radius: 50%;
+    transform: translate(-50%, -50%);
+    box-shadow: 0 0 4px rgba(0, 0, 0, 0.4) inset, 0 0 4px rgba(0, 0, 0, 0.4);
+}
+#edit-brush-cursor.paint { border-color: rgba(255, 99, 71, 0.9); }

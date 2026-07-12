@@ -7,12 +7,14 @@
 
 import { FileBrowser, assetKey } from "./file_browser.js";
 import { Viewer3D } from "./viewer_3d.js";
+import { ViewerControlAPI } from "./viewer/control_api.js";
 import { ExportPanel } from "./export_panel.js";
 import { Thumbnailer } from "./thumbnailer.js";
 import { ModelComparer } from "./compare.js";
 import { AgentLink } from "./agent_link.js";
 import { ScenePanel } from "./scene_panel.js";
 import { TimelinePanel } from "./timeline_panel.js";
+import { EditPanel } from "./edit_panel.js";
 
 
 class App {
@@ -66,6 +68,11 @@ class App {
             }
         );
 
+        // ONE control-API instance for the whole app (backlog 054): human panels
+        // route every MUTATION through the exact commands agents use, so the
+        // UI adds no behavioral fork and the E2E suites stay the single truth.
+        this._controlAPI = new ViewerControlAPI(this._viewer);
+
         // Shape comparison (backlog 041): compare another asset against the loaded model.
         this._comparer = new ModelComparer(this._viewer, (m, t) => this._showToast(m, t));
 
@@ -75,8 +82,30 @@ class App {
             onSaveScene: () => this._saveScene(),
         });
 
-        // Scene keyframe timeline bar (backlog 046) — auto-shows when tracks exist.
-        this._timelinePanel = new TimelinePanel(this._viewer);
+        // Scene keyframe timeline bar (backlog 046; keyframe authoring 054).
+        this._timelinePanel = new TimelinePanel(this._viewer, this._controlAPI, {
+            showToast: (m, t) => this._showToast(m, t),
+        });
+
+        // Human sculpt/paint panel (backlog 054).
+        this._editPanel = new EditPanel(this._viewer, this._controlAPI, {
+            showToast: (m, t) => this._showToast(m, t),
+            getGizmo: () => this._scenePanel && this._scenePanel._gizmo,
+            setMeasure: (active) => this._setMeasureMode(active),
+        });
+
+        // The registry is the source of truth for "is anything on screen":
+        // objects created OUTSIDE the file-load flows (control-API primitives,
+        // agent pushes) must also hide the placeholder — otherwise it keeps
+        // covering the canvas and eats every pointer event (054 finding).
+        // The footer stats follow the ACTIVE object for the same reason
+        // (they froze on the last-added object after selection changes).
+        this._elements.viewerContainer.addEventListener("objectschange", (e) => {
+            const any = (e.detail.objects || []).length > 0;
+            this._elements.viewerPlaceholder.style.display = any ? "none" : "flex";
+            const active = this._viewer._activeEntry && this._viewer._activeEntry();
+            if (active && active.stats) this._updateViewerInfo(active.stats);
+        });
 
         this._exportPanel = new ExportPanel(
             {
@@ -1788,6 +1817,9 @@ class App {
         btn.addEventListener("click", () => {
             const active = this._viewer.toggleMeasureMode();
             btn.classList.toggle("active", active);
+            // Measure and the edit brushes both own left-clicks on the canvas —
+            // mutual exclusion at mode entry (054 arbitration).
+            if (active && this._editPanel) this._editPanel.exitToolMode();
             this._showToast(
                 active
                     ? "Measure: click two points on the model to measure distance"
@@ -1795,6 +1827,15 @@ class App {
                 "info"
             );
         });
+    }
+
+    /** Programmatic measure off-switch (edit panel's mutual exclusion hook). */
+    _setMeasureMode(active) {
+        const btn = document.getElementById("measure-toggle");
+        if (!active && this._viewer._measureMode) {
+            this._viewer.toggleMeasureMode();
+            if (btn) btn.classList.remove("active");
+        }
     }
 
     // ==========================================================

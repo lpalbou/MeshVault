@@ -26,6 +26,7 @@ import {
     paintStroke,
     pick,
     raycast,
+    undoPaint,
     getUVIslands,
     previewUVTransform,
     projectPaint,
@@ -36,6 +37,7 @@ import {
     transformUV,
 } from "./sculpt.js";
 import { detectParts, splitObject } from "./articulation.js";
+import { detectSymmetry, mirrorPaint } from "./symmetry.js";
 import {
     fixMesh,
     inspectRegion,
@@ -116,7 +118,8 @@ export class ViewerControlAPI {
         if (!def) {
             return {
                 ok: false,
-                error: `Unknown action '${command.action}'. Use listCommands() to discover valid actions.`,
+                error: `Unknown action '${command.action}'. Run the 'list_commands' `
+                    + "action to discover valid actions and their schemas.",
             };
         }
         // Commands that act on a model must fail clearly when none is loaded, so an
@@ -528,6 +531,7 @@ export class ViewerControlAPI {
                     shape: { type: "string", enum: ["round", "square"] },
                     max_normal_angle: { type: "number", min: 1, max: 180 },
                     texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+                    undo_group: { type: "string" },
                 },
                 requiresModel: true,
                 handler: (p) => paintStamp(v, p),
@@ -546,6 +550,7 @@ export class ViewerControlAPI {
                     shape: { type: "string", enum: ["round", "square"] },
                     max_normal_angle: { type: "number", min: 1, max: 180 },
                     texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+                    undo_group: { type: "string" },
                 },
                 requiresModel: true,
                 handler: (p) => paintStroke(v, p),
@@ -708,12 +713,13 @@ export class ViewerControlAPI {
                     radius_rel: { type: "number", min: 0.000001, max: 1 },
                     strength: { type: "number", min: 0, max: 1 },
                     texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+                    undo_group: { type: "string" },
                 },
                 requiresModel: true,
                 handler: (p) => blurPaint(v, p),
             },
             clone_paint: {
-                description: "Heal brush: copy texture from one surface region onto another via WORLD-space correspondence (works across UV islands — pick a clean `from` area and the defect `to` area on the SAME object). Source and destination must face similar directions (≤45°, else a teaching error). Returns {cloned, meanAlpha}. The repair workflow: close-up screenshot → pick the defect → pick a clean donor area → clone_paint → blur_paint the boundary.",
+                description: "Heal brush: copy texture from one surface region onto another via WORLD-space correspondence (works across UV islands — pick a clean `from` area and the defect `to` area on the SAME object). Source and destination must face similar directions (≤45°, else a teaching error); for LEFT↔RIGHT donors (a clean right eye healing a corrupted left) use mirror_paint instead. Returns {cloned, meanAlpha}. The repair workflow: close-up screenshot → pick the defect → pick a clean donor area → clone_paint → blur_paint the boundary.",
                 params: {
                     from: { type: "array", required: true },
                     to: { type: "array", required: true },
@@ -723,9 +729,41 @@ export class ViewerControlAPI {
                     hardness: { type: "number", min: 0, max: 1 },
                     falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
                     texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+                    undo_group: { type: "string" },
                 },
                 requiresModel: true,
                 handler: (p) => clonePaint(v, p),
+            },
+            undo_paint: {
+                description: "Undo the LAST texture-brush command (paint/paint_stroke/blur_paint/clone_paint/mirror_paint): restores the exact canvas texels it overwrote. ONE slot — consumed by undo, replaced by each new brush call; not a history. fill_paint/clear_paint are not undoable this way (clear_paint removes layers entirely). Returns {undone, restoredPatches}.",
+                requiresModel: true,
+                handler: () => undoPaint(v),
+            },
+            detect_symmetry: {
+                description: "Find the ACTIVE object's dominant mirror plane (bilateral symmetry): scores the 3 local axis planes + PCA axes through the surface's area centroid by reflecting ~1k deterministic surface samples and measuring distance back to the surface (median + p90, relative to the bbox diagonal) plus normal agreement. Returns the winning plane, per-candidate numbers, and a verdict (strong/moderate/weak); the plane is cached for mirror_paint and invalidated by geometry edits. NOTE: geometric symmetry does not guarantee TEXTURE symmetry — verify heals with a render.",
+                params: {
+                    samples: { type: "number", min: 128, max: 4096 },
+                    seed: { type: "number" },
+                },
+                requiresModel: true,
+                handler: (p) => detectSymmetry(v, p),
+            },
+            mirror_paint: {
+                description: "Heal a texture region from its MIRROR counterpart across the object's symmetry plane (the donor clone_paint's ≤45° same-orientation cone correctly refuses): each destination texel samples the surface at its reflected position — content arrives naturally mirrored (a clean right eye heals the left eye anatomically). Auto-runs detect_symmetry when no fresh plane is cached; refuses on a weak verdict unless plane:\"x\"|\"y\"|\"z\" (+ optional plane_origin, local coords) overrides — explicit overrides are SCORED and warned when weak or disagreeing with the detected winner. Heals within ONE mesh's texture; oversized brushes error at a work budget (heal in passes). Returns {healed, meanAlpha, skipped:{noSource,normalReject}, selfSourceFraction} — selfSourceFraction is the share of texels whose mirror source lands back INSIDE the brush (self-copy; >0.4 notes that the brush straddles the plane and little will visibly change). undo_paint reverts the last call. Workflow: pick the defect → mirror_paint {center, radius_rel} → screenshot to verify; blur_paint the boundary if needed.",
+                params: {
+                    center: { type: "array", required: true },
+                    radius: { type: "number", min: 0.000001 },
+                    radius_rel: { type: "number", min: 0.000001, max: 1 },
+                    strength: { type: "number", min: 0, max: 1 },
+                    hardness: { type: "number", min: 0, max: 1 },
+                    falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+                    plane: { type: "string", enum: ["x", "y", "z"] },
+                    plane_origin: { type: "array" },
+                    texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+                    undo_group: { type: "string" },
+                },
+                requiresModel: true,
+                handler: (p) => mirrorPaint(v, p),
             },
             render_texture: {
                 description: "SEE the ACTIVE object's texture in TEXTURE SPACE: the texture image with the UV wireframe overlaid (green — where the mesh actually samples), optional crosshair markers at given UVs, an orange OUTLINE of the UV island containing outline_island_of, and an optional zoom crop (crop_center + crop_size in UV units — the measurement view for tiny charts). THE diagnostic for texture-to-mesh misalignment: pick a 3D feature (pick returns .uv), then render with markers + outline_island_of at that uv. Returns a PNG data URL (over MCP use the get_texture tool — this exceeds viewer_execute's truncation cap).",

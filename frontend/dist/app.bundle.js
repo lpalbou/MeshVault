@@ -3080,13 +3080,13 @@ var Quaternion = class {
     const theta1 = 2 * Math.PI * Math.random();
     const theta2 = 2 * Math.PI * Math.random();
     const x0 = Math.random();
-    const r1 = Math.sqrt(1 - x0);
-    const r2 = Math.sqrt(x0);
+    const r12 = Math.sqrt(1 - x0);
+    const r22 = Math.sqrt(x0);
     return this.set(
-      r1 * Math.sin(theta1),
-      r1 * Math.cos(theta1),
-      r2 * Math.sin(theta2),
-      r2 * Math.cos(theta2)
+      r12 * Math.sin(theta1),
+      r12 * Math.cos(theta1),
+      r22 * Math.sin(theta2),
+      r22 * Math.cos(theta2)
     );
   }
   equals(quaternion) {
@@ -28123,12 +28123,12 @@ function calcBasisFunctionDerivatives(span, u2, p, n2, U) {
     left[j] = u2 - U[span + 1 - j];
     right[j] = U[span + j] - u2;
     let saved = 0;
-    for (let r2 = 0; r2 < j; ++r2) {
-      const rv = right[r2 + 1];
-      const lv = left[j - r2];
-      ndu[j][r2] = rv + lv;
-      const temp5 = ndu[r2][j - 1] / ndu[j][r2];
-      ndu[r2][j] = saved + rv * temp5;
+    for (let r5 = 0; r5 < j; ++r5) {
+      const rv = right[r5 + 1];
+      const lv = left[j - r5];
+      ndu[j][r5] = rv + lv;
+      const temp5 = ndu[r5][j - 1] / ndu[j][r5];
+      ndu[r5][j] = saved + rv * temp5;
       saved = lv * temp5;
     }
     ndu[j][j] = saved;
@@ -28136,7 +28136,7 @@ function calcBasisFunctionDerivatives(span, u2, p, n2, U) {
   for (let j = 0; j <= p; ++j) {
     ders[0][j] = ndu[j][p];
   }
-  for (let r2 = 0; r2 <= p; ++r2) {
+  for (let r5 = 0; r5 <= p; ++r5) {
     let s1 = 0;
     let s2 = 1;
     const a = [];
@@ -28146,23 +28146,23 @@ function calcBasisFunctionDerivatives(span, u2, p, n2, U) {
     a[0][0] = 1;
     for (let k = 1; k <= n2; ++k) {
       let d = 0;
-      const rk = r2 - k;
+      const rk = r5 - k;
       const pk = p - k;
-      if (r2 >= k) {
+      if (r5 >= k) {
         a[s2][0] = a[s1][0] / ndu[pk + 1][rk];
         d = a[s2][0] * ndu[rk][pk];
       }
       const j1 = rk >= -1 ? 1 : -rk;
-      const j2 = r2 - 1 <= pk ? k - 1 : p - r2;
+      const j2 = r5 - 1 <= pk ? k - 1 : p - r5;
       for (let j3 = j1; j3 <= j2; ++j3) {
         a[s2][j3] = (a[s1][j3] - a[s1][j3 - 1]) / ndu[pk + 1][rk + j3];
         d += a[s2][j3] * ndu[rk + j3][pk];
       }
-      if (r2 <= pk) {
-        a[s2][k] = -a[s1][k - 1] / ndu[pk + 1][r2];
-        d += a[s2][k] * ndu[r2][pk];
+      if (r5 <= pk) {
+        a[s2][k] = -a[s1][k - 1] / ndu[pk + 1][r5];
+        d += a[s2][k] * ndu[r5][pk];
       }
-      ders[k][r2] = d;
+      ders[k][r5] = d;
       const j = s1;
       s1 = s2;
       s2 = j;
@@ -43108,6 +43108,517 @@ var OutputPass = class extends Pass {
 };
 
 // frontend/js/viewer/sculpt.js
+var FALLOFFS = {
+  // t = distance / radius in [0, 1] → weight in [0, 1]
+  smooth: (t2) => (1 - t2 * t2) * (1 - t2 * t2),
+  // C1 dome (default)
+  linear: (t2) => 1 - t2,
+  sharp: (t2) => (1 - t2) * (1 - t2)
+};
+function activeMeshes(viewer) {
+  const model = viewer._currentModel;
+  if (!model) throw new Error("No model loaded. load / add_model / add_primitive first.");
+  const meshes = [];
+  model.traverse((c) => {
+    if (c.isMesh && c.geometry) meshes.push(c);
+  });
+  if (meshes.length === 0) throw new Error("Active object has no meshes.");
+  return meshes;
+}
+function wrongObjectHint(viewer, worldPoint) {
+  if (!worldPoint || viewer._objects.length < 2) return "";
+  const p = new Vector3(...worldPoint);
+  const active = viewer._activeEntry();
+  let best = null, bestD = Infinity;
+  for (const entry of viewer._objects) {
+    if (entry === active) continue;
+    const box = new Box3().setFromObject(entry.wrapper);
+    if (box.isEmpty()) continue;
+    const d = box.distanceToPoint(p);
+    if (d < bestD) {
+      bestD = d;
+      best = entry;
+    }
+  }
+  if (best && bestD < 1e-3) {
+    return ` The point sits on object ${best.id} ('${best.name}') but the ACTIVE object is ${active.id} ('${active.name}') \u2014 set_active_object {id: ${best.id}} first.`;
+  }
+  return "";
+}
+function assertNotSkinned(viewer) {
+  const entry = viewer._activeEntry();
+  if (entry && entry.skinned) {
+    throw new Error(
+      "Sculpting/painting skinned (rigged) models is not supported \u2014 vertex edits corrupt the bind pose. Use set_object_transform to place it, or sculpt a primitive/static mesh instead."
+    );
+  }
+  if (viewer._timeline && viewer._timeline.playing) {
+    throw new Error(
+      "The timeline is PLAYING \u2014 sculpt/paint on a moving object would bake a transient pose into the geometry. pause_timeline (or seek_timeline) first, then edit."
+    );
+  }
+}
+function ensureMutable(geometry) {
+  for (const name of ["position", "normal"]) {
+    const attr = geometry.getAttribute(name);
+    if (!attr) continue;
+    if (attr.isInterleavedBufferAttribute || attr.normalized || !(attr.array instanceof Float32Array)) {
+      const out = new Float32Array(attr.count * attr.itemSize);
+      for (let i = 0; i < attr.count; i++) {
+        out[i * attr.itemSize] = attr.getX(i);
+        if (attr.itemSize > 1) out[i * attr.itemSize + 1] = attr.getY(i);
+        if (attr.itemSize > 2) out[i * attr.itemSize + 2] = attr.getZ(i);
+      }
+      geometry.setAttribute(name, new BufferAttribute(out, attr.itemSize));
+    }
+  }
+}
+function getWeld(geometry) {
+  if (geometry.userData._mvSculpt) return geometry.userData._mvSculpt;
+  const pos = geometry.getAttribute("position");
+  geometry.computeBoundingBox();
+  const diag = geometry.boundingBox ? geometry.boundingBox.getSize(new Vector3()).length() || 1 : 1;
+  const quant = diag * 1e-6;
+  const byKey = /* @__PURE__ */ new Map();
+  const canonical = new Int32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) {
+    const k = `${Math.round(pos.getX(i) / quant)}_${Math.round(pos.getY(i) / quant)}_${Math.round(pos.getZ(i) / quant)}`;
+    const seen = byKey.get(k);
+    if (seen !== void 0) canonical[i] = seen;
+    else {
+      byKey.set(k, i);
+      canonical[i] = i;
+    }
+  }
+  const members = /* @__PURE__ */ new Map();
+  for (let i = 0; i < pos.count; i++) {
+    const c = canonical[i];
+    let list = members.get(c);
+    if (!list) {
+      list = [];
+      members.set(c, list);
+    }
+    list.push(i);
+  }
+  const neighbors = /* @__PURE__ */ new Map();
+  const index = geometry.getIndex();
+  const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const link = (a, b) => {
+    if (a === b) return;
+    let s = neighbors.get(a);
+    if (!s) {
+      s = /* @__PURE__ */ new Set();
+      neighbors.set(a, s);
+    }
+    s.add(b);
+  };
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const a = canonical[idxOf(t2, 0)], b = canonical[idxOf(t2, 1)], c = canonical[idxOf(t2, 2)];
+    link(a, b);
+    link(b, a);
+    link(b, c);
+    link(c, b);
+    link(a, c);
+    link(c, a);
+  }
+  const weld = { canonical, members, neighbors };
+  geometry.userData._mvSculpt = weld;
+  return weld;
+}
+function gatherWelds(mesh, weld, centerWorld, radius, falloffFn) {
+  const pos = mesh.geometry.getAttribute("position");
+  const m = mesh.matrixWorld;
+  const v = new Vector3();
+  const hits = [];
+  const r22 = radius * radius;
+  for (const [c] of weld.members) {
+    v.fromBufferAttribute(pos, c).applyMatrix4(m);
+    const d2 = v.distanceToSquared(centerWorld);
+    if (d2 > r22) continue;
+    hits.push({ c, world: v.clone(), w: falloffFn(Math.sqrt(d2) / radius) });
+  }
+  return hits;
+}
+function averageWorldNormal(mesh, weld, hits) {
+  if (!mesh.geometry.getAttribute("normal")) mesh.geometry.computeVertexNormals();
+  const nAttr = mesh.geometry.getAttribute("normal");
+  const nm = new Matrix3().getNormalMatrix(mesh.matrixWorld);
+  const n2 = new Vector3();
+  const acc = new Vector3();
+  for (const h of hits) {
+    n2.set(0, 0, 0);
+    for (const i of weld.members.get(h.c)) {
+      n2.x += nAttr.getX(i);
+      n2.y += nAttr.getY(i);
+      n2.z += nAttr.getZ(i);
+    }
+    n2.applyMatrix3(nm);
+    if (n2.lengthSq() > 1e-12) acc.addScaledVector(n2.normalize(), h.w);
+  }
+  return acc.lengthSq() > 1e-12 ? acc.normalize() : new Vector3(0, 1, 0);
+}
+function weldWorldNormal(mesh, weld, c, nm, out) {
+  const nAttr = mesh.geometry.getAttribute("normal");
+  out.set(0, 0, 0);
+  for (const i of weld.members.get(c)) {
+    out.x += nAttr.getX(i);
+    out.y += nAttr.getY(i);
+    out.z += nAttr.getZ(i);
+  }
+  out.applyMatrix3(nm);
+  return out.lengthSq() > 1e-12 ? out.normalize() : out.set(0, 1, 0);
+}
+function writeWeldWorld(mesh, weld, c, worldPos, inv, tmp2) {
+  const pos = mesh.geometry.getAttribute("position");
+  tmp2.copy(worldPos).applyMatrix4(inv);
+  for (const i of weld.members.get(c)) {
+    pos.setXYZ(i, tmp2.x, tmp2.y, tmp2.z);
+  }
+}
+function stampGeometry(viewer, mesh, opts, stats) {
+  const geometry = mesh.geometry;
+  ensureMutable(geometry);
+  const weld = getWeld(geometry);
+  const falloffFn = FALLOFFS[opts.falloff || "smooth"];
+  const center = opts._centerV;
+  const hits = gatherWelds(mesh, weld, center, opts.radius, falloffFn);
+  if (hits.length === 0) return 0;
+  const tool = opts.tool || "draw";
+  const strength = opts.strength !== void 0 ? opts.strength : tool === "smooth" || tool === "flatten" || tool === "pinch" ? 0.5 : opts.radius * 0.25;
+  const inv = new Matrix4().copy(mesh.matrixWorld).invert();
+  const tmp2 = new Vector3();
+  const pos = geometry.getAttribute("position");
+  if (tool === "draw" || tool === "grab") {
+    const dir = opts.direction ? new Vector3(...opts.direction).normalize() : tool === "draw" ? averageWorldNormal(mesh, weld, hits) : new Vector3(0, 1, 0);
+    for (const h of hits) {
+      const d = strength * h.w;
+      stats.maxDisplacement = Math.max(stats.maxDisplacement, Math.abs(d));
+      writeWeldWorld(mesh, weld, h.c, h.world.addScaledVector(dir, d), inv, tmp2);
+    }
+  } else if (tool === "inflate") {
+    const nm = new Matrix3().getNormalMatrix(mesh.matrixWorld);
+    const n2 = new Vector3();
+    for (const h of hits) {
+      weldWorldNormal(mesh, weld, h.c, nm, n2);
+      const d = strength * h.w;
+      stats.maxDisplacement = Math.max(stats.maxDisplacement, Math.abs(d));
+      writeWeldWorld(mesh, weld, h.c, h.world.addScaledVector(n2, d), inv, tmp2);
+    }
+  } else if (tool === "smooth") {
+    const m = mesh.matrixWorld;
+    const nb = new Vector3();
+    const lambda = Math.min(0.5, 0.5 * strength);
+    const moves = [];
+    for (const h of hits) {
+      const ns = weld.neighbors.get(h.c);
+      if (!ns || ns.size === 0) continue;
+      nb.set(0, 0, 0);
+      for (const other of ns) {
+        nb.add(tmp2.fromBufferAttribute(pos, other).applyMatrix4(m));
+      }
+      nb.divideScalar(ns.size);
+      const target = h.world.clone().lerp(nb, lambda * h.w);
+      moves.push([h.c, target, target.distanceTo(h.world)]);
+    }
+    for (const [c, target, d] of moves) {
+      stats.maxDisplacement = Math.max(stats.maxDisplacement, d);
+      writeWeldWorld(mesh, weld, c, target, inv, tmp2);
+    }
+  } else if (tool === "flatten") {
+    const planeNormal = opts.direction ? new Vector3(...opts.direction).normalize() : averageWorldNormal(mesh, weld, hits);
+    const centroid = new Vector3();
+    let wSum = 0;
+    for (const h of hits) {
+      centroid.addScaledVector(h.world, h.w);
+      wSum += h.w;
+    }
+    centroid.divideScalar(Math.max(1e-9, wSum));
+    for (const h of hits) {
+      const dist = tmp2.copy(h.world).sub(centroid).dot(planeNormal);
+      const target = h.world.clone().addScaledVector(planeNormal, -dist);
+      const blended = h.world.clone().lerp(target, strength * h.w);
+      stats.maxDisplacement = Math.max(stats.maxDisplacement, blended.distanceTo(h.world));
+      writeWeldWorld(mesh, weld, h.c, blended, inv, tmp2);
+    }
+  } else if (tool === "pinch") {
+    for (const h of hits) {
+      const blended = h.world.clone().lerp(center, strength * h.w * 0.5);
+      stats.maxDisplacement = Math.max(stats.maxDisplacement, blended.distanceTo(h.world));
+      writeWeldWorld(mesh, weld, h.c, blended, inv, tmp2);
+    }
+  } else {
+    throw new Error(`Unknown tool '${tool}'. Use draw|inflate|smooth|flatten|pinch|grab.`);
+  }
+  return hits.length;
+}
+function finalizeSculpt(viewer, touchedGeometries) {
+  for (const geometry of touchedGeometries) {
+    geometry.getAttribute("position").needsUpdate = true;
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+  }
+  const entry = viewer._activeEntry();
+  if (entry) {
+    entry.modified = true;
+    entry.sculpted = true;
+    entry.geometryRev++;
+    entry.stats = viewer._computeStats(entry.model);
+    viewer._lastStats = entry.stats;
+  }
+  viewer.invalidate();
+}
+var PATCH_TEXEL_CAP = 2048 * 2048;
+var _lastPaintOp = null;
+function beginPaintOp(action, group) {
+  if (group && _lastPaintOp && _lastPaintOp.group === group) return;
+  _lastPaintOp = { action, group: group || null, patches: [] };
+}
+function stashPaintPatch(action, layer, x, y, w, h) {
+  if (w <= 0 || h <= 0 || w * h > PATCH_TEXEL_CAP) return;
+  if (!_lastPaintOp) beginPaintOp(action);
+  _lastPaintOp.patches.push({
+    layer,
+    layerSize: layer.size,
+    x,
+    y,
+    data: layer.ctx.getImageData(x, y, w, h)
+  });
+}
+function undoPaint(viewer) {
+  if (!_lastPaintOp || _lastPaintOp.patches.length === 0) {
+    throw new Error(
+      "Nothing to undo \u2014 ONE brush call is remembered (the slot is consumed by undo and replaced by each new paint/blur/clone/mirror call). clear_paint removes ALL paint layers instead."
+    );
+  }
+  let restored = 0, stale = 0;
+  for (const p of [..._lastPaintOp.patches].reverse()) {
+    if (!p.layer || !p.layer.ctx || p.layer.size !== p.layerSize) {
+      stale++;
+      continue;
+    }
+    try {
+      p.layer.ctx.putImageData(p.data, p.x, p.y);
+      p.layer.texture.needsUpdate = true;
+      restored++;
+    } catch {
+      stale++;
+    }
+  }
+  const action = _lastPaintOp.action;
+  _lastPaintOp = null;
+  _gestureAlpha = null;
+  viewer.invalidate();
+  const out = { undone: action, restoredPatches: restored };
+  if (stale) {
+    out.stalePatches = stale;
+    out.note = "Some patches were stale (layer resized or cleared since) and were skipped.";
+  }
+  return out;
+}
+var _gestureAlpha = null;
+function gestureAlphaMap(group, layer) {
+  if (!group) return null;
+  if (!_gestureAlpha || _gestureAlpha.group !== group) {
+    _gestureAlpha = { group, layers: /* @__PURE__ */ new Map() };
+  }
+  let m = _gestureAlpha.layers.get(layer);
+  if (!m) {
+    m = /* @__PURE__ */ new Map();
+    _gestureAlpha.layers.set(layer, m);
+  }
+  return m;
+}
+function prewarmSculptCaches(viewer) {
+  const entry = viewer._activeEntry();
+  if (!entry || entry.skinned) return { warmed: 0 };
+  let warmed = 0;
+  const seen = /* @__PURE__ */ new Set();
+  entry.model.traverse((c) => {
+    if (!c.isMesh || !c.geometry || seen.has(c.geometry)) return;
+    seen.add(c.geometry);
+    ensureMutable(c.geometry);
+    getWeld(c.geometry);
+    warmed++;
+  });
+  return { warmed };
+}
+function snapshotActivePositions(viewer) {
+  const entry = viewer._activeEntry();
+  if (!entry || entry.skinned) return null;
+  const geometries = [];
+  const seen = /* @__PURE__ */ new Set();
+  entry.model.traverse((c) => {
+    if (!c.isMesh || !c.geometry || seen.has(c.geometry)) return;
+    seen.add(c.geometry);
+    const pos = c.geometry.getAttribute("position");
+    if (!pos) return;
+    const arr = new Float32Array(pos.count * 3);
+    for (let i = 0; i < pos.count; i++) {
+      arr[i * 3] = pos.getX(i);
+      arr[i * 3 + 1] = pos.getY(i);
+      arr[i * 3 + 2] = pos.getZ(i);
+    }
+    geometries.push({ geometry: c.geometry, positions: arr, count: pos.count });
+  });
+  return geometries.length ? { entryId: entry.id, geometries } : null;
+}
+function restorePositionsSnapshot(viewer, snap) {
+  const entry = viewer._activeEntry();
+  if (!snap || !entry || entry.id !== snap.entryId) return false;
+  const touched = [];
+  for (const g3 of snap.geometries) {
+    const pos = g3.geometry.getAttribute("position");
+    if (!pos || pos.count !== g3.count) continue;
+    for (let i = 0; i < g3.count; i++) {
+      pos.setXYZ(
+        i,
+        g3.positions[i * 3],
+        g3.positions[i * 3 + 1],
+        g3.positions[i * 3 + 2]
+      );
+    }
+    touched.push(g3.geometry);
+  }
+  if (touched.length) finalizeSculpt(viewer, touched);
+  return touched.length > 0;
+}
+function resolveRadius(viewer, opts, command) {
+  if (opts.radius > 0) return opts.radius;
+  if (opts.radius_rel > 0) {
+    const model = viewer._currentModel;
+    const box = new Box3().setFromObject(model);
+    const sphereR = box.isEmpty() ? 0 : box.getSize(new Vector3()).length() / 2;
+    if (sphereR > 0) return opts.radius_rel * sphereR;
+  }
+  throw new Error(
+    `${command} requires radius > 0 (world units) or radius_rel > 0 (fraction of the active object's bounding-sphere radius).`
+  );
+}
+function applyStamps(viewer, opts, points) {
+  assertNotSkinned(viewer);
+  const meshes = activeMeshes(viewer);
+  opts.radius = resolveRadius(viewer, opts, "sculpt");
+  if (!FALLOFFS[opts.falloff || "smooth"]) {
+    throw new Error(`Unknown falloff '${opts.falloff}'. Use smooth|linear|sharp.`);
+  }
+  const entry = viewer._activeEntry();
+  viewer._ensureResetSnapshot(entry);
+  const stats = { maxDisplacement: 0 };
+  let affected = 0;
+  const touched = /* @__PURE__ */ new Set();
+  const seenGeometries = /* @__PURE__ */ new Set();
+  for (const p of points) {
+    opts._centerV = new Vector3(...p);
+    seenGeometries.clear();
+    for (const mesh of meshes) {
+      if (seenGeometries.has(mesh.geometry)) continue;
+      seenGeometries.add(mesh.geometry);
+      mesh.updateMatrixWorld(true);
+      const n2 = stampGeometry(viewer, mesh, opts, stats);
+      if (n2 > 0) {
+        affected += n2;
+        touched.add(mesh.geometry);
+      }
+    }
+  }
+  if (touched.size === 0) {
+    throw new Error(
+      "Brush touched no vertices. Check center (world coords \u2014 use pick, raycast or get_bounds) and radius (or radius_rel); or the mesh is too coarse here (primitives: raise segment params)." + wrongObjectHint(viewer, points[0])
+    );
+  }
+  finalizeSculpt(viewer, touched);
+  const r43 = (v) => Math.round(v * 1e4) / 1e4;
+  const s = entry && entry.stats ? entry.stats : null;
+  return {
+    tool: opts.tool || "draw",
+    stamps: points.length,
+    affected,
+    maxDisplacement: r43(stats.maxDisplacement),
+    // Post-sculpt object size — quantified feedback so the agent can steer
+    // WITHOUT paying a 10-60 s SwiftShader verification render every stamp.
+    newSize: s ? [r43(s.width), r43(s.height), r43(s.depth)] : null
+  };
+}
+function sculptStamp(viewer, opts) {
+  return applyStamps(viewer, opts, [opts.center]);
+}
+function pathToPoints(path, brushRadius) {
+  if (!path || typeof path !== "object" || Array.isArray(path)) {
+    throw new Error("path must be an object like {type:'circle'|'line', ...}");
+  }
+  const spacing = Math.max(1e-9, brushRadius / 2);
+  const clampCount = (n2) => Math.max(2, Math.min(64, Math.ceil(n2)));
+  if (path.type === "circle") {
+    const c = path.center;
+    if (!Array.isArray(c) || c.length !== 3) {
+      throw new Error("path.circle requires center: [x,y,z]");
+    }
+    if (!(path.radius > 0)) throw new Error("path.circle requires radius > 0");
+    const axis = Array.isArray(path.axis) && path.axis.length === 3 ? new Vector3(...path.axis).normalize() : new Vector3(0, 1, 0);
+    if (axis.lengthSq() < 1e-12) throw new Error("path.circle axis must be non-zero");
+    const sweep = path.sweep_deg !== void 0 ? Math.max(1, Math.min(360, path.sweep_deg)) : 360;
+    const start = (path.start_deg || 0) * Math.PI / 180;
+    const sweepRad = sweep * Math.PI / 180;
+    const arcLen = path.radius * sweepRad;
+    const closed = sweep >= 360;
+    const count = clampCount(arcLen / spacing + (closed ? 0 : 1));
+    const seed = Math.abs(axis.x) < 0.9 ? new Vector3(1, 0, 0) : new Vector3(0, 0, 1);
+    const u2 = seed.clone().addScaledVector(axis, -axis.dot(seed)).normalize();
+    const v = new Vector3().crossVectors(axis, u2);
+    const points = [];
+    for (let i = 0; i < count; i++) {
+      const t2 = closed ? i / count : i / (count - 1);
+      const ang = start + t2 * sweepRad;
+      points.push([
+        c[0] + path.radius * (Math.cos(ang) * u2.x + Math.sin(ang) * v.x),
+        c[1] + path.radius * (Math.cos(ang) * u2.y + Math.sin(ang) * v.y),
+        c[2] + path.radius * (Math.cos(ang) * u2.z + Math.sin(ang) * v.z)
+      ]);
+    }
+    return points;
+  }
+  if (path.type === "line") {
+    const { from, to } = path;
+    if (!Array.isArray(from) || from.length !== 3 || !Array.isArray(to) || to.length !== 3) {
+      throw new Error("path.line requires from: [x,y,z] and to: [x,y,z]");
+    }
+    const len = Math.hypot(to[0] - from[0], to[1] - from[1], to[2] - from[2]);
+    const count = clampCount(len / spacing + 1);
+    const points = [];
+    for (let i = 0; i < count; i++) {
+      const t2 = i / (count - 1);
+      points.push([
+        from[0] + (to[0] - from[0]) * t2,
+        from[1] + (to[1] - from[1]) * t2,
+        from[2] + (to[2] - from[2]) * t2
+      ]);
+    }
+    return points;
+  }
+  throw new Error(`Unknown path.type '${path.type}'. Use circle|line.`);
+}
+function strokePoints(viewer, opts, command) {
+  if (opts.points !== void 0 && opts.path !== void 0) {
+    throw new Error(`${command}: pass either points OR path, not both`);
+  }
+  if (opts.path !== void 0) {
+    opts.radius = resolveRadius(viewer, opts, command);
+    return pathToPoints(opts.path, opts.radius);
+  }
+  const points = opts.points || [];
+  if (!Array.isArray(points) || points.length === 0) {
+    throw new Error(`${command} requires points: [[x,y,z], ...] or path: {type, ...}`);
+  }
+  if (points.length > 64) throw new Error(`${command}: max 64 points per call`);
+  return points;
+}
+function sculptStroke(viewer, opts) {
+  return applyStamps(viewer, opts, strokePoints(viewer, opts, "sculpt_stroke"));
+}
+var PAINT_DEFAULT_SIZE = 1024;
+var PAINT_MAX_SIZE = 4096;
 var PAINT_TEXEL_BUDGET = 32 * 1024 * 1024;
 var paintTexelsAllocated = 0;
 function paintBudgetInfo() {
@@ -43116,6 +43627,705 @@ function paintBudgetInfo() {
     texelsBudget: PAINT_TEXEL_BUDGET,
     usedFraction: Math.round(paintTexelsAllocated / PAINT_TEXEL_BUDGET * 1e3) / 1e3
   };
+}
+function paintTargetMaterial(mesh) {
+  const stash = mesh._mvOriginalMaterial || mesh.material;
+  if (Array.isArray(stash)) {
+    throw new Error(
+      "This mesh uses multiple materials (material array) \u2014 painting it is not supported yet. Paint single-material meshes or primitives."
+    );
+  }
+  return stash;
+}
+function ensurePaintLayer(viewer, mesh, size) {
+  let material = paintTargetMaterial(mesh);
+  if (material.userData._mvPaint) return material.userData._mvPaint;
+  let shared = false;
+  for (const entry of viewer._objects) {
+    entry.model.traverse((c) => {
+      if (c !== mesh && c.isMesh) {
+        const m = c._mvOriginalMaterial || c.material;
+        if (m === material) shared = true;
+      }
+    });
+  }
+  if (shared) {
+    const clone = material.clone();
+    clone.userData = { ...material.userData };
+    if (mesh._mvOriginalMaterial) mesh._mvOriginalMaterial = clone;
+    else mesh.material = clone;
+    material = clone;
+  }
+  const dim = Math.min(PAINT_MAX_SIZE, Math.max(64, size || PAINT_DEFAULT_SIZE));
+  if (paintTexelsAllocated + dim * dim > PAINT_TEXEL_BUDGET) {
+    throw new Error(
+      `Paint memory budget exceeded (${Math.round(PAINT_TEXEL_BUDGET / 1e6)}M texels). Use a smaller texture_size, paint fewer meshes, or clear_paint unused layers.`
+    );
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = dim;
+  const ctx = canvas.getContext("2d");
+  const prevMap = material.map || null;
+  const img = prevMap && prevMap.image ? prevMap.image : null;
+  const drawable = img && (typeof HTMLImageElement !== "undefined" && img instanceof HTMLImageElement || typeof HTMLCanvasElement !== "undefined" && img instanceof HTMLCanvasElement || typeof ImageBitmap !== "undefined" && img instanceof ImageBitmap);
+  let baseColor = material.userData._mvAuthored && material.userData._mvAuthored.color ? material.userData._mvAuthored.color : "#" + (material.color ? material.color.getHexString() : "808080");
+  if (drawable) {
+    try {
+      ctx.drawImage(img, 0, 0, dim, dim);
+    } catch {
+      ctx.fillStyle = baseColor;
+      ctx.fillRect(0, 0, dim, dim);
+    }
+  } else {
+    ctx.fillStyle = baseColor;
+    ctx.fillRect(0, 0, dim, dim);
+    if (material.color) material.color.set(16777215);
+  }
+  const texture = new CanvasTexture(canvas);
+  texture.colorSpace = SRGBColorSpace;
+  texture.flipY = prevMap ? prevMap.flipY : true;
+  if (prevMap) {
+    texture.wrapS = prevMap.wrapS;
+    texture.wrapT = prevMap.wrapT;
+  }
+  applyLayerFiltering(texture, dim);
+  material.map = texture;
+  material.needsUpdate = true;
+  paintTexelsAllocated += dim * dim;
+  const layer = {
+    canvas,
+    ctx,
+    texture,
+    size: dim,
+    flipY: texture.flipY,
+    prevMap,
+    // kept (NOT disposed) for clear_paint
+    prevColor: baseColor
+  };
+  material.userData._mvPaint = layer;
+  return layer;
+}
+function clearPaint(viewer) {
+  const meshes = activeMeshes(viewer);
+  let cleared = 0;
+  for (const mesh of meshes) {
+    const stash = mesh._mvOriginalMaterial || mesh.material;
+    const material = Array.isArray(stash) ? null : stash;
+    const layer = material && material.userData._mvPaint;
+    if (!layer) continue;
+    material.map = layer.prevMap || null;
+    if (!layer.prevMap && material.color) material.color.set(layer.prevColor);
+    material.needsUpdate = true;
+    layer.texture.dispose();
+    paintTexelsAllocated = Math.max(0, paintTexelsAllocated - layer.size * layer.size);
+    delete material.userData._mvPaint;
+    cleared++;
+  }
+  const entry = viewer._activeEntry();
+  if (entry && cleared > 0 && !entry.sculpted && paintedMeshNames(entry.model).length === 0) {
+    entry.modified = false;
+  }
+  viewer.invalidate();
+  return { clearedMeshes: cleared };
+}
+function uvToPixel(layer, u2, v) {
+  const x = u2 * layer.size;
+  const y = layer.flipY ? (1 - v) * layer.size : v * layer.size;
+  return [x, y];
+}
+function paintStamp(viewer, opts) {
+  return paintPoints(viewer, opts, [opts.center]);
+}
+function paintStroke(viewer, opts) {
+  return paintPoints(viewer, opts, strokePoints(viewer, opts, "paint_stroke"));
+}
+function paintPoints(viewer, opts, points) {
+  assertNotSkinned(viewer);
+  const meshes = activeMeshes(viewer);
+  beginPaintOp("paint", opts.undo_group);
+  const radius = resolveRadius(viewer, opts, "paint");
+  const color = new Color(opts.color !== void 0 ? String(opts.color) : "#ff3333");
+  const opacity = opts.opacity !== void 0 ? Math.max(0, Math.min(1, opts.opacity)) : 1;
+  const hardness = opts.hardness !== void 0 ? Math.max(0, Math.min(1, opts.hardness)) : 0.6;
+  const falloffFn = FALLOFFS[opts.falloff || "smooth"] || FALLOFFS.smooth;
+  const square = opts.shape === "square";
+  if (opts.shape !== void 0 && opts.shape !== "round" && opts.shape !== "square") {
+    throw new Error(`Unknown shape '${opts.shape}'. Use round|square.`);
+  }
+  const maxNormalDeg = opts.max_normal_angle;
+  const cosClamp = maxNormalDeg !== void 0 ? Math.cos(Math.max(1, Math.min(180, maxNormalDeg)) * Math.PI / 180) : null;
+  let pixels = 0;
+  let rasterized = 0;
+  let alphaSum = 0;
+  const paintedLayers = /* @__PURE__ */ new Set();
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const p = new Vector3();
+  const center = new Vector3();
+  const triN = new Vector3(), refN = new Vector3();
+  const tang1 = new Vector3(), tang2 = new Vector3();
+  const e1 = new Vector3(), e2 = new Vector3();
+  const reachScale = square ? Math.SQRT2 : 1;
+  const r22 = radius * radius * reachScale * reachScale;
+  let uvLess = 0;
+  for (const mesh of meshes) {
+    const geometry = mesh.geometry;
+    const uvAttr = geometry.getAttribute("uv");
+    if (!uvAttr) {
+      uvLess++;
+      continue;
+    }
+    mesh.updateMatrixWorld(true);
+    const m = mesh.matrixWorld;
+    const pos = geometry.getAttribute("position");
+    const index = geometry.getIndex();
+    const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+    const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+    let layer = null;
+    const acc = /* @__PURE__ */ new Map();
+    let minPX = Infinity, maxPX = -Infinity, minPY = Infinity, maxPY = -Infinity;
+    for (const pt of points) {
+      center.set(pt[0], pt[1], pt[2]);
+      const candidates = [];
+      let anchorD2 = Infinity;
+      for (let t2 = 0; t2 < triCount; t2++) {
+        const i0 = idxOf(t2, 0), i1 = idxOf(t2, 1), i2 = idxOf(t2, 2);
+        a.fromBufferAttribute(pos, i0).applyMatrix4(m);
+        b.fromBufferAttribute(pos, i1).applyMatrix4(m);
+        c.fromBufferAttribute(pos, i2).applyMatrix4(m);
+        p.copy(a).add(b).add(c).divideScalar(3);
+        const triR = Math.max(a.distanceTo(p), b.distanceTo(p), c.distanceTo(p));
+        const reach = radius * reachScale + triR;
+        const d2 = p.distanceToSquared(center);
+        if (d2 > reach * reach) continue;
+        candidates.push(t2);
+        if (d2 < anchorD2) {
+          anchorD2 = d2;
+          e1.copy(b).sub(a);
+          e2.copy(c).sub(a);
+          refN.copy(e1.cross(e2)).normalize();
+        }
+      }
+      if (candidates.length === 0) continue;
+      if (square || cosClamp !== null) {
+        const seed = Math.abs(refN.x) < 0.9 ? new Vector3(1, 0, 0) : new Vector3(0, 0, 1);
+        tang1.copy(seed).addScaledVector(refN, -refN.dot(seed)).normalize();
+        tang2.crossVectors(refN, tang1);
+      }
+      for (const t2 of candidates) {
+        const i0 = idxOf(t2, 0), i1 = idxOf(t2, 1), i2 = idxOf(t2, 2);
+        a.fromBufferAttribute(pos, i0).applyMatrix4(m);
+        b.fromBufferAttribute(pos, i1).applyMatrix4(m);
+        c.fromBufferAttribute(pos, i2).applyMatrix4(m);
+        if (cosClamp !== null) {
+          e1.copy(b).sub(a);
+          e2.copy(c).sub(a);
+          triN.copy(e1.cross(e2)).normalize();
+          if (triN.dot(refN) < cosClamp) continue;
+        }
+        layer = layer || ensurePaintLayer(viewer, mesh, opts.texture_size);
+        const [u0, v0] = uvToPixel(layer, uvAttr.getX(i0), uvAttr.getY(i0));
+        const [u1, v1] = uvToPixel(layer, uvAttr.getX(i1), uvAttr.getY(i1));
+        const [u2, v2] = uvToPixel(layer, uvAttr.getX(i2), uvAttr.getY(i2));
+        const dim = layer.size;
+        const minU = Math.max(0, Math.floor(Math.min(u0, u1, u2)));
+        const maxU = Math.min(dim - 1, Math.ceil(Math.max(u0, u1, u2)));
+        const minV = Math.max(0, Math.floor(Math.min(v0, v1, v2)));
+        const maxV = Math.min(dim - 1, Math.ceil(Math.max(v0, v1, v2)));
+        if (maxU < minU || maxV < minV) continue;
+        if ((maxU - minU) * (maxV - minV) > dim * dim) continue;
+        const denom = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2);
+        if (Math.abs(denom) < 1e-9) continue;
+        for (let py2 = minV; py2 <= maxV; py2++) {
+          for (let px2 = minU; px2 <= maxU; px2++) {
+            const l0 = ((v1 - v2) * (px2 + 0.5 - u2) + (u2 - u1) * (py2 + 0.5 - v2)) / denom;
+            const l1 = ((v2 - v0) * (px2 + 0.5 - u2) + (u0 - u2) * (py2 + 0.5 - v2)) / denom;
+            const l2 = 1 - l0 - l1;
+            if (l0 < -0.02 || l1 < -0.02 || l2 < -0.02) continue;
+            p.set(
+              a.x * l0 + b.x * l1 + c.x * l2,
+              a.y * l0 + b.y * l1 + c.y * l2,
+              a.z * l0 + b.z * l1 + c.z * l2
+            );
+            const d2 = p.distanceToSquared(center);
+            if (d2 > r22) continue;
+            let tN;
+            if (square) {
+              p.sub(center);
+              const du = Math.abs(p.dot(tang1));
+              const dv = Math.abs(p.dot(tang2));
+              tN = Math.max(du, dv) / radius;
+              if (tN > 1) continue;
+            } else {
+              tN = Math.sqrt(d2) / radius;
+              if (tN > 1) continue;
+            }
+            const soft = tN <= hardness ? 1 : falloffFn((tN - hardness) / Math.max(1e-6, 1 - hardness));
+            const alpha = opacity * soft;
+            if (alpha <= 4e-3) continue;
+            const key = py2 * dim + px2;
+            const prev = acc.get(key);
+            if (prev === void 0 || alpha > prev) acc.set(key, alpha);
+            if (px2 < minPX) minPX = px2;
+            if (px2 > maxPX) maxPX = px2;
+            if (py2 < minPY) minPY = py2;
+            if (py2 > maxPY) maxPY = py2;
+          }
+        }
+      }
+    }
+    if (layer && acc.size > 0) {
+      const hex = parseInt(color.getHexString(), 16);
+      const cr = hex >> 16 & 255, cg = hex >> 8 & 255, cb = hex & 255;
+      const dim = layer.size;
+      const w = maxPX - minPX + 1;
+      const img = layer.ctx.getImageData(minPX, minPY, w, maxPY - minPY + 1);
+      const data = img.data;
+      const ledger = gestureAlphaMap(opts.undo_group, layer);
+      let painted = 0;
+      for (const [key, alpha] of acc) {
+        let eff = alpha;
+        if (ledger) {
+          const prev = ledger.get(key) || 0;
+          if (alpha <= prev + 4e-3) continue;
+          eff = (alpha - prev) / (1 - prev);
+          ledger.set(key, alpha);
+        }
+        const px2 = key % dim;
+        const py2 = (key - px2) / dim;
+        const o = ((py2 - minPY) * w + (px2 - minPX)) * 4;
+        data[o] = Math.round(data[o] * (1 - eff) + cr * eff);
+        data[o + 1] = Math.round(data[o + 1] * (1 - eff) + cg * eff);
+        data[o + 2] = Math.round(data[o + 2] * (1 - eff) + cb * eff);
+        data[o + 3] = 255;
+        alphaSum += alpha;
+        painted++;
+      }
+      stashPaintPatch("paint", layer, minPX, minPY, img.width, img.height);
+      layer.ctx.putImageData(img, minPX, minPY);
+      pixels += painted;
+      rasterized += acc.size;
+      paintedLayers.add(layer);
+    }
+  }
+  if (uvLess > 0 && paintedLayers.size === 0 && rasterized === 0) {
+    throw new Error(
+      "The touched meshes have no UV coordinates, so texture painting has nowhere to land. Paint works on primitives (add_primitive) and UV-mapped models; STL/PLY meshes have no UVs."
+    );
+  }
+  if (rasterized === 0) {
+    throw new Error(
+      "Brush touched no surface. Check center (world coords \u2014 use pick, raycast or get_bounds) and radius (or radius_rel)." + wrongObjectHint(viewer, points[0])
+    );
+  }
+  for (const layer of paintedLayers) layer.texture.needsUpdate = true;
+  const entry = viewer._activeEntry();
+  if (entry) entry.modified = true;
+  viewer.invalidate();
+  const meanAlpha = pixels > 0 ? Math.round(alphaSum / pixels * 1e3) / 1e3 : 0;
+  const result = {
+    painted: pixels,
+    // Honest visibility feedback: how strongly the average touched texel
+    // actually changed. Low meanAlpha = technically-painted-but-invisible —
+    // catch it HERE instead of spending a verification render (T1 finding).
+    meanAlpha,
+    meshes: paintedLayers.size,
+    stamps: points.length,
+    color: "#" + color.getHexString()
+  };
+  const notes = [];
+  if (meanAlpha < 0.05) {
+    notes.push(`meanAlpha ${meanAlpha} \u2014 this paint is nearly invisible. Raise opacity and/or hardness (soft falloff scales alpha toward 0 at the rim).`);
+  }
+  const budget = paintBudgetInfo();
+  if (budget.usedFraction >= 0.75) {
+    notes.push(`Paint budget ${Math.round(budget.usedFraction * 100)}% used \u2014 prefer smaller texture_size tiers or clear_paint unused layers.`);
+  }
+  if (opts.texture_size) {
+    for (const layer of paintedLayers) {
+      if (layer.size !== opts.texture_size) {
+        notes.push(`texture_size ${opts.texture_size} ignored \u2014 the layer already exists at ${layer.size}. Use resize_texture to change it.`);
+        break;
+      }
+    }
+  }
+  const mode = viewer.getRenderMode && viewer.getRenderMode();
+  if (mode === "solid" || mode === "normals") {
+    notes.push(`Render mode '${mode}' hides textures \u2014 set_render_mode textured to SEE the paint.`);
+  }
+  if (notes.length) result.note = notes.join(" ");
+  return result;
+}
+function fillPaint(viewer, opts) {
+  assertNotSkinned(viewer);
+  const meshes = activeMeshes(viewer);
+  const color = new Color(opts.color !== void 0 ? String(opts.color) : "#808080");
+  let filled = 0;
+  for (const mesh of meshes) {
+    if (!mesh.geometry.getAttribute("uv")) continue;
+    const layer = ensurePaintLayer(viewer, mesh, opts.texture_size);
+    layer.ctx.fillStyle = "#" + color.getHexString();
+    layer.ctx.fillRect(0, 0, layer.size, layer.size);
+    layer.texture.needsUpdate = true;
+    filled++;
+  }
+  if (filled === 0) {
+    throw new Error("No UV-mapped meshes to paint (see paint's UV requirement).");
+  }
+  const entry = viewer._activeEntry();
+  if (entry) entry.modified = true;
+  viewer.invalidate();
+  return { filledMeshes: filled, color: "#" + color.getHexString() };
+}
+function ensureRepairableLayer(viewer, mesh, size) {
+  const material = paintTargetMaterial(mesh);
+  const prev = material.map;
+  if (prev && !(material.userData && material.userData._mvPaint)) {
+    const img = prev.image;
+    const drawable = img && (typeof HTMLImageElement !== "undefined" && img instanceof HTMLImageElement || typeof HTMLCanvasElement !== "undefined" && img instanceof HTMLCanvasElement || typeof ImageBitmap !== "undefined" && img instanceof ImageBitmap);
+    if (!drawable) {
+      throw new Error(
+        "This material's texture is GPU-only (compressed KTX2 or unreadable) and cannot be read back for repair. Repaint the area with paint/fill_paint instead."
+      );
+    }
+  }
+  return ensurePaintLayer(viewer, mesh, size);
+}
+function brushFootprint(mesh, layer, center, radius, hardness, falloffFn) {
+  const geometry = mesh.geometry;
+  const uvAttr = geometry.getAttribute("uv");
+  if (!uvAttr) return null;
+  mesh.updateMatrixWorld(true);
+  const m = mesh.matrixWorld;
+  const pos = geometry.getAttribute("position");
+  const index = geometry.getIndex();
+  const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const p = new Vector3();
+  const e1 = new Vector3(), e2 = new Vector3();
+  const r22 = radius * radius;
+  const dim = layer.size;
+  const acc = /* @__PURE__ */ new Map();
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const i0 = idxOf(t2, 0), i1 = idxOf(t2, 1), i2 = idxOf(t2, 2);
+    a.fromBufferAttribute(pos, i0).applyMatrix4(m);
+    b.fromBufferAttribute(pos, i1).applyMatrix4(m);
+    c.fromBufferAttribute(pos, i2).applyMatrix4(m);
+    p.copy(a).add(b).add(c).divideScalar(3);
+    const triR = Math.max(a.distanceTo(p), b.distanceTo(p), c.distanceTo(p));
+    if (p.distanceToSquared(center) > (radius + triR) ** 2) continue;
+    e1.copy(b).sub(a);
+    e2.copy(c).sub(a);
+    const triN = e1.clone().cross(e2).normalize();
+    const [u0, v0] = uvToPixel(layer, uvAttr.getX(i0), uvAttr.getY(i0));
+    const [u1, v1] = uvToPixel(layer, uvAttr.getX(i1), uvAttr.getY(i1));
+    const [u2, v2] = uvToPixel(layer, uvAttr.getX(i2), uvAttr.getY(i2));
+    const minU = Math.max(0, Math.floor(Math.min(u0, u1, u2)));
+    const maxU = Math.min(dim - 1, Math.ceil(Math.max(u0, u1, u2)));
+    const minV = Math.max(0, Math.floor(Math.min(v0, v1, v2)));
+    const maxV = Math.min(dim - 1, Math.ceil(Math.max(v0, v1, v2)));
+    if (maxU < minU || maxV < minV) continue;
+    if ((maxU - minU) * (maxV - minV) > dim * dim) continue;
+    const denom = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2);
+    if (Math.abs(denom) < 1e-9) continue;
+    for (let py2 = minV; py2 <= maxV; py2++) {
+      for (let px2 = minU; px2 <= maxU; px2++) {
+        const l0 = ((v1 - v2) * (px2 + 0.5 - u2) + (u2 - u1) * (py2 + 0.5 - v2)) / denom;
+        const l1 = ((v2 - v0) * (px2 + 0.5 - u2) + (u0 - u2) * (py2 + 0.5 - v2)) / denom;
+        const l2 = 1 - l0 - l1;
+        if (l0 < -0.02 || l1 < -0.02 || l2 < -0.02) continue;
+        p.set(
+          a.x * l0 + b.x * l1 + c.x * l2,
+          a.y * l0 + b.y * l1 + c.y * l2,
+          a.z * l0 + b.z * l1 + c.z * l2
+        );
+        const d2 = p.distanceToSquared(center);
+        if (d2 > r22) continue;
+        const tN = Math.sqrt(d2) / radius;
+        const soft = tN <= hardness ? 1 : falloffFn((tN - hardness) / Math.max(1e-6, 1 - hardness));
+        if (soft <= 4e-3) continue;
+        const key = py2 * dim + px2;
+        const prev = acc.get(key);
+        if (!prev || soft > prev.alpha) {
+          acc.set(key, {
+            alpha: soft,
+            world: [p.x, p.y, p.z],
+            n: [triN.x, triN.y, triN.z]
+          });
+        }
+      }
+    }
+  }
+  return acc;
+}
+function blurPaint(viewer, opts = {}) {
+  assertNotSkinned(viewer);
+  const meshes = activeMeshes(viewer);
+  beginPaintOp("blur_paint", opts.undo_group);
+  const radius = resolveRadius(viewer, opts, "blur_paint");
+  const strength = opts.strength !== void 0 ? Math.max(0, Math.min(1, opts.strength)) : 0.5;
+  const center = new Vector3(...opts.center || []);
+  if (!opts.center || opts.center.length !== 3) {
+    throw new Error("blur_paint requires center: [x,y,z] (world \u2014 use pick).");
+  }
+  let blurred = 0;
+  let blurAlphaSum = 0;
+  for (const mesh of meshes) {
+    if (!mesh.geometry.getAttribute("uv")) continue;
+    const layer = ensureRepairableLayer(viewer, mesh, opts.texture_size);
+    const foot = brushFootprint(mesh, layer, center, radius, 0.8, FALLOFFS.smooth);
+    if (!foot || foot.size === 0) continue;
+    const dim = layer.size;
+    let minX = dim, maxX = 0, minY = dim, maxY = 0;
+    for (const key of foot.keys()) {
+      const px2 = key % dim, py2 = (key - px2) / dim;
+      if (px2 < minX) minX = px2;
+      if (px2 > maxX) maxX = px2;
+      if (py2 < minY) minY = py2;
+      if (py2 > maxY) maxY = py2;
+    }
+    const pad = 4;
+    minX = Math.max(0, minX - pad);
+    minY = Math.max(0, minY - pad);
+    maxX = Math.min(dim - 1, maxX + pad);
+    maxY = Math.min(dim - 1, maxY + pad);
+    const w = maxX - minX + 1, h = maxY - minY + 1;
+    const srcImg = layer.ctx.getImageData(minX, minY, w, h);
+    const dstImg = layer.ctx.getImageData(minX, minY, w, h);
+    const src = srcImg.data, dst = dstImg.data;
+    const sigma = Math.max(1, Math.round(strength * 6));
+    const inFoot = (px2, py2) => foot.has(py2 * dim + px2);
+    for (const [key, rec] of foot) {
+      const px2 = key % dim, py2 = (key - px2) / dim;
+      let r = 0, g3 = 0, b22 = 0, wsum = 0;
+      for (let dy = -sigma; dy <= sigma; dy++) {
+        for (let dx = -sigma; dx <= sigma; dx++) {
+          const qx = px2 + dx, qy = py2 + dy;
+          if (qx < minX || qx > maxX || qy < minY || qy > maxY) continue;
+          if (!inFoot(qx, qy)) continue;
+          const g22 = Math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma));
+          const o2 = ((qy - minY) * w + (qx - minX)) * 4;
+          r += src[o2] * g22;
+          g3 += src[o2 + 1] * g22;
+          b22 += src[o2 + 2] * g22;
+          wsum += g22;
+        }
+      }
+      if (wsum <= 0) continue;
+      const o = ((py2 - minY) * w + (px2 - minX)) * 4;
+      const alpha = rec.alpha * strength;
+      dst[o] = Math.round(dst[o] * (1 - alpha) + r / wsum * alpha);
+      dst[o + 1] = Math.round(dst[o + 1] * (1 - alpha) + g3 / wsum * alpha);
+      dst[o + 2] = Math.round(dst[o + 2] * (1 - alpha) + b22 / wsum * alpha);
+      blurred++;
+      blurAlphaSum += alpha;
+    }
+    stashPaintPatch("blur_paint", layer, minX, minY, dstImg.width, dstImg.height);
+    layer.ctx.putImageData(dstImg, minX, minY);
+    layer.texture.needsUpdate = true;
+  }
+  if (blurred === 0) {
+    throw new Error("Blur brush touched no painted surface \u2014 check center (world coords \u2014 use pick) and radius; the mesh needs UVs and a readable texture." + wrongObjectHint(viewer, opts.center));
+  }
+  const entry = viewer._activeEntry();
+  if (entry) entry.modified = true;
+  viewer.invalidate();
+  return {
+    blurred,
+    meanAlpha: Math.round(blurAlphaSum / blurred * 1e3) / 1e3,
+    strength
+  };
+}
+function clonePaint(viewer, opts = {}) {
+  assertNotSkinned(viewer);
+  const meshes = activeMeshes(viewer);
+  beginPaintOp("clone_paint", opts.undo_group);
+  const radius = resolveRadius(viewer, opts, "clone_paint");
+  if (!opts.from || opts.from.length !== 3 || !opts.to || opts.to.length !== 3) {
+    throw new Error("clone_paint requires from:[x,y,z] and to:[x,y,z] (world \u2014 use pick on a clean area and on the defect).");
+  }
+  const from = new Vector3(...opts.from);
+  const to = new Vector3(...opts.to);
+  const offset = from.clone().sub(to);
+  const strength = opts.strength !== void 0 ? Math.max(0, Math.min(1, opts.strength)) : 1;
+  const falloffFn = FALLOFFS[opts.falloff || "smooth"] || FALLOFFS.smooth;
+  let cloned = 0;
+  let alphaSum = 0;
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const p = new Vector3();
+  for (const mesh of meshes) {
+    const geometry = mesh.geometry;
+    const uvAttr = geometry.getAttribute("uv");
+    if (!uvAttr) continue;
+    const layer = ensureRepairableLayer(viewer, mesh, opts.texture_size);
+    mesh.updateMatrixWorld(true);
+    const m = mesh.matrixWorld;
+    const pos = geometry.getAttribute("position");
+    const index = geometry.getIndex();
+    const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+    const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+    const srcTris = [];
+    let srcNormal = null, srcD2 = Infinity;
+    const e1 = new Vector3(), e2 = new Vector3();
+    for (let t2 = 0; t2 < triCount; t2++) {
+      a.fromBufferAttribute(pos, idxOf(t2, 0)).applyMatrix4(m);
+      b.fromBufferAttribute(pos, idxOf(t2, 1)).applyMatrix4(m);
+      c.fromBufferAttribute(pos, idxOf(t2, 2)).applyMatrix4(m);
+      p.copy(a).add(b).add(c).divideScalar(3);
+      const triR = Math.max(a.distanceTo(p), b.distanceTo(p), c.distanceTo(p));
+      const d2 = p.distanceToSquared(from);
+      if (d2 > (radius * 1.5 + triR) ** 2) continue;
+      srcTris.push(t2);
+      if (d2 < srcD2) {
+        srcD2 = d2;
+        e1.copy(b).sub(a);
+        e2.copy(c).sub(a);
+        srcNormal = e1.clone().cross(e2).normalize();
+      }
+    }
+    if (!srcTris.length) continue;
+    const foot = brushFootprint(
+      mesh,
+      layer,
+      to,
+      radius,
+      opts.hardness !== void 0 ? opts.hardness : 0.6,
+      falloffFn
+    );
+    if (!foot || foot.size === 0) continue;
+    let dstNormal = null, dstD2 = Infinity;
+    for (let t2 = 0; t2 < triCount; t2++) {
+      a.fromBufferAttribute(pos, idxOf(t2, 0)).applyMatrix4(m);
+      b.fromBufferAttribute(pos, idxOf(t2, 1)).applyMatrix4(m);
+      c.fromBufferAttribute(pos, idxOf(t2, 2)).applyMatrix4(m);
+      p.copy(a).add(b).add(c).divideScalar(3);
+      const d2 = p.distanceToSquared(to);
+      if (d2 < dstD2) {
+        dstD2 = d2;
+        e1.copy(b).sub(a);
+        e2.copy(c).sub(a);
+        dstNormal = e1.clone().cross(e2).normalize();
+      }
+    }
+    if (srcNormal && dstNormal && srcNormal.dot(dstNormal) < Math.cos(Math.PI / 4)) {
+      throw new Error("clone_paint: source and destination surfaces face different directions (> 45\xB0) \u2014 pure-translation cloning would smear unrelated texture. Pick a source on a similarly-oriented surface.");
+    }
+    const snapshot = layer.ctx.getImageData(0, 0, layer.size, layer.size);
+    const snap = snapshot.data;
+    const dim = layer.size;
+    const tri = { a: new Vector3(), b: new Vector3(), c: new Vector3() };
+    const bary = new Vector3();
+    const target = new Vector3();
+    const sampleSource = (world) => {
+      target.set(world[0] + offset.x, world[1] + offset.y, world[2] + offset.z);
+      let bestD = Infinity, bestUV = null;
+      const closest = new Vector3();
+      const triangle4 = new Triangle();
+      for (const t2 of srcTris) {
+        const i0 = idxOf(t2, 0), i1 = idxOf(t2, 1), i2 = idxOf(t2, 2);
+        tri.a.fromBufferAttribute(pos, i0).applyMatrix4(m);
+        tri.b.fromBufferAttribute(pos, i1).applyMatrix4(m);
+        tri.c.fromBufferAttribute(pos, i2).applyMatrix4(m);
+        triangle4.set(tri.a, tri.b, tri.c);
+        triangle4.closestPointToPoint(target, closest);
+        const d = closest.distanceToSquared(target);
+        if (d < bestD) {
+          bestD = d;
+          triangle4.getBarycoord(closest, bary);
+          const u2 = uvAttr.getX(i0) * bary.x + uvAttr.getX(i1) * bary.y + uvAttr.getX(i2) * bary.z;
+          const vv = uvAttr.getY(i0) * bary.x + uvAttr.getY(i1) * bary.y + uvAttr.getY(i2) * bary.z;
+          bestUV = [u2, vv];
+        }
+      }
+      if (!bestUV || bestD > radius * radius) return null;
+      const [sx, sy] = uvToPixel(layer, bestUV[0], bestUV[1]);
+      const px2 = Math.max(0, Math.min(dim - 1, Math.round(sx)));
+      const py2 = Math.max(0, Math.min(dim - 1, Math.round(sy)));
+      const o = (py2 * dim + px2) * 4;
+      return [snap[o], snap[o + 1], snap[o + 2]];
+    };
+    let minX = dim, maxX = 0, minY = dim, maxY = 0;
+    for (const key of foot.keys()) {
+      const px2 = key % dim, py2 = (key - px2) / dim;
+      if (px2 < minX) minX = px2;
+      if (px2 > maxX) maxX = px2;
+      if (py2 < minY) minY = py2;
+      if (py2 > maxY) maxY = py2;
+    }
+    const w = maxX - minX + 1;
+    const img = layer.ctx.getImageData(minX, minY, w, maxY - minY + 1);
+    const data = img.data;
+    for (const [key, rec] of foot) {
+      const color = sampleSource(rec.world);
+      if (!color) continue;
+      const px2 = key % dim, py2 = (key - px2) / dim;
+      const o = ((py2 - minY) * w + (px2 - minX)) * 4;
+      const alpha = rec.alpha * strength;
+      data[o] = Math.round(data[o] * (1 - alpha) + color[0] * alpha);
+      data[o + 1] = Math.round(data[o + 1] * (1 - alpha) + color[1] * alpha);
+      data[o + 2] = Math.round(data[o + 2] * (1 - alpha) + color[2] * alpha);
+      data[o + 3] = 255;
+      cloned++;
+      alphaSum += alpha;
+    }
+    stashPaintPatch("clone_paint", layer, minX, minY, img.width, img.height);
+    layer.ctx.putImageData(img, minX, minY);
+    layer.texture.needsUpdate = true;
+  }
+  if (cloned === 0) {
+    throw new Error("Clone brush landed nothing \u2014 check from/to (world coords \u2014 use pick on a clean source area and on the defect) and radius; clone_paint works within ONE object's texture." + wrongObjectHint(viewer, opts.to));
+  }
+  const entry = viewer._activeEntry();
+  if (entry) entry.modified = true;
+  viewer.invalidate();
+  return { cloned, meanAlpha: Math.round(alphaSum / cloned * 1e3) / 1e3 };
+}
+function resizeTexture(viewer, opts = {}) {
+  const meshes = activeMeshes(viewer);
+  const size = opts.size;
+  if (!(size >= 64 && size <= PAINT_MAX_SIZE)) {
+    throw new Error(`resize_texture requires size 64..${PAINT_MAX_SIZE} (or tiers low/medium/high/xhigh).`);
+  }
+  const filter = opts.filter || "smooth";
+  let resized = 0, before = null;
+  for (const mesh of meshes) {
+    const stash = mesh._mvOriginalMaterial || mesh.material;
+    const material = Array.isArray(stash) ? null : stash;
+    const layer = material && material.userData && material.userData._mvPaint;
+    if (!layer || layer.size === size) continue;
+    const delta = size * size - layer.size * layer.size;
+    if (delta > 0 && paintTexelsAllocated + delta > PAINT_TEXEL_BUDGET) {
+      throw new Error("Paint budget exceeded by the resize \u2014 clear_paint unused layers or choose a smaller size.");
+    }
+    before = before || layer.size;
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = filter !== "nearest";
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(layer.canvas, 0, 0, size, size);
+    paintTexelsAllocated = Math.max(0, paintTexelsAllocated + delta);
+    layer.texture.dispose();
+    const texture = new CanvasTexture(canvas);
+    texture.colorSpace = SRGBColorSpace;
+    texture.flipY = layer.flipY;
+    applyLayerFiltering(texture, size);
+    material.map = texture;
+    material.needsUpdate = true;
+    Object.assign(layer, { canvas, ctx, texture, size });
+    resized++;
+  }
+  if (resized === 0) {
+    throw new Error("No paint layers to resize on the active object (paint/fill_paint first; resize_texture only touches PAINT layers \u2014 authored textures are downsampled at export instead).");
+  }
+  viewer.invalidate();
+  return { resizedLayers: resized, from: before, to: size, ...paintBudgetInfo() };
+}
+function applyLayerFiltering(texture, size) {
+  if (size >= 2048) {
+    texture.generateMipmaps = false;
+    texture.minFilter = LinearFilter;
+  }
 }
 function paintedMeshNames(model) {
   const names = [];
@@ -43180,8 +44390,4822 @@ function releasePaintBudget(model) {
     }
   });
 }
+function pick(viewer, x, y, width, height) {
+  const cam = viewer._camera;
+  const prevAspect = cam.aspect;
+  if (width && height) {
+    cam.aspect = width / height;
+    cam.updateProjectionMatrix();
+  }
+  try {
+    const raycaster = new Raycaster();
+    raycaster.setFromCamera(
+      new Vector2(x * 2 - 1, -(y * 2 - 1)),
+      cam
+    );
+    return castInto(viewer, raycaster);
+  } finally {
+    if (width && height) {
+      cam.aspect = prevAspect;
+      cam.updateProjectionMatrix();
+    }
+  }
+}
+function raycast(viewer, origin, direction) {
+  const raycaster = new Raycaster(
+    new Vector3(...origin),
+    new Vector3(...direction).normalize()
+  );
+  return castInto(viewer, raycaster);
+}
+function castInto(viewer, raycaster) {
+  viewer._scene.updateMatrixWorld(true);
+  const hits = raycaster.intersectObjects(viewer._visibleMeshes(), false);
+  if (hits.length === 0) {
+    return {
+      hit: false,
+      hint: "Ray hit nothing. frame_all or orbit first so the target is in view, then pick coordinates read off a FRESH screenshot (pass its width/height)."
+    };
+  }
+  const h = hits[0];
+  const entry = viewer._entryForNode(h.object);
+  const n2 = h.face ? h.face.normal.clone().applyMatrix3(
+    new Matrix3().getNormalMatrix(h.object.matrixWorld)
+  ).normalize() : null;
+  const r43 = (v) => Math.round(v * 1e4) / 1e4;
+  return {
+    hit: true,
+    point: [r43(h.point.x), r43(h.point.y), r43(h.point.z)],
+    normal: n2 ? [r43(n2.x), r43(n2.y), r43(n2.z)] : null,
+    // UV at the hit — THE diagnostic for texture-to-mesh misalignment:
+    // pick a 3D feature, then render_texture {marker: this uv} to SEE where
+    // that surface point samples in texture space.
+    uv: h.uv ? [r43(h.uv.x), r43(h.uv.y)] : null,
+    distance: r43(h.distance),
+    objectId: entry ? entry.id : null,
+    objectName: entry ? entry.name : null
+  };
+}
+function renderTexture(viewer, opts = {}) {
+  const meshes = activeMeshes(viewer);
+  const size = Math.max(128, Math.min(2048, opts.size || 1024));
+  let mesh = null, material = null, image = null;
+  for (const m of meshes) {
+    const stash = m._mvOriginalMaterial || m.material;
+    const mat = Array.isArray(stash) ? stash[0] : stash;
+    const img = mat && mat.map && mat.map.image;
+    const drawable = img && (typeof HTMLImageElement !== "undefined" && img instanceof HTMLImageElement || typeof HTMLCanvasElement !== "undefined" && img instanceof HTMLCanvasElement || typeof ImageBitmap !== "undefined" && img instanceof ImageBitmap);
+    if (drawable) {
+      mesh = m;
+      material = mat;
+      image = img;
+      break;
+    }
+  }
+  if (!mesh) {
+    throw new Error("No drawable texture on the active object (compressed KTX2 or untextured). fill_paint first to create a readable layer.");
+  }
+  const flipY = material.map.flipY;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#222";
+  ctx.fillRect(0, 0, size, size);
+  ctx.drawImage(image, 0, 0, size, size);
+  const px2 = (u2) => u2 * size;
+  const py2 = (v) => (flipY ? 1 - v : v) * size;
+  if (opts.wireframe !== false) {
+    const uv = mesh.geometry.getAttribute("uv");
+    const index = mesh.geometry.getIndex();
+    const pos = mesh.geometry.getAttribute("position");
+    const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+    const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+    const step = Math.max(1, Math.ceil(triCount / 4e4));
+    ctx.strokeStyle = "rgba(0, 255, 140, 0.28)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let t2 = 0; t2 < triCount; t2 += step) {
+      const a = idxOf(t2, 0), b = idxOf(t2, 1), c = idxOf(t2, 2);
+      ctx.moveTo(px2(uv.getX(a)), py2(uv.getY(a)));
+      ctx.lineTo(px2(uv.getX(b)), py2(uv.getY(b)));
+      ctx.lineTo(px2(uv.getX(c)), py2(uv.getY(c)));
+      ctx.closePath();
+    }
+    ctx.stroke();
+  }
+  if (opts.outline_island_of) {
+    const hit = islandAtUV(mesh, opts.outline_island_of);
+    if (hit) {
+      const { ofVertex } = uvIslands(mesh.geometry);
+      const uv = mesh.geometry.getAttribute("uv");
+      const index = mesh.geometry.getIndex();
+      const pos = mesh.geometry.getAttribute("position");
+      const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+      const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+      ctx.strokeStyle = "rgba(255, 160, 0, 0.9)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let t2 = 0; t2 < triCount; t2++) {
+        const a = idxOf(t2, 0);
+        if (ofVertex[a] !== hit.island) continue;
+        const b22 = idxOf(t2, 1), c2 = idxOf(t2, 2);
+        ctx.moveTo(px2(uv.getX(a)), py2(uv.getY(a)));
+        ctx.lineTo(px2(uv.getX(b22)), py2(uv.getY(b22)));
+        ctx.lineTo(px2(uv.getX(c2)), py2(uv.getY(c2)));
+        ctx.closePath();
+      }
+      ctx.stroke();
+    }
+  }
+  const markers = opts.markers || (opts.marker ? [opts.marker] : []);
+  const mr = Math.max(4, Math.min(60, opts.marker_size || 14));
+  markers.forEach((m, i) => {
+    const x = px2(m[0]), y = py2(m[1]);
+    ctx.strokeStyle = "#ff3355";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x, y, mr, 0, Math.PI * 2);
+    ctx.moveTo(x - mr * 1.7, y);
+    ctx.lineTo(x - mr, y);
+    ctx.moveTo(x + mr, y);
+    ctx.lineTo(x + mr * 1.7, y);
+    ctx.moveTo(x, y - mr * 1.7);
+    ctx.lineTo(x, y - mr);
+    ctx.moveTo(x, y + mr);
+    ctx.lineTo(x, y + mr * 1.7);
+    ctx.stroke();
+    if (opts.labels !== false) {
+      ctx.fillStyle = "#ff3355";
+      ctx.font = "bold 15px monospace";
+      ctx.fillText(
+        `M${i} (${m[0].toFixed(3)}, ${m[1].toFixed(3)})`,
+        x + mr * 1.8,
+        y - mr * 1.2
+      );
+    }
+  });
+  if (opts.crop_center) {
+    const half = Math.max(0.01, Math.min(0.5, (opts.crop_size || 0.2) / 2));
+    const cx = opts.crop_center[0], cy = opts.crop_center[1];
+    const sxU = Math.max(0, Math.min(1 - 2 * half, cx - half));
+    const syV = Math.max(0, Math.min(1 - 2 * half, cy - half));
+    const sx = sxU * size;
+    const sy = (flipY ? 1 - syV - 2 * half : syV) * size;
+    const crop = document.createElement("canvas");
+    crop.width = crop.height = size;
+    const cctx = crop.getContext("2d");
+    cctx.imageSmoothingEnabled = false;
+    cctx.drawImage(canvas, sx, sy, 2 * half * size, 2 * half * size, 0, 0, size, size);
+    cctx.strokeStyle = "#ffd75e";
+    cctx.font = "bold 14px monospace";
+    cctx.fillStyle = "#ffd75e";
+    cctx.fillText(`crop u:[${sxU.toFixed(3)}..${(sxU + 2 * half).toFixed(3)}] v:[${syV.toFixed(3)}..${(syV + 2 * half).toFixed(3)}]`, 8, 18);
+    return crop.toDataURL("image/png");
+  }
+  return canvas.toDataURL("image/png");
+}
+function uvIslands(geometry) {
+  if (geometry.userData._mvUvIslands) return geometry.userData._mvUvIslands;
+  const pos = geometry.getAttribute("position");
+  const index = geometry.getIndex();
+  const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const parent = new Int32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) parent[i] = i;
+  const find = (x) => {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]];
+      x = parent[x];
+    }
+    return x;
+  };
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const a = find(idxOf(t2, 0));
+    const b = find(idxOf(t2, 1));
+    const c = find(idxOf(t2, 2));
+    parent[b] = a;
+    parent[c] = a;
+  }
+  const ofVertex = new Int32Array(pos.count);
+  const idOf = /* @__PURE__ */ new Map();
+  for (let i = 0; i < pos.count; i++) {
+    const root = find(i);
+    let id = idOf.get(root);
+    if (id === void 0) {
+      id = idOf.size;
+      idOf.set(root, id);
+    }
+    ofVertex[i] = id;
+  }
+  const islands = { ofVertex, count: idOf.size };
+  geometry.userData._mvUvIslands = islands;
+  return islands;
+}
+function islandAtUV(mesh, uvPoint) {
+  const geometry = mesh.geometry;
+  const uv = geometry.getAttribute("uv");
+  if (!uv) return null;
+  const { ofVertex } = uvIslands(geometry);
+  let best = -1, bestD = Infinity;
+  for (let i = 0; i < uv.count; i++) {
+    const du = uv.getX(i) - uvPoint[0];
+    const dv = uv.getY(i) - uvPoint[1];
+    const d = du * du + dv * dv;
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best >= 0 ? { island: ofVertex[best], distance: Math.sqrt(bestD) } : null;
+}
+function islandOccupancy(mesh, res = 256) {
+  const geometry = mesh.geometry;
+  const uv = geometry.getAttribute("uv");
+  const index = geometry.getIndex();
+  const pos = geometry.getAttribute("position");
+  const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const { ofVertex } = uvIslands(geometry);
+  const grid = new Int32Array(res * res).fill(-1);
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const i0 = idxOf(t2, 0), i1 = idxOf(t2, 1), i2 = idxOf(t2, 2);
+    const island = ofVertex[i0];
+    const xs = [uv.getX(i0) * res, uv.getX(i1) * res, uv.getX(i2) * res];
+    const ys = [uv.getY(i0) * res, uv.getY(i1) * res, uv.getY(i2) * res];
+    const minX = Math.max(0, Math.floor(Math.min(...xs)));
+    const maxX = Math.min(res - 1, Math.ceil(Math.max(...xs)));
+    const minY = Math.max(0, Math.floor(Math.min(...ys)));
+    const maxY = Math.min(res - 1, Math.ceil(Math.max(...ys)));
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        grid[y * res + x] = island;
+      }
+    }
+  }
+  return grid;
+}
+function transformUV(viewer, opts = {}) {
+  assertNotSkinned(viewer);
+  const meshes = activeMeshes(viewer);
+  const offset = opts.offset || [0, 0];
+  const scale = opts.scale || [1, 1];
+  const pivot = opts.pivot || [0.5, 0.5];
+  if (offset[0] === 0 && offset[1] === 0 && scale[0] === 1 && scale[1] === 1) {
+    throw new Error("transform_uv needs a non-identity offset and/or scale.");
+  }
+  let count = 0, meshCount = 0;
+  let islandInfo = null;
+  const seen = /* @__PURE__ */ new Set();
+  for (const mesh of meshes) {
+    if (seen.has(mesh.geometry)) continue;
+    seen.add(mesh.geometry);
+    const uv = mesh.geometry.getAttribute("uv");
+    if (!uv) continue;
+    let memberOf = null;
+    if (opts.island_of) {
+      const hit = islandAtUV(mesh, opts.island_of);
+      if (!hit) continue;
+      const { ofVertex, count: islandCount } = uvIslands(mesh.geometry);
+      memberOf = (i) => ofVertex[i] === hit.island;
+      let members = 0;
+      for (let i = 0; i < uv.count; i++) if (memberOf(i)) members++;
+      islandInfo = { island: hit.island, of: islandCount, vertices: members };
+    }
+    for (let i = 0; i < uv.count; i++) {
+      if (memberOf && !memberOf(i)) continue;
+      uv.setXY(
+        i,
+        pivot[0] + (uv.getX(i) - pivot[0]) * scale[0] + offset[0],
+        pivot[1] + (uv.getY(i) - pivot[1]) * scale[1] + offset[1]
+      );
+      count++;
+    }
+    uv.needsUpdate = true;
+    meshCount++;
+  }
+  if (meshCount === 0) throw new Error("Active object has no UV coordinates.");
+  if (opts.island_of && count === 0) {
+    throw new Error("No UV island found near island_of \u2014 pass a uv from pick.");
+  }
+  const entry = viewer._activeEntry();
+  if (entry) {
+    entry.modified = true;
+    entry.geometryRev++;
+  }
+  viewer.invalidate();
+  const result = {
+    meshes: meshCount,
+    uvsTransformed: count,
+    offset,
+    scale,
+    pivot,
+    note: "UV edits persist for the session and export with the model; `reset` does NOT undo them (reload the file to restore). Verify with render_texture/get_texture + a 3D screenshot."
+  };
+  if (islandInfo) result.island = islandInfo;
+  return result;
+}
+function previewUVTransform(viewer, opts = {}) {
+  const meshes = activeMeshes(viewer);
+  const offset = opts.offset || [0, 0];
+  const scale = opts.scale || [1, 1];
+  const pivot = opts.pivot || [0.5, 0.5];
+  const res = 256;
+  for (const mesh of meshes) {
+    const uv = mesh.geometry.getAttribute("uv");
+    if (!uv) continue;
+    const grid = islandOccupancy(mesh, res);
+    const { ofVertex } = uvIslands(mesh.geometry);
+    let scopeIsland = null;
+    if (opts.island_of) {
+      const hit = islandAtUV(mesh, opts.island_of);
+      if (!hit) continue;
+      scopeIsland = hit.island;
+    }
+    let inside = 0, bleed = 0, out = 0;
+    for (let i = 0; i < uv.count; i++) {
+      if (scopeIsland !== null && ofVertex[i] !== scopeIsland) continue;
+      const u2 = pivot[0] + (uv.getX(i) - pivot[0]) * scale[0] + offset[0];
+      const v2 = pivot[1] + (uv.getY(i) - pivot[1]) * scale[1] + offset[1];
+      if (u2 < 0 || u2 > 1 || v2 < 0 || v2 > 1) {
+        out++;
+        continue;
+      }
+      const cell = grid[Math.min(res - 1, Math.floor(v2 * res)) * res + Math.min(res - 1, Math.floor(u2 * res))];
+      const own = scopeIsland !== null ? scopeIsland : ofVertex[i];
+      if (cell !== -1 && cell !== own) bleed++;
+      else inside++;
+    }
+    const total = inside + bleed + out;
+    if (total === 0) continue;
+    const r3v = (x) => Math.round(x / total * 1e3) / 1e3;
+    return {
+      sampled: total,
+      island: scopeIsland,
+      clean: r3v(inside),
+      bleedFraction: r3v(bleed),
+      outOfBoundsFraction: r3v(out),
+      verdict: bleed / total >= 0.08 ? "HIGH bleed \u2014 this transform will visibly contaminate other charts" : bleed / total >= 0.02 ? "moderate bleed \u2014 visible on close inspection (faces: usually disqualifying)" : "low bleed \u2014 safe to apply"
+    };
+  }
+  throw new Error("Active object has no UV coordinates.");
+}
+function getUVIslands(viewer, opts = {}) {
+  const meshes = activeMeshes(viewer);
+  const max2 = Math.max(1, Math.min(32, opts.max || 12));
+  const r43 = (v) => Math.round(v * 1e4) / 1e4;
+  for (const mesh of meshes) {
+    const uv = mesh.geometry.getAttribute("uv");
+    if (!uv) continue;
+    const { ofVertex, count } = uvIslands(mesh.geometry);
+    const sizes = /* @__PURE__ */ new Map();
+    for (let i = 0; i < ofVertex.length; i++) {
+      sizes.set(ofVertex[i], (sizes.get(ofVertex[i]) || 0) + 1);
+    }
+    const stats = /* @__PURE__ */ new Map();
+    for (let i = 0; i < uv.count; i++) {
+      const id = ofVertex[i];
+      let s = stats.get(id);
+      if (!s) {
+        s = { n: 0, minU: 2, maxU: -1, minV: 2, maxV: -1 };
+        stats.set(id, s);
+      }
+      s.n++;
+      const u2 = uv.getX(i), v2 = uv.getY(i);
+      if (u2 < s.minU) s.minU = u2;
+      if (u2 > s.maxU) s.maxU = u2;
+      if (v2 < s.minV) s.minV = v2;
+      if (v2 > s.maxV) s.maxV = v2;
+    }
+    const largest = [...stats.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, max2).map(([id, s]) => ({
+      island: id,
+      vertices: s.n,
+      uvBbox: [r43(s.minU), r43(s.minV), r43(s.maxU), r43(s.maxV)]
+    }));
+    const result = { islandCount: count, totalVertices: ofVertex.length, largest };
+    if (opts.at) {
+      result.at = opts.at.map((uvPoint) => {
+        const hit = islandAtUV(mesh, uvPoint);
+        return hit ? {
+          uv: uvPoint,
+          island: hit.island,
+          vertices: sizes.get(hit.island) || 0
+        } : { uv: uvPoint, island: null };
+      });
+    }
+    if (count > 500) {
+      result.note = `FRAGMENTED atlas (${count} islands): features do not own islands \u2014 island-scoped transform_uv will trade alignment for seam blotches. Repair baked-in misalignment with project_paint (moves TEXELS through screen space) instead.`;
+    }
+    return result;
+  }
+  throw new Error("Active object has no UV coordinates.");
+}
+async function projectPaint(viewer, opts = {}) {
+  assertNotSkinned(viewer);
+  const meshes = activeMeshes(viewer);
+  const radius = resolveRadius(viewer, opts, "project_paint");
+  if (!opts.center || opts.center.length !== 3) {
+    throw new Error("project_paint requires center: [x,y,z] (world \u2014 use pick).");
+  }
+  const center = new Vector3(...opts.center);
+  let so = opts.screen_offset || [0, 0];
+  const hasSurface = Array.isArray(opts.surface_offset) && (opts.surface_offset[0] !== 0 || opts.surface_offset[1] !== 0);
+  if (!hasSurface && so[0] === 0 && so[1] === 0) {
+    throw new Error("project_paint needs a non-zero screen_offset [dx, dy] (pixels in the 1024\xD71024 projection view) OR surface_offset [right, down] (world units \u2014 camera-independent; +down slides content down the surface).");
+  }
+  const strength = opts.strength !== void 0 ? Math.max(0, Math.min(1, opts.strength)) : 1;
+  const falloffFn = FALLOFFS[opts.falloff || "smooth"] || FALLOFFS.smooth;
+  const S = 1024;
+  const dataUrl = viewer.captureImage({ width: S, height: S, hideGround: true });
+  const srcCanvas = document.createElement("canvas");
+  srcCanvas.width = srcCanvas.height = S;
+  const srcCtx = srcCanvas.getContext("2d");
+  await new Promise((resolve, reject) => {
+    const img = new window.Image();
+    img.onload = () => {
+      srcCtx.drawImage(img, 0, 0);
+      resolve();
+    };
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
+  const src = srcCtx.getImageData(0, 0, S, S).data;
+  const cam = viewer._camera;
+  const prevAspect = cam.aspect;
+  cam.aspect = 1;
+  cam.updateProjectionMatrix();
+  const view = cam.matrixWorldInverse.clone();
+  const proj = cam.projectionMatrix.clone();
+  cam.aspect = prevAspect;
+  cam.updateProjectionMatrix();
+  const toScreen = (world2, out) => {
+    out.copy(world2).applyMatrix4(view).applyMatrix4(proj);
+    return [(out.x * 0.5 + 0.5) * S, (1 - (out.y * 0.5 + 0.5)) * S];
+  };
+  let painted = 0, alphaSum = 0;
+  const tmp2 = new Vector3();
+  if (hasSurface) {
+    const camRight = new Vector3().setFromMatrixColumn(cam.matrixWorld, 0).normalize();
+    const [cx, cy] = toScreen(center, tmp2);
+    const [rx, ry] = toScreen(center.clone().add(camRight), tmp2);
+    const pxPerUnit = Math.hypot(rx - cx, ry - cy);
+    if (pxPerUnit < 1e-6) {
+      throw new Error("Cannot derive the pixel scale at this brush depth \u2014 is the brush center behind the camera?");
+    }
+    so = [opts.surface_offset[0] * pxPerUnit, opts.surface_offset[1] * pxPerUnit];
+  }
+  const world = new Vector3();
+  for (const mesh of meshes) {
+    if (!mesh.geometry.getAttribute("uv")) continue;
+    const layer = ensureRepairableLayer(viewer, mesh, opts.texture_size);
+    const foot = brushFootprint(
+      mesh,
+      layer,
+      center,
+      radius,
+      opts.hardness !== void 0 ? opts.hardness : 0.5,
+      falloffFn
+    );
+    if (!foot || foot.size === 0) continue;
+    const dim = layer.size;
+    let minX = dim, maxX = 0, minY = dim, maxY = 0;
+    for (const key of foot.keys()) {
+      const px2 = key % dim, py2 = (key - px2) / dim;
+      if (px2 < minX) minX = px2;
+      if (px2 > maxX) maxX = px2;
+      if (py2 < minY) minY = py2;
+      if (py2 > maxY) maxY = py2;
+    }
+    const w = maxX - minX + 1;
+    const img = layer.ctx.getImageData(minX, minY, w, maxY - minY + 1);
+    const data = img.data;
+    for (const [key, rec] of foot) {
+      world.set(rec.world[0], rec.world[1], rec.world[2]);
+      const [sx, sy] = toScreen(world, tmp2);
+      const qx = Math.round(sx + so[0]);
+      const qy = Math.round(sy + so[1]);
+      if (qx < 0 || qx >= S || qy < 0 || qy >= S) continue;
+      const o = ((key - key % dim) / dim - minY) * w + key % dim - minX;
+      const so4 = (qy * S + qx) * 4;
+      const alpha = rec.alpha * strength;
+      data[o * 4] = Math.round(data[o * 4] * (1 - alpha) + src[so4] * alpha);
+      data[o * 4 + 1] = Math.round(data[o * 4 + 1] * (1 - alpha) + src[so4 + 1] * alpha);
+      data[o * 4 + 2] = Math.round(data[o * 4 + 2] * (1 - alpha) + src[so4 + 2] * alpha);
+      data[o * 4 + 3] = 255;
+      painted++;
+      alphaSum += alpha;
+    }
+    layer.ctx.putImageData(img, minX, minY);
+    layer.texture.needsUpdate = true;
+  }
+  if (painted === 0) {
+    throw new Error("Projection brush landed nothing \u2014 check center/radius and make sure the region faces the CURRENT camera." + wrongObjectHint(viewer, opts.center));
+  }
+  const entry = viewer._activeEntry();
+  if (entry) entry.modified = true;
+  viewer.invalidate();
+  return {
+    painted,
+    meanAlpha: Math.round(alphaSum / painted * 1e3) / 1e3,
+    screenOffset: so,
+    note: "Copied texels include the CURRENT shading (capture under the 'neutral' preset to minimize baked lighting) and occlusion is ignored \u2014 verify with a fresh screenshot."
+  };
+}
+
+// node_modules/three-mesh-bvh/src/core/Constants.js
+var CENTER = 0;
+var AVERAGE = 1;
+var SAH = 2;
+var CONTAINED = 2;
+var TRIANGLE_INTERSECT_COST = 1.25;
+var TRAVERSAL_COST = 1;
+var BYTES_PER_NODE = 6 * 4 + 4 + 4;
+var IS_LEAFNODE_FLAG = 65535;
+var FLOAT32_EPSILON = Math.pow(2, -24);
+var SKIP_GENERATION = Symbol("SKIP_GENERATION");
+
+// node_modules/three-mesh-bvh/src/core/build/geometryUtils.js
+function getVertexCount(geo) {
+  return geo.index ? geo.index.count : geo.attributes.position.count;
+}
+function getTriCount(geo) {
+  return getVertexCount(geo) / 3;
+}
+function getIndexArray(vertexCount, BufferConstructor = ArrayBuffer) {
+  if (vertexCount > 65535) {
+    return new Uint32Array(new BufferConstructor(4 * vertexCount));
+  } else {
+    return new Uint16Array(new BufferConstructor(2 * vertexCount));
+  }
+}
+function ensureIndex(geo, options) {
+  if (!geo.index) {
+    const vertexCount = geo.attributes.position.count;
+    const BufferConstructor = options.useSharedArrayBuffer ? SharedArrayBuffer : ArrayBuffer;
+    const index = getIndexArray(vertexCount, BufferConstructor);
+    geo.setIndex(new BufferAttribute(index, 1));
+    for (let i = 0; i < vertexCount; i++) {
+      index[i] = i;
+    }
+  }
+}
+function getFullGeometryRange(geo, range) {
+  const triCount = getTriCount(geo);
+  const drawRange = range ? range : geo.drawRange;
+  const start = drawRange.start / 3;
+  const end = (drawRange.start + drawRange.count) / 3;
+  const offset = Math.max(0, start);
+  const count = Math.min(triCount, end) - offset;
+  return [{
+    offset: Math.floor(offset),
+    count: Math.floor(count)
+  }];
+}
+function getRootIndexRanges(geo, range) {
+  if (!geo.groups || !geo.groups.length) {
+    return getFullGeometryRange(geo, range);
+  }
+  const ranges = [];
+  const rangeBoundaries = /* @__PURE__ */ new Set();
+  const drawRange = range ? range : geo.drawRange;
+  const drawRangeStart = drawRange.start / 3;
+  const drawRangeEnd = (drawRange.start + drawRange.count) / 3;
+  for (const group of geo.groups) {
+    const groupStart = group.start / 3;
+    const groupEnd = (group.start + group.count) / 3;
+    rangeBoundaries.add(Math.max(drawRangeStart, groupStart));
+    rangeBoundaries.add(Math.min(drawRangeEnd, groupEnd));
+  }
+  const sortedBoundaries = Array.from(rangeBoundaries.values()).sort((a, b) => a - b);
+  for (let i = 0; i < sortedBoundaries.length - 1; i++) {
+    const start = sortedBoundaries[i];
+    const end = sortedBoundaries[i + 1];
+    ranges.push({
+      offset: Math.floor(start),
+      count: Math.floor(end - start)
+    });
+  }
+  return ranges;
+}
+function hasGroupGaps(geometry, range) {
+  const vertexCount = getTriCount(geometry);
+  const groups = getRootIndexRanges(geometry, range).sort((a, b) => a.offset - b.offset);
+  const finalGroup = groups[groups.length - 1];
+  finalGroup.count = Math.min(vertexCount - finalGroup.offset, finalGroup.count);
+  let total = 0;
+  groups.forEach(({ count }) => total += count);
+  return vertexCount !== total;
+}
+
+// node_modules/three-mesh-bvh/src/core/build/computeBoundsUtils.js
+function getBounds(triangleBounds, offset, count, target, centroidTarget) {
+  let minx = Infinity;
+  let miny = Infinity;
+  let minz = Infinity;
+  let maxx = -Infinity;
+  let maxy = -Infinity;
+  let maxz = -Infinity;
+  let cminx = Infinity;
+  let cminy = Infinity;
+  let cminz = Infinity;
+  let cmaxx = -Infinity;
+  let cmaxy = -Infinity;
+  let cmaxz = -Infinity;
+  for (let i = offset * 6, end = (offset + count) * 6; i < end; i += 6) {
+    const cx = triangleBounds[i + 0];
+    const hx = triangleBounds[i + 1];
+    const lx = cx - hx;
+    const rx = cx + hx;
+    if (lx < minx) minx = lx;
+    if (rx > maxx) maxx = rx;
+    if (cx < cminx) cminx = cx;
+    if (cx > cmaxx) cmaxx = cx;
+    const cy = triangleBounds[i + 2];
+    const hy = triangleBounds[i + 3];
+    const ly = cy - hy;
+    const ry = cy + hy;
+    if (ly < miny) miny = ly;
+    if (ry > maxy) maxy = ry;
+    if (cy < cminy) cminy = cy;
+    if (cy > cmaxy) cmaxy = cy;
+    const cz = triangleBounds[i + 4];
+    const hz = triangleBounds[i + 5];
+    const lz = cz - hz;
+    const rz = cz + hz;
+    if (lz < minz) minz = lz;
+    if (rz > maxz) maxz = rz;
+    if (cz < cminz) cminz = cz;
+    if (cz > cmaxz) cmaxz = cz;
+  }
+  target[0] = minx;
+  target[1] = miny;
+  target[2] = minz;
+  target[3] = maxx;
+  target[4] = maxy;
+  target[5] = maxz;
+  centroidTarget[0] = cminx;
+  centroidTarget[1] = cminy;
+  centroidTarget[2] = cminz;
+  centroidTarget[3] = cmaxx;
+  centroidTarget[4] = cmaxy;
+  centroidTarget[5] = cmaxz;
+}
+function computeTriangleBounds(geo, target = null, offset = null, count = null) {
+  const posAttr = geo.attributes.position;
+  const index = geo.index ? geo.index.array : null;
+  const triCount = getTriCount(geo);
+  const normalized = posAttr.normalized;
+  let triangleBounds;
+  if (target === null) {
+    triangleBounds = new Float32Array(triCount * 6 * 4);
+    offset = 0;
+    count = triCount;
+  } else {
+    triangleBounds = target;
+    offset = offset || 0;
+    count = count || triCount;
+  }
+  const posArr = posAttr.array;
+  const bufferOffset = posAttr.offset || 0;
+  let stride = 3;
+  if (posAttr.isInterleavedBufferAttribute) {
+    stride = posAttr.data.stride;
+  }
+  const getters = ["getX", "getY", "getZ"];
+  for (let tri = offset; tri < offset + count; tri++) {
+    const tri3 = tri * 3;
+    const tri6 = tri * 6;
+    let ai = tri3 + 0;
+    let bi = tri3 + 1;
+    let ci = tri3 + 2;
+    if (index) {
+      ai = index[ai];
+      bi = index[bi];
+      ci = index[ci];
+    }
+    if (!normalized) {
+      ai = ai * stride + bufferOffset;
+      bi = bi * stride + bufferOffset;
+      ci = ci * stride + bufferOffset;
+    }
+    for (let el = 0; el < 3; el++) {
+      let a, b, c;
+      if (normalized) {
+        a = posAttr[getters[el]](ai);
+        b = posAttr[getters[el]](bi);
+        c = posAttr[getters[el]](ci);
+      } else {
+        a = posArr[ai + el];
+        b = posArr[bi + el];
+        c = posArr[ci + el];
+      }
+      let min = a;
+      if (b < min) min = b;
+      if (c < min) min = c;
+      let max2 = a;
+      if (b > max2) max2 = b;
+      if (c > max2) max2 = c;
+      const halfExtents = (max2 - min) / 2;
+      const el2 = el * 2;
+      triangleBounds[tri6 + el2 + 0] = min + halfExtents;
+      triangleBounds[tri6 + el2 + 1] = halfExtents + (Math.abs(min) + halfExtents) * FLOAT32_EPSILON;
+    }
+  }
+  return triangleBounds;
+}
+
+// node_modules/three-mesh-bvh/src/utils/ArrayBoxUtilities.js
+function arrayToBox(nodeIndex32, array, target) {
+  target.min.x = array[nodeIndex32];
+  target.min.y = array[nodeIndex32 + 1];
+  target.min.z = array[nodeIndex32 + 2];
+  target.max.x = array[nodeIndex32 + 3];
+  target.max.y = array[nodeIndex32 + 4];
+  target.max.z = array[nodeIndex32 + 5];
+  return target;
+}
+function getLongestEdgeIndex(bounds) {
+  let splitDimIdx = -1;
+  let splitDist = -Infinity;
+  for (let i = 0; i < 3; i++) {
+    const dist = bounds[i + 3] - bounds[i];
+    if (dist > splitDist) {
+      splitDist = dist;
+      splitDimIdx = i;
+    }
+  }
+  return splitDimIdx;
+}
+function copyBounds(source, target) {
+  target.set(source);
+}
+function unionBounds(a, b, target) {
+  let aVal, bVal;
+  for (let d = 0; d < 3; d++) {
+    const d3 = d + 3;
+    aVal = a[d];
+    bVal = b[d];
+    target[d] = aVal < bVal ? aVal : bVal;
+    aVal = a[d3];
+    bVal = b[d3];
+    target[d3] = aVal > bVal ? aVal : bVal;
+  }
+}
+function expandByTriangleBounds(startIndex, triangleBounds, bounds) {
+  for (let d = 0; d < 3; d++) {
+    const tCenter = triangleBounds[startIndex + 2 * d];
+    const tHalf = triangleBounds[startIndex + 2 * d + 1];
+    const tMin = tCenter - tHalf;
+    const tMax = tCenter + tHalf;
+    if (tMin < bounds[d]) {
+      bounds[d] = tMin;
+    }
+    if (tMax > bounds[d + 3]) {
+      bounds[d + 3] = tMax;
+    }
+  }
+}
+function computeSurfaceArea(bounds) {
+  const d0 = bounds[3] - bounds[0];
+  const d1 = bounds[4] - bounds[1];
+  const d2 = bounds[5] - bounds[2];
+  return 2 * (d0 * d1 + d1 * d2 + d2 * d0);
+}
+
+// node_modules/three-mesh-bvh/src/core/build/splitUtils.js
+var BIN_COUNT = 32;
+var binsSort = (a, b) => a.candidate - b.candidate;
+var sahBins = new Array(BIN_COUNT).fill().map(() => {
+  return {
+    count: 0,
+    bounds: new Float32Array(6),
+    rightCacheBounds: new Float32Array(6),
+    leftCacheBounds: new Float32Array(6),
+    candidate: 0
+  };
+});
+var leftBounds = new Float32Array(6);
+function getOptimalSplit(nodeBoundingData, centroidBoundingData, triangleBounds, offset, count, strategy) {
+  let axis = -1;
+  let pos = 0;
+  if (strategy === CENTER) {
+    axis = getLongestEdgeIndex(centroidBoundingData);
+    if (axis !== -1) {
+      pos = (centroidBoundingData[axis] + centroidBoundingData[axis + 3]) / 2;
+    }
+  } else if (strategy === AVERAGE) {
+    axis = getLongestEdgeIndex(nodeBoundingData);
+    if (axis !== -1) {
+      pos = getAverage(triangleBounds, offset, count, axis);
+    }
+  } else if (strategy === SAH) {
+    const rootSurfaceArea = computeSurfaceArea(nodeBoundingData);
+    let bestCost = TRIANGLE_INTERSECT_COST * count;
+    const cStart = offset * 6;
+    const cEnd = (offset + count) * 6;
+    for (let a = 0; a < 3; a++) {
+      const axisLeft = centroidBoundingData[a];
+      const axisRight = centroidBoundingData[a + 3];
+      const axisLength = axisRight - axisLeft;
+      const binWidth = axisLength / BIN_COUNT;
+      if (count < BIN_COUNT / 4) {
+        const truncatedBins = [...sahBins];
+        truncatedBins.length = count;
+        let b = 0;
+        for (let c = cStart; c < cEnd; c += 6, b++) {
+          const bin = truncatedBins[b];
+          bin.candidate = triangleBounds[c + 2 * a];
+          bin.count = 0;
+          const {
+            bounds,
+            leftCacheBounds,
+            rightCacheBounds
+          } = bin;
+          for (let d = 0; d < 3; d++) {
+            rightCacheBounds[d] = Infinity;
+            rightCacheBounds[d + 3] = -Infinity;
+            leftCacheBounds[d] = Infinity;
+            leftCacheBounds[d + 3] = -Infinity;
+            bounds[d] = Infinity;
+            bounds[d + 3] = -Infinity;
+          }
+          expandByTriangleBounds(c, triangleBounds, bounds);
+        }
+        truncatedBins.sort(binsSort);
+        let splitCount = count;
+        for (let bi = 0; bi < splitCount; bi++) {
+          const bin = truncatedBins[bi];
+          while (bi + 1 < splitCount && truncatedBins[bi + 1].candidate === bin.candidate) {
+            truncatedBins.splice(bi + 1, 1);
+            splitCount--;
+          }
+        }
+        for (let c = cStart; c < cEnd; c += 6) {
+          const center = triangleBounds[c + 2 * a];
+          for (let bi = 0; bi < splitCount; bi++) {
+            const bin = truncatedBins[bi];
+            if (center >= bin.candidate) {
+              expandByTriangleBounds(c, triangleBounds, bin.rightCacheBounds);
+            } else {
+              expandByTriangleBounds(c, triangleBounds, bin.leftCacheBounds);
+              bin.count++;
+            }
+          }
+        }
+        for (let bi = 0; bi < splitCount; bi++) {
+          const bin = truncatedBins[bi];
+          const leftCount = bin.count;
+          const rightCount = count - bin.count;
+          const leftBounds2 = bin.leftCacheBounds;
+          const rightBounds = bin.rightCacheBounds;
+          let leftProb = 0;
+          if (leftCount !== 0) {
+            leftProb = computeSurfaceArea(leftBounds2) / rootSurfaceArea;
+          }
+          let rightProb = 0;
+          if (rightCount !== 0) {
+            rightProb = computeSurfaceArea(rightBounds) / rootSurfaceArea;
+          }
+          const cost = TRAVERSAL_COST + TRIANGLE_INTERSECT_COST * (leftProb * leftCount + rightProb * rightCount);
+          if (cost < bestCost) {
+            axis = a;
+            bestCost = cost;
+            pos = bin.candidate;
+          }
+        }
+      } else {
+        for (let i = 0; i < BIN_COUNT; i++) {
+          const bin = sahBins[i];
+          bin.count = 0;
+          bin.candidate = axisLeft + binWidth + i * binWidth;
+          const bounds = bin.bounds;
+          for (let d = 0; d < 3; d++) {
+            bounds[d] = Infinity;
+            bounds[d + 3] = -Infinity;
+          }
+        }
+        for (let c = cStart; c < cEnd; c += 6) {
+          const triCenter = triangleBounds[c + 2 * a];
+          const relativeCenter = triCenter - axisLeft;
+          let binIndex = ~~(relativeCenter / binWidth);
+          if (binIndex >= BIN_COUNT) binIndex = BIN_COUNT - 1;
+          const bin = sahBins[binIndex];
+          bin.count++;
+          expandByTriangleBounds(c, triangleBounds, bin.bounds);
+        }
+        const lastBin = sahBins[BIN_COUNT - 1];
+        copyBounds(lastBin.bounds, lastBin.rightCacheBounds);
+        for (let i = BIN_COUNT - 2; i >= 0; i--) {
+          const bin = sahBins[i];
+          const nextBin = sahBins[i + 1];
+          unionBounds(bin.bounds, nextBin.rightCacheBounds, bin.rightCacheBounds);
+        }
+        let leftCount = 0;
+        for (let i = 0; i < BIN_COUNT - 1; i++) {
+          const bin = sahBins[i];
+          const binCount = bin.count;
+          const bounds = bin.bounds;
+          const nextBin = sahBins[i + 1];
+          const rightBounds = nextBin.rightCacheBounds;
+          if (binCount !== 0) {
+            if (leftCount === 0) {
+              copyBounds(bounds, leftBounds);
+            } else {
+              unionBounds(bounds, leftBounds, leftBounds);
+            }
+          }
+          leftCount += binCount;
+          let leftProb = 0;
+          let rightProb = 0;
+          if (leftCount !== 0) {
+            leftProb = computeSurfaceArea(leftBounds) / rootSurfaceArea;
+          }
+          const rightCount = count - leftCount;
+          if (rightCount !== 0) {
+            rightProb = computeSurfaceArea(rightBounds) / rootSurfaceArea;
+          }
+          const cost = TRAVERSAL_COST + TRIANGLE_INTERSECT_COST * (leftProb * leftCount + rightProb * rightCount);
+          if (cost < bestCost) {
+            axis = a;
+            bestCost = cost;
+            pos = bin.candidate;
+          }
+        }
+      }
+    }
+  } else {
+    console.warn(`MeshBVH: Invalid build strategy value ${strategy} used.`);
+  }
+  return { axis, pos };
+}
+function getAverage(triangleBounds, offset, count, axis) {
+  let avg = 0;
+  for (let i = offset, end = offset + count; i < end; i++) {
+    avg += triangleBounds[i * 6 + axis * 2];
+  }
+  return avg / count;
+}
+
+// node_modules/three-mesh-bvh/src/core/MeshBVHNode.js
+var MeshBVHNode = class {
+  constructor() {
+    this.boundingData = new Float32Array(6);
+  }
+};
+
+// node_modules/three-mesh-bvh/src/core/build/sortUtils.generated.js
+function partition(indirectBuffer, index, triangleBounds, offset, count, split) {
+  let left = offset;
+  let right = offset + count - 1;
+  const pos = split.pos;
+  const axisOffset = split.axis * 2;
+  while (true) {
+    while (left <= right && triangleBounds[left * 6 + axisOffset] < pos) {
+      left++;
+    }
+    while (left <= right && triangleBounds[right * 6 + axisOffset] >= pos) {
+      right--;
+    }
+    if (left < right) {
+      for (let i = 0; i < 3; i++) {
+        let t0 = index[left * 3 + i];
+        index[left * 3 + i] = index[right * 3 + i];
+        index[right * 3 + i] = t0;
+      }
+      for (let i = 0; i < 6; i++) {
+        let tb = triangleBounds[left * 6 + i];
+        triangleBounds[left * 6 + i] = triangleBounds[right * 6 + i];
+        triangleBounds[right * 6 + i] = tb;
+      }
+      left++;
+      right--;
+    } else {
+      return left;
+    }
+  }
+}
+
+// node_modules/three-mesh-bvh/src/core/build/sortUtils_indirect.generated.js
+function partition_indirect(indirectBuffer, index, triangleBounds, offset, count, split) {
+  let left = offset;
+  let right = offset + count - 1;
+  const pos = split.pos;
+  const axisOffset = split.axis * 2;
+  while (true) {
+    while (left <= right && triangleBounds[left * 6 + axisOffset] < pos) {
+      left++;
+    }
+    while (left <= right && triangleBounds[right * 6 + axisOffset] >= pos) {
+      right--;
+    }
+    if (left < right) {
+      let t2 = indirectBuffer[left];
+      indirectBuffer[left] = indirectBuffer[right];
+      indirectBuffer[right] = t2;
+      for (let i = 0; i < 6; i++) {
+        let tb = triangleBounds[left * 6 + i];
+        triangleBounds[left * 6 + i] = triangleBounds[right * 6 + i];
+        triangleBounds[right * 6 + i] = tb;
+      }
+      left++;
+      right--;
+    } else {
+      return left;
+    }
+  }
+}
+
+// node_modules/three-mesh-bvh/src/core/utils/nodeBufferUtils.js
+function IS_LEAF(n16, uint16Array2) {
+  return uint16Array2[n16 + 15] === 65535;
+}
+function OFFSET(n32, uint32Array2) {
+  return uint32Array2[n32 + 6];
+}
+function COUNT(n16, uint16Array2) {
+  return uint16Array2[n16 + 14];
+}
+function LEFT_NODE(n32) {
+  return n32 + 8;
+}
+function RIGHT_NODE(n32, uint32Array2) {
+  return uint32Array2[n32 + 6];
+}
+function SPLIT_AXIS(n32, uint32Array2) {
+  return uint32Array2[n32 + 7];
+}
+function BOUNDING_DATA_INDEX(n32) {
+  return n32;
+}
+
+// node_modules/three-mesh-bvh/src/core/build/buildUtils.js
+var float32Array;
+var uint32Array;
+var uint16Array;
+var uint8Array;
+var MAX_POINTER = Math.pow(2, 32);
+function countNodes(node) {
+  if ("count" in node) {
+    return 1;
+  } else {
+    return 1 + countNodes(node.left) + countNodes(node.right);
+  }
+}
+function populateBuffer(byteOffset, node, buffer) {
+  float32Array = new Float32Array(buffer);
+  uint32Array = new Uint32Array(buffer);
+  uint16Array = new Uint16Array(buffer);
+  uint8Array = new Uint8Array(buffer);
+  return _populateBuffer(byteOffset, node);
+}
+function _populateBuffer(byteOffset, node) {
+  const stride4Offset = byteOffset / 4;
+  const stride2Offset = byteOffset / 2;
+  const isLeaf = "count" in node;
+  const boundingData = node.boundingData;
+  for (let i = 0; i < 6; i++) {
+    float32Array[stride4Offset + i] = boundingData[i];
+  }
+  if (isLeaf) {
+    if (node.buffer) {
+      const buffer = node.buffer;
+      uint8Array.set(new Uint8Array(buffer), byteOffset);
+      for (let offset = byteOffset, l = byteOffset + buffer.byteLength; offset < l; offset += BYTES_PER_NODE) {
+        const offset2 = offset / 2;
+        if (!IS_LEAF(offset2, uint16Array)) {
+          uint32Array[offset / 4 + 6] += stride4Offset;
+        }
+      }
+      return byteOffset + buffer.byteLength;
+    } else {
+      const offset = node.offset;
+      const count = node.count;
+      uint32Array[stride4Offset + 6] = offset;
+      uint16Array[stride2Offset + 14] = count;
+      uint16Array[stride2Offset + 15] = IS_LEAFNODE_FLAG;
+      return byteOffset + BYTES_PER_NODE;
+    }
+  } else {
+    const left = node.left;
+    const right = node.right;
+    const splitAxis = node.splitAxis;
+    let nextUnusedPointer;
+    nextUnusedPointer = _populateBuffer(byteOffset + BYTES_PER_NODE, left);
+    if (nextUnusedPointer / 4 > MAX_POINTER) {
+      throw new Error("MeshBVH: Cannot store child pointer greater than 32 bits.");
+    }
+    uint32Array[stride4Offset + 6] = nextUnusedPointer / 4;
+    nextUnusedPointer = _populateBuffer(nextUnusedPointer, right);
+    uint32Array[stride4Offset + 7] = splitAxis;
+    return nextUnusedPointer;
+  }
+}
+
+// node_modules/three-mesh-bvh/src/core/build/buildTree.js
+function generateIndirectBuffer(geometry, useSharedArrayBuffer) {
+  const triCount = (geometry.index ? geometry.index.count : geometry.attributes.position.count) / 3;
+  const useUint32 = triCount > 2 ** 16;
+  const byteCount = useUint32 ? 4 : 2;
+  const buffer = useSharedArrayBuffer ? new SharedArrayBuffer(triCount * byteCount) : new ArrayBuffer(triCount * byteCount);
+  const indirectBuffer = useUint32 ? new Uint32Array(buffer) : new Uint16Array(buffer);
+  for (let i = 0, l = indirectBuffer.length; i < l; i++) {
+    indirectBuffer[i] = i;
+  }
+  return indirectBuffer;
+}
+function buildTree(bvh, triangleBounds, offset, count, options) {
+  const {
+    maxDepth,
+    verbose,
+    maxLeafTris,
+    strategy,
+    onProgress,
+    indirect
+  } = options;
+  const indirectBuffer = bvh._indirectBuffer;
+  const geometry = bvh.geometry;
+  const indexArray = geometry.index ? geometry.index.array : null;
+  const partionFunc = indirect ? partition_indirect : partition;
+  const totalTriangles = getTriCount(geometry);
+  const cacheCentroidBoundingData = new Float32Array(6);
+  let reachedMaxDepth = false;
+  const root = new MeshBVHNode();
+  getBounds(triangleBounds, offset, count, root.boundingData, cacheCentroidBoundingData);
+  splitNode(root, offset, count, cacheCentroidBoundingData);
+  return root;
+  function triggerProgress(trianglesProcessed) {
+    if (onProgress) {
+      onProgress(trianglesProcessed / totalTriangles);
+    }
+  }
+  function splitNode(node, offset2, count2, centroidBoundingData = null, depth = 0) {
+    if (!reachedMaxDepth && depth >= maxDepth) {
+      reachedMaxDepth = true;
+      if (verbose) {
+        console.warn(`MeshBVH: Max depth of ${maxDepth} reached when generating BVH. Consider increasing maxDepth.`);
+        console.warn(geometry);
+      }
+    }
+    if (count2 <= maxLeafTris || depth >= maxDepth) {
+      triggerProgress(offset2 + count2);
+      node.offset = offset2;
+      node.count = count2;
+      return node;
+    }
+    const split = getOptimalSplit(node.boundingData, centroidBoundingData, triangleBounds, offset2, count2, strategy);
+    if (split.axis === -1) {
+      triggerProgress(offset2 + count2);
+      node.offset = offset2;
+      node.count = count2;
+      return node;
+    }
+    const splitOffset = partionFunc(indirectBuffer, indexArray, triangleBounds, offset2, count2, split);
+    if (splitOffset === offset2 || splitOffset === offset2 + count2) {
+      triggerProgress(offset2 + count2);
+      node.offset = offset2;
+      node.count = count2;
+    } else {
+      node.splitAxis = split.axis;
+      const left = new MeshBVHNode();
+      const lstart = offset2;
+      const lcount = splitOffset - offset2;
+      node.left = left;
+      getBounds(triangleBounds, lstart, lcount, left.boundingData, cacheCentroidBoundingData);
+      splitNode(left, lstart, lcount, cacheCentroidBoundingData, depth + 1);
+      const right = new MeshBVHNode();
+      const rstart = splitOffset;
+      const rcount = count2 - lcount;
+      node.right = right;
+      getBounds(triangleBounds, rstart, rcount, right.boundingData, cacheCentroidBoundingData);
+      splitNode(right, rstart, rcount, cacheCentroidBoundingData, depth + 1);
+    }
+    return node;
+  }
+}
+function buildPackedTree(bvh, options) {
+  const geometry = bvh.geometry;
+  if (options.indirect) {
+    bvh._indirectBuffer = generateIndirectBuffer(geometry, options.useSharedArrayBuffer);
+    if (hasGroupGaps(geometry, options.range) && !options.verbose) {
+      console.warn(
+        'MeshBVH: Provided geometry contains groups or a range that do not fully span the vertex contents while using the "indirect" option. BVH may incorrectly report intersections on unrendered portions of the geometry.'
+      );
+    }
+  }
+  if (!bvh._indirectBuffer) {
+    ensureIndex(geometry, options);
+  }
+  const BufferConstructor = options.useSharedArrayBuffer ? SharedArrayBuffer : ArrayBuffer;
+  const triangleBounds = computeTriangleBounds(geometry);
+  const geometryRanges = options.indirect ? getFullGeometryRange(geometry, options.range) : getRootIndexRanges(geometry, options.range);
+  bvh._roots = geometryRanges.map((range) => {
+    const root = buildTree(bvh, triangleBounds, range.offset, range.count, options);
+    const nodeCount = countNodes(root);
+    const buffer = new BufferConstructor(BYTES_PER_NODE * nodeCount);
+    populateBuffer(0, root, buffer);
+    return buffer;
+  });
+}
+
+// node_modules/three-mesh-bvh/src/math/SeparatingAxisBounds.js
+var SeparatingAxisBounds = class {
+  constructor() {
+    this.min = Infinity;
+    this.max = -Infinity;
+  }
+  setFromPointsField(points, field) {
+    let min = Infinity;
+    let max2 = -Infinity;
+    for (let i = 0, l = points.length; i < l; i++) {
+      const p = points[i];
+      const val = p[field];
+      min = val < min ? val : min;
+      max2 = val > max2 ? val : max2;
+    }
+    this.min = min;
+    this.max = max2;
+  }
+  setFromPoints(axis, points) {
+    let min = Infinity;
+    let max2 = -Infinity;
+    for (let i = 0, l = points.length; i < l; i++) {
+      const p = points[i];
+      const val = axis.dot(p);
+      min = val < min ? val : min;
+      max2 = val > max2 ? val : max2;
+    }
+    this.min = min;
+    this.max = max2;
+  }
+  isSeparated(other) {
+    return this.min > other.max || other.min > this.max;
+  }
+};
+SeparatingAxisBounds.prototype.setFromBox = function() {
+  const p = new Vector3();
+  return function setFromBox(axis, box) {
+    const boxMin = box.min;
+    const boxMax = box.max;
+    let min = Infinity;
+    let max2 = -Infinity;
+    for (let x = 0; x <= 1; x++) {
+      for (let y = 0; y <= 1; y++) {
+        for (let z = 0; z <= 1; z++) {
+          p.x = boxMin.x * x + boxMax.x * (1 - x);
+          p.y = boxMin.y * y + boxMax.y * (1 - y);
+          p.z = boxMin.z * z + boxMax.z * (1 - z);
+          const val = axis.dot(p);
+          min = Math.min(val, min);
+          max2 = Math.max(val, max2);
+        }
+      }
+    }
+    this.min = min;
+    this.max = max2;
+  };
+}();
+var areIntersecting = function() {
+  const cacheSatBounds = new SeparatingAxisBounds();
+  return function areIntersecting2(shape1, shape2) {
+    const points1 = shape1.points;
+    const satAxes1 = shape1.satAxes;
+    const satBounds1 = shape1.satBounds;
+    const points2 = shape2.points;
+    const satAxes2 = shape2.satAxes;
+    const satBounds2 = shape2.satBounds;
+    for (let i = 0; i < 3; i++) {
+      const sb = satBounds1[i];
+      const sa = satAxes1[i];
+      cacheSatBounds.setFromPoints(sa, points2);
+      if (sb.isSeparated(cacheSatBounds)) return false;
+    }
+    for (let i = 0; i < 3; i++) {
+      const sb = satBounds2[i];
+      const sa = satAxes2[i];
+      cacheSatBounds.setFromPoints(sa, points1);
+      if (sb.isSeparated(cacheSatBounds)) return false;
+    }
+  };
+}();
+
+// node_modules/three-mesh-bvh/src/math/MathUtilities.js
+var closestPointLineToLine = function() {
+  const dir1 = new Vector3();
+  const dir2 = new Vector3();
+  const v02 = new Vector3();
+  return function closestPointLineToLine2(l1, l2, result) {
+    const v0 = l1.start;
+    const v10 = dir1;
+    const v2 = l2.start;
+    const v32 = dir2;
+    v02.subVectors(v0, v2);
+    dir1.subVectors(l1.end, l1.start);
+    dir2.subVectors(l2.end, l2.start);
+    const d0232 = v02.dot(v32);
+    const d3210 = v32.dot(v10);
+    const d3232 = v32.dot(v32);
+    const d0210 = v02.dot(v10);
+    const d1010 = v10.dot(v10);
+    const denom = d1010 * d3232 - d3210 * d3210;
+    let d, d2;
+    if (denom !== 0) {
+      d = (d0232 * d3210 - d0210 * d3232) / denom;
+    } else {
+      d = 0;
+    }
+    d2 = (d0232 + d * d3210) / d3232;
+    result.x = d;
+    result.y = d2;
+  };
+}();
+var closestPointsSegmentToSegment = function() {
+  const paramResult = new Vector2();
+  const temp14 = new Vector3();
+  const temp23 = new Vector3();
+  return function closestPointsSegmentToSegment2(l1, l2, target1, target2) {
+    closestPointLineToLine(l1, l2, paramResult);
+    let d = paramResult.x;
+    let d2 = paramResult.y;
+    if (d >= 0 && d <= 1 && d2 >= 0 && d2 <= 1) {
+      l1.at(d, target1);
+      l2.at(d2, target2);
+      return;
+    } else if (d >= 0 && d <= 1) {
+      if (d2 < 0) {
+        l2.at(0, target2);
+      } else {
+        l2.at(1, target2);
+      }
+      l1.closestPointToPoint(target2, true, target1);
+      return;
+    } else if (d2 >= 0 && d2 <= 1) {
+      if (d < 0) {
+        l1.at(0, target1);
+      } else {
+        l1.at(1, target1);
+      }
+      l2.closestPointToPoint(target1, true, target2);
+      return;
+    } else {
+      let p;
+      if (d < 0) {
+        p = l1.start;
+      } else {
+        p = l1.end;
+      }
+      let p2;
+      if (d2 < 0) {
+        p2 = l2.start;
+      } else {
+        p2 = l2.end;
+      }
+      const closestPoint = temp14;
+      const closestPoint2 = temp23;
+      l1.closestPointToPoint(p2, true, temp14);
+      l2.closestPointToPoint(p, true, temp23);
+      if (closestPoint.distanceToSquared(p2) <= closestPoint2.distanceToSquared(p)) {
+        target1.copy(closestPoint);
+        target2.copy(p2);
+        return;
+      } else {
+        target1.copy(p);
+        target2.copy(closestPoint2);
+        return;
+      }
+    }
+  };
+}();
+var sphereIntersectTriangle = function() {
+  const closestPointTemp = new Vector3();
+  const projectedPointTemp = new Vector3();
+  const planeTemp = new Plane();
+  const lineTemp = new Line3();
+  return function sphereIntersectTriangle2(sphere, triangle4) {
+    const { radius, center } = sphere;
+    const { a, b, c } = triangle4;
+    lineTemp.start = a;
+    lineTemp.end = b;
+    const closestPoint1 = lineTemp.closestPointToPoint(center, true, closestPointTemp);
+    if (closestPoint1.distanceTo(center) <= radius) return true;
+    lineTemp.start = a;
+    lineTemp.end = c;
+    const closestPoint2 = lineTemp.closestPointToPoint(center, true, closestPointTemp);
+    if (closestPoint2.distanceTo(center) <= radius) return true;
+    lineTemp.start = b;
+    lineTemp.end = c;
+    const closestPoint3 = lineTemp.closestPointToPoint(center, true, closestPointTemp);
+    if (closestPoint3.distanceTo(center) <= radius) return true;
+    const plane = triangle4.getPlane(planeTemp);
+    const dp = Math.abs(plane.distanceToPoint(center));
+    if (dp <= radius) {
+      const pp = plane.projectPoint(center, projectedPointTemp);
+      const cp = triangle4.containsPoint(pp);
+      if (cp) return true;
+    }
+    return false;
+  };
+}();
+
+// node_modules/three-mesh-bvh/src/math/ExtendedTriangle.js
+var ZERO_EPSILON = 1e-15;
+function isNearZero(value) {
+  return Math.abs(value) < ZERO_EPSILON;
+}
+var ExtendedTriangle = class extends Triangle {
+  constructor(...args) {
+    super(...args);
+    this.isExtendedTriangle = true;
+    this.satAxes = new Array(4).fill().map(() => new Vector3());
+    this.satBounds = new Array(4).fill().map(() => new SeparatingAxisBounds());
+    this.points = [this.a, this.b, this.c];
+    this.sphere = new Sphere();
+    this.plane = new Plane();
+    this.needsUpdate = true;
+  }
+  intersectsSphere(sphere) {
+    return sphereIntersectTriangle(sphere, this);
+  }
+  update() {
+    const a = this.a;
+    const b = this.b;
+    const c = this.c;
+    const points = this.points;
+    const satAxes = this.satAxes;
+    const satBounds = this.satBounds;
+    const axis0 = satAxes[0];
+    const sab0 = satBounds[0];
+    this.getNormal(axis0);
+    sab0.setFromPoints(axis0, points);
+    const axis1 = satAxes[1];
+    const sab1 = satBounds[1];
+    axis1.subVectors(a, b);
+    sab1.setFromPoints(axis1, points);
+    const axis2 = satAxes[2];
+    const sab2 = satBounds[2];
+    axis2.subVectors(b, c);
+    sab2.setFromPoints(axis2, points);
+    const axis3 = satAxes[3];
+    const sab3 = satBounds[3];
+    axis3.subVectors(c, a);
+    sab3.setFromPoints(axis3, points);
+    this.sphere.setFromPoints(this.points);
+    this.plane.setFromNormalAndCoplanarPoint(axis0, a);
+    this.needsUpdate = false;
+  }
+};
+ExtendedTriangle.prototype.closestPointToSegment = function() {
+  const point1 = new Vector3();
+  const point2 = new Vector3();
+  const edge = new Line3();
+  return function distanceToSegment(segment, target1 = null, target2 = null) {
+    const { start, end } = segment;
+    const points = this.points;
+    let distSq;
+    let closestDistanceSq = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const nexti = (i + 1) % 3;
+      edge.start.copy(points[i]);
+      edge.end.copy(points[nexti]);
+      closestPointsSegmentToSegment(edge, segment, point1, point2);
+      distSq = point1.distanceToSquared(point2);
+      if (distSq < closestDistanceSq) {
+        closestDistanceSq = distSq;
+        if (target1) target1.copy(point1);
+        if (target2) target2.copy(point2);
+      }
+    }
+    this.closestPointToPoint(start, point1);
+    distSq = start.distanceToSquared(point1);
+    if (distSq < closestDistanceSq) {
+      closestDistanceSq = distSq;
+      if (target1) target1.copy(point1);
+      if (target2) target2.copy(start);
+    }
+    this.closestPointToPoint(end, point1);
+    distSq = end.distanceToSquared(point1);
+    if (distSq < closestDistanceSq) {
+      closestDistanceSq = distSq;
+      if (target1) target1.copy(point1);
+      if (target2) target2.copy(end);
+    }
+    return Math.sqrt(closestDistanceSq);
+  };
+}();
+ExtendedTriangle.prototype.intersectsTriangle = function() {
+  const saTri2 = new ExtendedTriangle();
+  const arr1 = new Array(3);
+  const arr2 = new Array(3);
+  const cachedSatBounds = new SeparatingAxisBounds();
+  const cachedSatBounds2 = new SeparatingAxisBounds();
+  const cachedAxis = new Vector3();
+  const dir = new Vector3();
+  const dir1 = new Vector3();
+  const dir2 = new Vector3();
+  const tempDir = new Vector3();
+  const edge = new Line3();
+  const edge1 = new Line3();
+  const edge2 = new Line3();
+  const tempPoint = new Vector3();
+  function triIntersectPlane(tri, plane, targetEdge) {
+    const points = tri.points;
+    let count = 0;
+    let startPointIntersection = -1;
+    for (let i = 0; i < 3; i++) {
+      const { start, end } = edge;
+      start.copy(points[i]);
+      end.copy(points[(i + 1) % 3]);
+      edge.delta(dir);
+      const startIntersects = isNearZero(plane.distanceToPoint(start));
+      if (isNearZero(plane.normal.dot(dir)) && startIntersects) {
+        targetEdge.copy(edge);
+        count = 2;
+        break;
+      }
+      const doesIntersect = plane.intersectLine(edge, tempPoint);
+      if (!doesIntersect && startIntersects) {
+        tempPoint.copy(start);
+      }
+      if ((doesIntersect || startIntersects) && !isNearZero(tempPoint.distanceTo(end))) {
+        if (count <= 1) {
+          const point = count === 1 ? targetEdge.start : targetEdge.end;
+          point.copy(tempPoint);
+          if (startIntersects) {
+            startPointIntersection = count;
+          }
+        } else if (count >= 2) {
+          const point = startPointIntersection === 1 ? targetEdge.start : targetEdge.end;
+          point.copy(tempPoint);
+          count = 2;
+          break;
+        }
+        count++;
+        if (count === 2 && startPointIntersection === -1) {
+          break;
+        }
+      }
+    }
+    return count;
+  }
+  return function intersectsTriangle(other, target = null, suppressLog = false) {
+    if (this.needsUpdate) {
+      this.update();
+    }
+    if (!other.isExtendedTriangle) {
+      saTri2.copy(other);
+      saTri2.update();
+      other = saTri2;
+    } else if (other.needsUpdate) {
+      other.update();
+    }
+    const plane1 = this.plane;
+    const plane2 = other.plane;
+    if (Math.abs(plane1.normal.dot(plane2.normal)) > 1 - 1e-10) {
+      const satBounds1 = this.satBounds;
+      const satAxes1 = this.satAxes;
+      arr2[0] = other.a;
+      arr2[1] = other.b;
+      arr2[2] = other.c;
+      for (let i = 0; i < 4; i++) {
+        const sb = satBounds1[i];
+        const sa = satAxes1[i];
+        cachedSatBounds.setFromPoints(sa, arr2);
+        if (sb.isSeparated(cachedSatBounds)) return false;
+      }
+      const satBounds2 = other.satBounds;
+      const satAxes2 = other.satAxes;
+      arr1[0] = this.a;
+      arr1[1] = this.b;
+      arr1[2] = this.c;
+      for (let i = 0; i < 4; i++) {
+        const sb = satBounds2[i];
+        const sa = satAxes2[i];
+        cachedSatBounds.setFromPoints(sa, arr1);
+        if (sb.isSeparated(cachedSatBounds)) return false;
+      }
+      for (let i = 0; i < 4; i++) {
+        const sa1 = satAxes1[i];
+        for (let i2 = 0; i2 < 4; i2++) {
+          const sa2 = satAxes2[i2];
+          cachedAxis.crossVectors(sa1, sa2);
+          cachedSatBounds.setFromPoints(cachedAxis, arr1);
+          cachedSatBounds2.setFromPoints(cachedAxis, arr2);
+          if (cachedSatBounds.isSeparated(cachedSatBounds2)) return false;
+        }
+      }
+      if (target) {
+        if (!suppressLog) {
+          console.warn("ExtendedTriangle.intersectsTriangle: Triangles are coplanar which does not support an output edge. Setting edge to 0, 0, 0.");
+        }
+        target.start.set(0, 0, 0);
+        target.end.set(0, 0, 0);
+      }
+      return true;
+    } else {
+      const count1 = triIntersectPlane(this, plane2, edge1);
+      if (count1 === 1 && other.containsPoint(edge1.end)) {
+        if (target) {
+          target.start.copy(edge1.end);
+          target.end.copy(edge1.end);
+        }
+        return true;
+      } else if (count1 !== 2) {
+        return false;
+      }
+      const count2 = triIntersectPlane(other, plane1, edge2);
+      if (count2 === 1 && this.containsPoint(edge2.end)) {
+        if (target) {
+          target.start.copy(edge2.end);
+          target.end.copy(edge2.end);
+        }
+        return true;
+      } else if (count2 !== 2) {
+        return false;
+      }
+      edge1.delta(dir1);
+      edge2.delta(dir2);
+      if (dir1.dot(dir2) < 0) {
+        let tmp2 = edge2.start;
+        edge2.start = edge2.end;
+        edge2.end = tmp2;
+      }
+      const s1 = edge1.start.dot(dir1);
+      const e1 = edge1.end.dot(dir1);
+      const s2 = edge2.start.dot(dir1);
+      const e2 = edge2.end.dot(dir1);
+      const separated1 = e1 < s2;
+      const separated2 = s1 < e2;
+      if (s1 !== e2 && s2 !== e1 && separated1 === separated2) {
+        return false;
+      }
+      if (target) {
+        tempDir.subVectors(edge1.start, edge2.start);
+        if (tempDir.dot(dir1) > 0) {
+          target.start.copy(edge1.start);
+        } else {
+          target.start.copy(edge2.start);
+        }
+        tempDir.subVectors(edge1.end, edge2.end);
+        if (tempDir.dot(dir1) < 0) {
+          target.end.copy(edge1.end);
+        } else {
+          target.end.copy(edge2.end);
+        }
+      }
+      return true;
+    }
+  };
+}();
+ExtendedTriangle.prototype.distanceToPoint = function() {
+  const target = new Vector3();
+  return function distanceToPoint(point) {
+    this.closestPointToPoint(point, target);
+    return point.distanceTo(target);
+  };
+}();
+ExtendedTriangle.prototype.distanceToTriangle = function() {
+  const point = new Vector3();
+  const point2 = new Vector3();
+  const cornerFields = ["a", "b", "c"];
+  const line1 = new Line3();
+  const line2 = new Line3();
+  return function distanceToTriangle(other, target1 = null, target2 = null) {
+    const lineTarget = target1 || target2 ? line1 : null;
+    if (this.intersectsTriangle(other, lineTarget)) {
+      if (target1 || target2) {
+        if (target1) lineTarget.getCenter(target1);
+        if (target2) lineTarget.getCenter(target2);
+      }
+      return 0;
+    }
+    let closestDistanceSq = Infinity;
+    for (let i = 0; i < 3; i++) {
+      let dist;
+      const field = cornerFields[i];
+      const otherVec = other[field];
+      this.closestPointToPoint(otherVec, point);
+      dist = otherVec.distanceToSquared(point);
+      if (dist < closestDistanceSq) {
+        closestDistanceSq = dist;
+        if (target1) target1.copy(point);
+        if (target2) target2.copy(otherVec);
+      }
+      const thisVec = this[field];
+      other.closestPointToPoint(thisVec, point);
+      dist = thisVec.distanceToSquared(point);
+      if (dist < closestDistanceSq) {
+        closestDistanceSq = dist;
+        if (target1) target1.copy(thisVec);
+        if (target2) target2.copy(point);
+      }
+    }
+    for (let i = 0; i < 3; i++) {
+      const f11 = cornerFields[i];
+      const f12 = cornerFields[(i + 1) % 3];
+      line1.set(this[f11], this[f12]);
+      for (let i2 = 0; i2 < 3; i2++) {
+        const f21 = cornerFields[i2];
+        const f22 = cornerFields[(i2 + 1) % 3];
+        line2.set(other[f21], other[f22]);
+        closestPointsSegmentToSegment(line1, line2, point, point2);
+        const dist = point.distanceToSquared(point2);
+        if (dist < closestDistanceSq) {
+          closestDistanceSq = dist;
+          if (target1) target1.copy(point);
+          if (target2) target2.copy(point2);
+        }
+      }
+    }
+    return Math.sqrt(closestDistanceSq);
+  };
+}();
+
+// node_modules/three-mesh-bvh/src/math/OrientedBox.js
+var OrientedBox = class {
+  constructor(min, max2, matrix) {
+    this.isOrientedBox = true;
+    this.min = new Vector3();
+    this.max = new Vector3();
+    this.matrix = new Matrix4();
+    this.invMatrix = new Matrix4();
+    this.points = new Array(8).fill().map(() => new Vector3());
+    this.satAxes = new Array(3).fill().map(() => new Vector3());
+    this.satBounds = new Array(3).fill().map(() => new SeparatingAxisBounds());
+    this.alignedSatBounds = new Array(3).fill().map(() => new SeparatingAxisBounds());
+    this.needsUpdate = false;
+    if (min) this.min.copy(min);
+    if (max2) this.max.copy(max2);
+    if (matrix) this.matrix.copy(matrix);
+  }
+  set(min, max2, matrix) {
+    this.min.copy(min);
+    this.max.copy(max2);
+    this.matrix.copy(matrix);
+    this.needsUpdate = true;
+  }
+  copy(other) {
+    this.min.copy(other.min);
+    this.max.copy(other.max);
+    this.matrix.copy(other.matrix);
+    this.needsUpdate = true;
+  }
+};
+OrientedBox.prototype.update = /* @__PURE__ */ function() {
+  return function update() {
+    const matrix = this.matrix;
+    const min = this.min;
+    const max2 = this.max;
+    const points = this.points;
+    for (let x = 0; x <= 1; x++) {
+      for (let y = 0; y <= 1; y++) {
+        for (let z = 0; z <= 1; z++) {
+          const i = (1 << 0) * x | (1 << 1) * y | (1 << 2) * z;
+          const v = points[i];
+          v.x = x ? max2.x : min.x;
+          v.y = y ? max2.y : min.y;
+          v.z = z ? max2.z : min.z;
+          v.applyMatrix4(matrix);
+        }
+      }
+    }
+    const satBounds = this.satBounds;
+    const satAxes = this.satAxes;
+    const minVec = points[0];
+    for (let i = 0; i < 3; i++) {
+      const axis = satAxes[i];
+      const sb = satBounds[i];
+      const index = 1 << i;
+      const pi2 = points[index];
+      axis.subVectors(minVec, pi2);
+      sb.setFromPoints(axis, points);
+    }
+    const alignedSatBounds = this.alignedSatBounds;
+    alignedSatBounds[0].setFromPointsField(points, "x");
+    alignedSatBounds[1].setFromPointsField(points, "y");
+    alignedSatBounds[2].setFromPointsField(points, "z");
+    this.invMatrix.copy(this.matrix).invert();
+    this.needsUpdate = false;
+  };
+}();
+OrientedBox.prototype.intersectsBox = function() {
+  const aabbBounds = new SeparatingAxisBounds();
+  return function intersectsBox(box) {
+    if (this.needsUpdate) {
+      this.update();
+    }
+    const min = box.min;
+    const max2 = box.max;
+    const satBounds = this.satBounds;
+    const satAxes = this.satAxes;
+    const alignedSatBounds = this.alignedSatBounds;
+    aabbBounds.min = min.x;
+    aabbBounds.max = max2.x;
+    if (alignedSatBounds[0].isSeparated(aabbBounds)) return false;
+    aabbBounds.min = min.y;
+    aabbBounds.max = max2.y;
+    if (alignedSatBounds[1].isSeparated(aabbBounds)) return false;
+    aabbBounds.min = min.z;
+    aabbBounds.max = max2.z;
+    if (alignedSatBounds[2].isSeparated(aabbBounds)) return false;
+    for (let i = 0; i < 3; i++) {
+      const axis = satAxes[i];
+      const sb = satBounds[i];
+      aabbBounds.setFromBox(axis, box);
+      if (sb.isSeparated(aabbBounds)) return false;
+    }
+    return true;
+  };
+}();
+OrientedBox.prototype.intersectsTriangle = function() {
+  const saTri = new ExtendedTriangle();
+  const pointsArr = new Array(3);
+  const cachedSatBounds = new SeparatingAxisBounds();
+  const cachedSatBounds2 = new SeparatingAxisBounds();
+  const cachedAxis = new Vector3();
+  return function intersectsTriangle(triangle4) {
+    if (this.needsUpdate) {
+      this.update();
+    }
+    if (!triangle4.isExtendedTriangle) {
+      saTri.copy(triangle4);
+      saTri.update();
+      triangle4 = saTri;
+    } else if (triangle4.needsUpdate) {
+      triangle4.update();
+    }
+    const satBounds = this.satBounds;
+    const satAxes = this.satAxes;
+    pointsArr[0] = triangle4.a;
+    pointsArr[1] = triangle4.b;
+    pointsArr[2] = triangle4.c;
+    for (let i = 0; i < 3; i++) {
+      const sb = satBounds[i];
+      const sa = satAxes[i];
+      cachedSatBounds.setFromPoints(sa, pointsArr);
+      if (sb.isSeparated(cachedSatBounds)) return false;
+    }
+    const triSatBounds = triangle4.satBounds;
+    const triSatAxes = triangle4.satAxes;
+    const points = this.points;
+    for (let i = 0; i < 3; i++) {
+      const sb = triSatBounds[i];
+      const sa = triSatAxes[i];
+      cachedSatBounds.setFromPoints(sa, points);
+      if (sb.isSeparated(cachedSatBounds)) return false;
+    }
+    for (let i = 0; i < 3; i++) {
+      const sa1 = satAxes[i];
+      for (let i2 = 0; i2 < 4; i2++) {
+        const sa2 = triSatAxes[i2];
+        cachedAxis.crossVectors(sa1, sa2);
+        cachedSatBounds.setFromPoints(cachedAxis, pointsArr);
+        cachedSatBounds2.setFromPoints(cachedAxis, points);
+        if (cachedSatBounds.isSeparated(cachedSatBounds2)) return false;
+      }
+    }
+    return true;
+  };
+}();
+OrientedBox.prototype.closestPointToPoint = /* @__PURE__ */ function() {
+  return function closestPointToPoint2(point, target1) {
+    if (this.needsUpdate) {
+      this.update();
+    }
+    target1.copy(point).applyMatrix4(this.invMatrix).clamp(this.min, this.max).applyMatrix4(this.matrix);
+    return target1;
+  };
+}();
+OrientedBox.prototype.distanceToPoint = function() {
+  const target = new Vector3();
+  return function distanceToPoint(point) {
+    this.closestPointToPoint(point, target);
+    return point.distanceTo(target);
+  };
+}();
+OrientedBox.prototype.distanceToBox = function() {
+  const xyzFields = ["x", "y", "z"];
+  const segments1 = new Array(12).fill().map(() => new Line3());
+  const segments2 = new Array(12).fill().map(() => new Line3());
+  const point1 = new Vector3();
+  const point2 = new Vector3();
+  return function distanceToBox(box, threshold = 0, target1 = null, target2 = null) {
+    if (this.needsUpdate) {
+      this.update();
+    }
+    if (this.intersectsBox(box)) {
+      if (target1 || target2) {
+        box.getCenter(point2);
+        this.closestPointToPoint(point2, point1);
+        box.closestPointToPoint(point1, point2);
+        if (target1) target1.copy(point1);
+        if (target2) target2.copy(point2);
+      }
+      return 0;
+    }
+    const threshold2 = threshold * threshold;
+    const min = box.min;
+    const max2 = box.max;
+    const points = this.points;
+    let closestDistanceSq = Infinity;
+    for (let i = 0; i < 8; i++) {
+      const p = points[i];
+      point2.copy(p).clamp(min, max2);
+      const dist = p.distanceToSquared(point2);
+      if (dist < closestDistanceSq) {
+        closestDistanceSq = dist;
+        if (target1) target1.copy(p);
+        if (target2) target2.copy(point2);
+        if (dist < threshold2) return Math.sqrt(dist);
+      }
+    }
+    let count = 0;
+    for (let i = 0; i < 3; i++) {
+      for (let i1 = 0; i1 <= 1; i1++) {
+        for (let i2 = 0; i2 <= 1; i2++) {
+          const nextIndex = (i + 1) % 3;
+          const nextIndex2 = (i + 2) % 3;
+          const index = i1 << nextIndex | i2 << nextIndex2;
+          const index2 = 1 << i | i1 << nextIndex | i2 << nextIndex2;
+          const p1 = points[index];
+          const p2 = points[index2];
+          const line1 = segments1[count];
+          line1.set(p1, p2);
+          const f1 = xyzFields[i];
+          const f2 = xyzFields[nextIndex];
+          const f3 = xyzFields[nextIndex2];
+          const line2 = segments2[count];
+          const start = line2.start;
+          const end = line2.end;
+          start[f1] = min[f1];
+          start[f2] = i1 ? min[f2] : max2[f2];
+          start[f3] = i2 ? min[f3] : max2[f2];
+          end[f1] = max2[f1];
+          end[f2] = i1 ? min[f2] : max2[f2];
+          end[f3] = i2 ? min[f3] : max2[f2];
+          count++;
+        }
+      }
+    }
+    for (let x = 0; x <= 1; x++) {
+      for (let y = 0; y <= 1; y++) {
+        for (let z = 0; z <= 1; z++) {
+          point2.x = x ? max2.x : min.x;
+          point2.y = y ? max2.y : min.y;
+          point2.z = z ? max2.z : min.z;
+          this.closestPointToPoint(point2, point1);
+          const dist = point2.distanceToSquared(point1);
+          if (dist < closestDistanceSq) {
+            closestDistanceSq = dist;
+            if (target1) target1.copy(point1);
+            if (target2) target2.copy(point2);
+            if (dist < threshold2) return Math.sqrt(dist);
+          }
+        }
+      }
+    }
+    for (let i = 0; i < 12; i++) {
+      const l1 = segments1[i];
+      for (let i2 = 0; i2 < 12; i2++) {
+        const l2 = segments2[i2];
+        closestPointsSegmentToSegment(l1, l2, point1, point2);
+        const dist = point1.distanceToSquared(point2);
+        if (dist < closestDistanceSq) {
+          closestDistanceSq = dist;
+          if (target1) target1.copy(point1);
+          if (target2) target2.copy(point2);
+          if (dist < threshold2) return Math.sqrt(dist);
+        }
+      }
+    }
+    return Math.sqrt(closestDistanceSq);
+  };
+}();
+
+// node_modules/three-mesh-bvh/src/utils/PrimitivePool.js
+var PrimitivePool = class {
+  constructor(getNewPrimitive) {
+    this._getNewPrimitive = getNewPrimitive;
+    this._primitives = [];
+  }
+  getPrimitive() {
+    const primitives = this._primitives;
+    if (primitives.length === 0) {
+      return this._getNewPrimitive();
+    } else {
+      return primitives.pop();
+    }
+  }
+  releasePrimitive(primitive) {
+    this._primitives.push(primitive);
+  }
+};
+
+// node_modules/three-mesh-bvh/src/utils/ExtendedTrianglePool.js
+var ExtendedTrianglePoolBase = class extends PrimitivePool {
+  constructor() {
+    super(() => new ExtendedTriangle());
+  }
+};
+var ExtendedTrianglePool = /* @__PURE__ */ new ExtendedTrianglePoolBase();
+
+// node_modules/three-mesh-bvh/src/core/utils/BufferStack.js
+var _BufferStack = class {
+  constructor() {
+    this.float32Array = null;
+    this.uint16Array = null;
+    this.uint32Array = null;
+    const stack = [];
+    let prevBuffer = null;
+    this.setBuffer = (buffer) => {
+      if (prevBuffer) {
+        stack.push(prevBuffer);
+      }
+      prevBuffer = buffer;
+      this.float32Array = new Float32Array(buffer);
+      this.uint16Array = new Uint16Array(buffer);
+      this.uint32Array = new Uint32Array(buffer);
+    };
+    this.clearBuffer = () => {
+      prevBuffer = null;
+      this.float32Array = null;
+      this.uint16Array = null;
+      this.uint32Array = null;
+      if (stack.length !== 0) {
+        this.setBuffer(stack.pop());
+      }
+    };
+  }
+};
+var BufferStack = new _BufferStack();
+
+// node_modules/three-mesh-bvh/src/core/cast/shapecast.js
+var _box1;
+var _box2;
+var boxStack = [];
+var boxPool = /* @__PURE__ */ new PrimitivePool(() => new Box3());
+function shapecast(bvh, root, intersectsBounds, intersectsRange, boundsTraverseOrder, byteOffset) {
+  _box1 = boxPool.getPrimitive();
+  _box2 = boxPool.getPrimitive();
+  boxStack.push(_box1, _box2);
+  BufferStack.setBuffer(bvh._roots[root]);
+  const result = shapecastTraverse(0, bvh.geometry, intersectsBounds, intersectsRange, boundsTraverseOrder, byteOffset);
+  BufferStack.clearBuffer();
+  boxPool.releasePrimitive(_box1);
+  boxPool.releasePrimitive(_box2);
+  boxStack.pop();
+  boxStack.pop();
+  const length = boxStack.length;
+  if (length > 0) {
+    _box2 = boxStack[length - 1];
+    _box1 = boxStack[length - 2];
+  }
+  return result;
+}
+function shapecastTraverse(nodeIndex32, geometry, intersectsBoundsFunc, intersectsRangeFunc, nodeScoreFunc = null, nodeIndexByteOffset = 0, depth = 0) {
+  const { float32Array: float32Array2, uint16Array: uint16Array2, uint32Array: uint32Array2 } = BufferStack;
+  let nodeIndex16 = nodeIndex32 * 2;
+  const isLeaf = IS_LEAF(nodeIndex16, uint16Array2);
+  if (isLeaf) {
+    const offset = OFFSET(nodeIndex32, uint32Array2);
+    const count = COUNT(nodeIndex16, uint16Array2);
+    arrayToBox(BOUNDING_DATA_INDEX(nodeIndex32), float32Array2, _box1);
+    return intersectsRangeFunc(offset, count, false, depth, nodeIndexByteOffset + nodeIndex32, _box1);
+  } else {
+    let getLeftOffset = function(nodeIndex322) {
+      const { uint16Array: uint16Array3, uint32Array: uint32Array3 } = BufferStack;
+      let nodeIndex162 = nodeIndex322 * 2;
+      while (!IS_LEAF(nodeIndex162, uint16Array3)) {
+        nodeIndex322 = LEFT_NODE(nodeIndex322);
+        nodeIndex162 = nodeIndex322 * 2;
+      }
+      return OFFSET(nodeIndex322, uint32Array3);
+    }, getRightEndOffset = function(nodeIndex322) {
+      const { uint16Array: uint16Array3, uint32Array: uint32Array3 } = BufferStack;
+      let nodeIndex162 = nodeIndex322 * 2;
+      while (!IS_LEAF(nodeIndex162, uint16Array3)) {
+        nodeIndex322 = RIGHT_NODE(nodeIndex322, uint32Array3);
+        nodeIndex162 = nodeIndex322 * 2;
+      }
+      return OFFSET(nodeIndex322, uint32Array3) + COUNT(nodeIndex162, uint16Array3);
+    };
+    const left = LEFT_NODE(nodeIndex32);
+    const right = RIGHT_NODE(nodeIndex32, uint32Array2);
+    let c1 = left;
+    let c2 = right;
+    let score1, score2;
+    let box1, box2;
+    if (nodeScoreFunc) {
+      box1 = _box1;
+      box2 = _box2;
+      arrayToBox(BOUNDING_DATA_INDEX(c1), float32Array2, box1);
+      arrayToBox(BOUNDING_DATA_INDEX(c2), float32Array2, box2);
+      score1 = nodeScoreFunc(box1);
+      score2 = nodeScoreFunc(box2);
+      if (score2 < score1) {
+        c1 = right;
+        c2 = left;
+        const temp5 = score1;
+        score1 = score2;
+        score2 = temp5;
+        box1 = box2;
+      }
+    }
+    if (!box1) {
+      box1 = _box1;
+      arrayToBox(BOUNDING_DATA_INDEX(c1), float32Array2, box1);
+    }
+    const isC1Leaf = IS_LEAF(c1 * 2, uint16Array2);
+    const c1Intersection = intersectsBoundsFunc(box1, isC1Leaf, score1, depth + 1, nodeIndexByteOffset + c1);
+    let c1StopTraversal;
+    if (c1Intersection === CONTAINED) {
+      const offset = getLeftOffset(c1);
+      const end = getRightEndOffset(c1);
+      const count = end - offset;
+      c1StopTraversal = intersectsRangeFunc(offset, count, true, depth + 1, nodeIndexByteOffset + c1, box1);
+    } else {
+      c1StopTraversal = c1Intersection && shapecastTraverse(
+        c1,
+        geometry,
+        intersectsBoundsFunc,
+        intersectsRangeFunc,
+        nodeScoreFunc,
+        nodeIndexByteOffset,
+        depth + 1
+      );
+    }
+    if (c1StopTraversal) return true;
+    box2 = _box2;
+    arrayToBox(BOUNDING_DATA_INDEX(c2), float32Array2, box2);
+    const isC2Leaf = IS_LEAF(c2 * 2, uint16Array2);
+    const c2Intersection = intersectsBoundsFunc(box2, isC2Leaf, score2, depth + 1, nodeIndexByteOffset + c2);
+    let c2StopTraversal;
+    if (c2Intersection === CONTAINED) {
+      const offset = getLeftOffset(c2);
+      const end = getRightEndOffset(c2);
+      const count = end - offset;
+      c2StopTraversal = intersectsRangeFunc(offset, count, true, depth + 1, nodeIndexByteOffset + c2, box2);
+    } else {
+      c2StopTraversal = c2Intersection && shapecastTraverse(
+        c2,
+        geometry,
+        intersectsBoundsFunc,
+        intersectsRangeFunc,
+        nodeScoreFunc,
+        nodeIndexByteOffset,
+        depth + 1
+      );
+    }
+    if (c2StopTraversal) return true;
+    return false;
+  }
+}
+
+// node_modules/three-mesh-bvh/src/core/cast/closestPointToPoint.js
+var temp = /* @__PURE__ */ new Vector3();
+var temp1 = /* @__PURE__ */ new Vector3();
+function closestPointToPoint(bvh, point, target = {}, minThreshold = 0, maxThreshold = Infinity) {
+  const minThresholdSq = minThreshold * minThreshold;
+  const maxThresholdSq = maxThreshold * maxThreshold;
+  let closestDistanceSq = Infinity;
+  let closestDistanceTriIndex = null;
+  bvh.shapecast(
+    {
+      boundsTraverseOrder: (box) => {
+        temp.copy(point).clamp(box.min, box.max);
+        return temp.distanceToSquared(point);
+      },
+      intersectsBounds: (box, isLeaf, score) => {
+        return score < closestDistanceSq && score < maxThresholdSq;
+      },
+      intersectsTriangle: (tri, triIndex) => {
+        tri.closestPointToPoint(point, temp);
+        const distSq = point.distanceToSquared(temp);
+        if (distSq < closestDistanceSq) {
+          temp1.copy(temp);
+          closestDistanceSq = distSq;
+          closestDistanceTriIndex = triIndex;
+        }
+        if (distSq < minThresholdSq) {
+          return true;
+        } else {
+          return false;
+        }
+      }
+    }
+  );
+  if (closestDistanceSq === Infinity) return null;
+  const closestDistance = Math.sqrt(closestDistanceSq);
+  if (!target.point) target.point = temp1.clone();
+  else target.point.copy(temp1);
+  target.distance = closestDistance, target.faceIndex = closestDistanceTriIndex;
+  return target;
+}
+
+// node_modules/three-mesh-bvh/src/utils/ThreeRayIntersectUtilities.js
+var _vA3 = /* @__PURE__ */ new Vector3();
+var _vB3 = /* @__PURE__ */ new Vector3();
+var _vC3 = /* @__PURE__ */ new Vector3();
+var _uvA2 = /* @__PURE__ */ new Vector2();
+var _uvB2 = /* @__PURE__ */ new Vector2();
+var _uvC2 = /* @__PURE__ */ new Vector2();
+var _normalA = /* @__PURE__ */ new Vector3();
+var _normalB = /* @__PURE__ */ new Vector3();
+var _normalC = /* @__PURE__ */ new Vector3();
+var _intersectionPoint2 = /* @__PURE__ */ new Vector3();
+function checkIntersection2(ray, pA, pB, pC, point, side, near, far) {
+  let intersect2;
+  if (side === BackSide) {
+    intersect2 = ray.intersectTriangle(pC, pB, pA, true, point);
+  } else {
+    intersect2 = ray.intersectTriangle(pA, pB, pC, side !== DoubleSide, point);
+  }
+  if (intersect2 === null) return null;
+  const distance = ray.origin.distanceTo(point);
+  if (distance < near || distance > far) return null;
+  return {
+    distance,
+    point: point.clone()
+  };
+}
+function checkBufferGeometryIntersection(ray, position, normal, uv, uv1, a, b, c, side, near, far) {
+  _vA3.fromBufferAttribute(position, a);
+  _vB3.fromBufferAttribute(position, b);
+  _vC3.fromBufferAttribute(position, c);
+  const intersection = checkIntersection2(ray, _vA3, _vB3, _vC3, _intersectionPoint2, side, near, far);
+  if (intersection) {
+    if (uv) {
+      _uvA2.fromBufferAttribute(uv, a);
+      _uvB2.fromBufferAttribute(uv, b);
+      _uvC2.fromBufferAttribute(uv, c);
+      intersection.uv = Triangle.getInterpolation(_intersectionPoint2, _vA3, _vB3, _vC3, _uvA2, _uvB2, _uvC2, new Vector2());
+    }
+    if (uv1) {
+      _uvA2.fromBufferAttribute(uv1, a);
+      _uvB2.fromBufferAttribute(uv1, b);
+      _uvC2.fromBufferAttribute(uv1, c);
+      intersection.uv1 = Triangle.getInterpolation(_intersectionPoint2, _vA3, _vB3, _vC3, _uvA2, _uvB2, _uvC2, new Vector2());
+    }
+    if (normal) {
+      _normalA.fromBufferAttribute(normal, a);
+      _normalB.fromBufferAttribute(normal, b);
+      _normalC.fromBufferAttribute(normal, c);
+      intersection.normal = Triangle.getInterpolation(_intersectionPoint2, _vA3, _vB3, _vC3, _normalA, _normalB, _normalC, new Vector3());
+      if (intersection.normal.dot(ray.direction) > 0) {
+        intersection.normal.multiplyScalar(-1);
+      }
+    }
+    const face = {
+      a,
+      b,
+      c,
+      normal: new Vector3(),
+      materialIndex: 0
+    };
+    Triangle.getNormal(_vA3, _vB3, _vC3, face.normal);
+    intersection.face = face;
+    intersection.faceIndex = a;
+  }
+  return intersection;
+}
+function intersectTri(geo, side, ray, tri, intersections, near, far) {
+  const triOffset = tri * 3;
+  let a = triOffset + 0;
+  let b = triOffset + 1;
+  let c = triOffset + 2;
+  const index = geo.index;
+  if (geo.index) {
+    a = index.getX(a);
+    b = index.getX(b);
+    c = index.getX(c);
+  }
+  const { position, normal, uv, uv1 } = geo.attributes;
+  const intersection = checkBufferGeometryIntersection(ray, position, normal, uv, uv1, a, b, c, side, near, far);
+  if (intersection) {
+    intersection.faceIndex = tri;
+    if (intersections) intersections.push(intersection);
+    return intersection;
+  }
+  return null;
+}
+
+// node_modules/three-mesh-bvh/src/utils/TriangleUtilities.js
+function setTriangle(tri, i, index, pos) {
+  const ta = tri.a;
+  const tb = tri.b;
+  const tc = tri.c;
+  let i0 = i;
+  let i1 = i + 1;
+  let i2 = i + 2;
+  if (index) {
+    i0 = index.getX(i0);
+    i1 = index.getX(i1);
+    i2 = index.getX(i2);
+  }
+  ta.x = pos.getX(i0);
+  ta.y = pos.getY(i0);
+  ta.z = pos.getZ(i0);
+  tb.x = pos.getX(i1);
+  tb.y = pos.getY(i1);
+  tb.z = pos.getZ(i1);
+  tc.x = pos.getX(i2);
+  tc.y = pos.getY(i2);
+  tc.z = pos.getZ(i2);
+}
+
+// node_modules/three-mesh-bvh/src/core/utils/iterationUtils.generated.js
+function intersectTris(bvh, side, ray, offset, count, intersections, near, far) {
+  const { geometry, _indirectBuffer } = bvh;
+  for (let i = offset, end = offset + count; i < end; i++) {
+    intersectTri(geometry, side, ray, i, intersections, near, far);
+  }
+}
+function intersectClosestTri(bvh, side, ray, offset, count, near, far) {
+  const { geometry, _indirectBuffer } = bvh;
+  let dist = Infinity;
+  let res = null;
+  for (let i = offset, end = offset + count; i < end; i++) {
+    let intersection;
+    intersection = intersectTri(geometry, side, ray, i, null, near, far);
+    if (intersection && intersection.distance < dist) {
+      res = intersection;
+      dist = intersection.distance;
+    }
+  }
+  return res;
+}
+function iterateOverTriangles(offset, count, bvh, intersectsTriangleFunc, contained, depth, triangle4) {
+  const { geometry } = bvh;
+  const { index } = geometry;
+  const pos = geometry.attributes.position;
+  for (let i = offset, l = count + offset; i < l; i++) {
+    let tri;
+    tri = i;
+    setTriangle(triangle4, tri * 3, index, pos);
+    triangle4.needsUpdate = true;
+    if (intersectsTriangleFunc(triangle4, tri, contained, depth)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// node_modules/three-mesh-bvh/src/core/cast/refit.generated.js
+function refit(bvh, nodeIndices = null) {
+  if (nodeIndices && Array.isArray(nodeIndices)) {
+    nodeIndices = new Set(nodeIndices);
+  }
+  const geometry = bvh.geometry;
+  const indexArr = geometry.index ? geometry.index.array : null;
+  const posAttr = geometry.attributes.position;
+  let buffer, uint32Array2, uint16Array2, float32Array2;
+  let byteOffset = 0;
+  const roots = bvh._roots;
+  for (let i = 0, l = roots.length; i < l; i++) {
+    buffer = roots[i];
+    uint32Array2 = new Uint32Array(buffer);
+    uint16Array2 = new Uint16Array(buffer);
+    float32Array2 = new Float32Array(buffer);
+    _traverse2(0, byteOffset);
+    byteOffset += buffer.byteLength;
+  }
+  function _traverse2(node32Index, byteOffset2, force = false) {
+    const node16Index = node32Index * 2;
+    const isLeaf = uint16Array2[node16Index + 15] === IS_LEAFNODE_FLAG;
+    if (isLeaf) {
+      const offset = uint32Array2[node32Index + 6];
+      const count = uint16Array2[node16Index + 14];
+      let minx = Infinity;
+      let miny = Infinity;
+      let minz = Infinity;
+      let maxx = -Infinity;
+      let maxy = -Infinity;
+      let maxz = -Infinity;
+      for (let i = 3 * offset, l = 3 * (offset + count); i < l; i++) {
+        let index = indexArr[i];
+        const x = posAttr.getX(index);
+        const y = posAttr.getY(index);
+        const z = posAttr.getZ(index);
+        if (x < minx) minx = x;
+        if (x > maxx) maxx = x;
+        if (y < miny) miny = y;
+        if (y > maxy) maxy = y;
+        if (z < minz) minz = z;
+        if (z > maxz) maxz = z;
+      }
+      if (float32Array2[node32Index + 0] !== minx || float32Array2[node32Index + 1] !== miny || float32Array2[node32Index + 2] !== minz || float32Array2[node32Index + 3] !== maxx || float32Array2[node32Index + 4] !== maxy || float32Array2[node32Index + 5] !== maxz) {
+        float32Array2[node32Index + 0] = minx;
+        float32Array2[node32Index + 1] = miny;
+        float32Array2[node32Index + 2] = minz;
+        float32Array2[node32Index + 3] = maxx;
+        float32Array2[node32Index + 4] = maxy;
+        float32Array2[node32Index + 5] = maxz;
+        return true;
+      } else {
+        return false;
+      }
+    } else {
+      const left = node32Index + 8;
+      const right = uint32Array2[node32Index + 6];
+      const offsetLeft = left + byteOffset2;
+      const offsetRight = right + byteOffset2;
+      let forceChildren = force;
+      let includesLeft = false;
+      let includesRight = false;
+      if (nodeIndices) {
+        if (!forceChildren) {
+          includesLeft = nodeIndices.has(offsetLeft);
+          includesRight = nodeIndices.has(offsetRight);
+          forceChildren = !includesLeft && !includesRight;
+        }
+      } else {
+        includesLeft = true;
+        includesRight = true;
+      }
+      const traverseLeft = forceChildren || includesLeft;
+      const traverseRight = forceChildren || includesRight;
+      let leftChange = false;
+      if (traverseLeft) {
+        leftChange = _traverse2(left, byteOffset2, forceChildren);
+      }
+      let rightChange = false;
+      if (traverseRight) {
+        rightChange = _traverse2(right, byteOffset2, forceChildren);
+      }
+      const didChange = leftChange || rightChange;
+      if (didChange) {
+        for (let i = 0; i < 3; i++) {
+          const lefti = left + i;
+          const righti = right + i;
+          const minLeftValue = float32Array2[lefti];
+          const maxLeftValue = float32Array2[lefti + 3];
+          const minRightValue = float32Array2[righti];
+          const maxRightValue = float32Array2[righti + 3];
+          float32Array2[node32Index + i] = minLeftValue < minRightValue ? minLeftValue : minRightValue;
+          float32Array2[node32Index + i + 3] = maxLeftValue > maxRightValue ? maxLeftValue : maxRightValue;
+        }
+      }
+      return didChange;
+    }
+  }
+}
+
+// node_modules/three-mesh-bvh/src/core/utils/intersectUtils.js
+function intersectRay(nodeIndex32, array, ray, near, far) {
+  let tmin, tmax, tymin, tymax, tzmin, tzmax;
+  const invdirx = 1 / ray.direction.x, invdiry = 1 / ray.direction.y, invdirz = 1 / ray.direction.z;
+  const ox = ray.origin.x;
+  const oy = ray.origin.y;
+  const oz = ray.origin.z;
+  let minx = array[nodeIndex32];
+  let maxx = array[nodeIndex32 + 3];
+  let miny = array[nodeIndex32 + 1];
+  let maxy = array[nodeIndex32 + 3 + 1];
+  let minz = array[nodeIndex32 + 2];
+  let maxz = array[nodeIndex32 + 3 + 2];
+  if (invdirx >= 0) {
+    tmin = (minx - ox) * invdirx;
+    tmax = (maxx - ox) * invdirx;
+  } else {
+    tmin = (maxx - ox) * invdirx;
+    tmax = (minx - ox) * invdirx;
+  }
+  if (invdiry >= 0) {
+    tymin = (miny - oy) * invdiry;
+    tymax = (maxy - oy) * invdiry;
+  } else {
+    tymin = (maxy - oy) * invdiry;
+    tymax = (miny - oy) * invdiry;
+  }
+  if (tmin > tymax || tymin > tmax) return false;
+  if (tymin > tmin || isNaN(tmin)) tmin = tymin;
+  if (tymax < tmax || isNaN(tmax)) tmax = tymax;
+  if (invdirz >= 0) {
+    tzmin = (minz - oz) * invdirz;
+    tzmax = (maxz - oz) * invdirz;
+  } else {
+    tzmin = (maxz - oz) * invdirz;
+    tzmax = (minz - oz) * invdirz;
+  }
+  if (tmin > tzmax || tzmin > tmax) return false;
+  if (tzmin > tmin || tmin !== tmin) tmin = tzmin;
+  if (tzmax < tmax || tmax !== tmax) tmax = tzmax;
+  return tmin <= far && tmax >= near;
+}
+
+// node_modules/three-mesh-bvh/src/core/utils/iterationUtils_indirect.generated.js
+function intersectTris_indirect(bvh, side, ray, offset, count, intersections, near, far) {
+  const { geometry, _indirectBuffer } = bvh;
+  for (let i = offset, end = offset + count; i < end; i++) {
+    let vi = _indirectBuffer ? _indirectBuffer[i] : i;
+    intersectTri(geometry, side, ray, vi, intersections, near, far);
+  }
+}
+function intersectClosestTri_indirect(bvh, side, ray, offset, count, near, far) {
+  const { geometry, _indirectBuffer } = bvh;
+  let dist = Infinity;
+  let res = null;
+  for (let i = offset, end = offset + count; i < end; i++) {
+    let intersection;
+    intersection = intersectTri(geometry, side, ray, _indirectBuffer ? _indirectBuffer[i] : i, null, near, far);
+    if (intersection && intersection.distance < dist) {
+      res = intersection;
+      dist = intersection.distance;
+    }
+  }
+  return res;
+}
+function iterateOverTriangles_indirect(offset, count, bvh, intersectsTriangleFunc, contained, depth, triangle4) {
+  const { geometry } = bvh;
+  const { index } = geometry;
+  const pos = geometry.attributes.position;
+  for (let i = offset, l = count + offset; i < l; i++) {
+    let tri;
+    tri = bvh.resolveTriangleIndex(i);
+    setTriangle(triangle4, tri * 3, index, pos);
+    triangle4.needsUpdate = true;
+    if (intersectsTriangleFunc(triangle4, tri, contained, depth)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// node_modules/three-mesh-bvh/src/core/cast/raycast.generated.js
+function raycast2(bvh, root, side, ray, intersects2, near, far) {
+  BufferStack.setBuffer(bvh._roots[root]);
+  _raycast(0, bvh, side, ray, intersects2, near, far);
+  BufferStack.clearBuffer();
+}
+function _raycast(nodeIndex32, bvh, side, ray, intersects2, near, far) {
+  const { float32Array: float32Array2, uint16Array: uint16Array2, uint32Array: uint32Array2 } = BufferStack;
+  const nodeIndex16 = nodeIndex32 * 2;
+  const isLeaf = IS_LEAF(nodeIndex16, uint16Array2);
+  if (isLeaf) {
+    const offset = OFFSET(nodeIndex32, uint32Array2);
+    const count = COUNT(nodeIndex16, uint16Array2);
+    intersectTris(bvh, side, ray, offset, count, intersects2, near, far);
+  } else {
+    const leftIndex = LEFT_NODE(nodeIndex32);
+    if (intersectRay(leftIndex, float32Array2, ray, near, far)) {
+      _raycast(leftIndex, bvh, side, ray, intersects2, near, far);
+    }
+    const rightIndex = RIGHT_NODE(nodeIndex32, uint32Array2);
+    if (intersectRay(rightIndex, float32Array2, ray, near, far)) {
+      _raycast(rightIndex, bvh, side, ray, intersects2, near, far);
+    }
+  }
+}
+
+// node_modules/three-mesh-bvh/src/core/cast/raycastFirst.generated.js
+var _xyzFields = ["x", "y", "z"];
+function raycastFirst(bvh, root, side, ray, near, far) {
+  BufferStack.setBuffer(bvh._roots[root]);
+  const result = _raycastFirst(0, bvh, side, ray, near, far);
+  BufferStack.clearBuffer();
+  return result;
+}
+function _raycastFirst(nodeIndex32, bvh, side, ray, near, far) {
+  const { float32Array: float32Array2, uint16Array: uint16Array2, uint32Array: uint32Array2 } = BufferStack;
+  let nodeIndex16 = nodeIndex32 * 2;
+  const isLeaf = IS_LEAF(nodeIndex16, uint16Array2);
+  if (isLeaf) {
+    const offset = OFFSET(nodeIndex32, uint32Array2);
+    const count = COUNT(nodeIndex16, uint16Array2);
+    return intersectClosestTri(bvh, side, ray, offset, count, near, far);
+  } else {
+    const splitAxis = SPLIT_AXIS(nodeIndex32, uint32Array2);
+    const xyzAxis = _xyzFields[splitAxis];
+    const rayDir = ray.direction[xyzAxis];
+    const leftToRight = rayDir >= 0;
+    let c1, c2;
+    if (leftToRight) {
+      c1 = LEFT_NODE(nodeIndex32);
+      c2 = RIGHT_NODE(nodeIndex32, uint32Array2);
+    } else {
+      c1 = RIGHT_NODE(nodeIndex32, uint32Array2);
+      c2 = LEFT_NODE(nodeIndex32);
+    }
+    const c1Intersection = intersectRay(c1, float32Array2, ray, near, far);
+    const c1Result = c1Intersection ? _raycastFirst(c1, bvh, side, ray, near, far) : null;
+    if (c1Result) {
+      const point = c1Result.point[xyzAxis];
+      const isOutside = leftToRight ? point <= float32Array2[c2 + splitAxis] : (
+        // min bounding data
+        point >= float32Array2[c2 + splitAxis + 3]
+      );
+      if (isOutside) {
+        return c1Result;
+      }
+    }
+    const c2Intersection = intersectRay(c2, float32Array2, ray, near, far);
+    const c2Result = c2Intersection ? _raycastFirst(c2, bvh, side, ray, near, far) : null;
+    if (c1Result && c2Result) {
+      return c1Result.distance <= c2Result.distance ? c1Result : c2Result;
+    } else {
+      return c1Result || c2Result || null;
+    }
+  }
+}
+
+// node_modules/three-mesh-bvh/src/core/cast/intersectsGeometry.generated.js
+var boundingBox = /* @__PURE__ */ new Box3();
+var triangle = /* @__PURE__ */ new ExtendedTriangle();
+var triangle2 = /* @__PURE__ */ new ExtendedTriangle();
+var invertedMat = /* @__PURE__ */ new Matrix4();
+var obb = /* @__PURE__ */ new OrientedBox();
+var obb2 = /* @__PURE__ */ new OrientedBox();
+function intersectsGeometry(bvh, root, otherGeometry, geometryToBvh) {
+  BufferStack.setBuffer(bvh._roots[root]);
+  const result = _intersectsGeometry(0, bvh, otherGeometry, geometryToBvh);
+  BufferStack.clearBuffer();
+  return result;
+}
+function _intersectsGeometry(nodeIndex32, bvh, otherGeometry, geometryToBvh, cachedObb = null) {
+  const { float32Array: float32Array2, uint16Array: uint16Array2, uint32Array: uint32Array2 } = BufferStack;
+  let nodeIndex16 = nodeIndex32 * 2;
+  if (cachedObb === null) {
+    if (!otherGeometry.boundingBox) {
+      otherGeometry.computeBoundingBox();
+    }
+    obb.set(otherGeometry.boundingBox.min, otherGeometry.boundingBox.max, geometryToBvh);
+    cachedObb = obb;
+  }
+  const isLeaf = IS_LEAF(nodeIndex16, uint16Array2);
+  if (isLeaf) {
+    const thisGeometry = bvh.geometry;
+    const thisIndex = thisGeometry.index;
+    const thisPos = thisGeometry.attributes.position;
+    const index = otherGeometry.index;
+    const pos = otherGeometry.attributes.position;
+    const offset = OFFSET(nodeIndex32, uint32Array2);
+    const count = COUNT(nodeIndex16, uint16Array2);
+    invertedMat.copy(geometryToBvh).invert();
+    if (otherGeometry.boundsTree) {
+      arrayToBox(BOUNDING_DATA_INDEX(nodeIndex32), float32Array2, obb2);
+      obb2.matrix.copy(invertedMat);
+      obb2.needsUpdate = true;
+      const res = otherGeometry.boundsTree.shapecast({
+        intersectsBounds: (box) => obb2.intersectsBox(box),
+        intersectsTriangle: (tri) => {
+          tri.a.applyMatrix4(geometryToBvh);
+          tri.b.applyMatrix4(geometryToBvh);
+          tri.c.applyMatrix4(geometryToBvh);
+          tri.needsUpdate = true;
+          for (let i = offset * 3, l = (count + offset) * 3; i < l; i += 3) {
+            setTriangle(triangle2, i, thisIndex, thisPos);
+            triangle2.needsUpdate = true;
+            if (tri.intersectsTriangle(triangle2)) {
+              return true;
+            }
+          }
+          return false;
+        }
+      });
+      return res;
+    } else {
+      for (let i = offset * 3, l = (count + offset) * 3; i < l; i += 3) {
+        setTriangle(triangle, i, thisIndex, thisPos);
+        triangle.a.applyMatrix4(invertedMat);
+        triangle.b.applyMatrix4(invertedMat);
+        triangle.c.applyMatrix4(invertedMat);
+        triangle.needsUpdate = true;
+        for (let i2 = 0, l2 = index.count; i2 < l2; i2 += 3) {
+          setTriangle(triangle2, i2, index, pos);
+          triangle2.needsUpdate = true;
+          if (triangle.intersectsTriangle(triangle2)) {
+            return true;
+          }
+        }
+      }
+    }
+  } else {
+    const left = nodeIndex32 + 8;
+    const right = uint32Array2[nodeIndex32 + 6];
+    arrayToBox(BOUNDING_DATA_INDEX(left), float32Array2, boundingBox);
+    const leftIntersection = cachedObb.intersectsBox(boundingBox) && _intersectsGeometry(left, bvh, otherGeometry, geometryToBvh, cachedObb);
+    if (leftIntersection) return true;
+    arrayToBox(BOUNDING_DATA_INDEX(right), float32Array2, boundingBox);
+    const rightIntersection = cachedObb.intersectsBox(boundingBox) && _intersectsGeometry(right, bvh, otherGeometry, geometryToBvh, cachedObb);
+    if (rightIntersection) return true;
+    return false;
+  }
+}
+
+// node_modules/three-mesh-bvh/src/core/cast/closestPointToGeometry.generated.js
+var tempMatrix = /* @__PURE__ */ new Matrix4();
+var obb3 = /* @__PURE__ */ new OrientedBox();
+var obb22 = /* @__PURE__ */ new OrientedBox();
+var temp12 = /* @__PURE__ */ new Vector3();
+var temp2 = /* @__PURE__ */ new Vector3();
+var temp3 = /* @__PURE__ */ new Vector3();
+var temp4 = /* @__PURE__ */ new Vector3();
+function closestPointToGeometry(bvh, otherGeometry, geometryToBvh, target1 = {}, target2 = {}, minThreshold = 0, maxThreshold = Infinity) {
+  if (!otherGeometry.boundingBox) {
+    otherGeometry.computeBoundingBox();
+  }
+  obb3.set(otherGeometry.boundingBox.min, otherGeometry.boundingBox.max, geometryToBvh);
+  obb3.needsUpdate = true;
+  const geometry = bvh.geometry;
+  const pos = geometry.attributes.position;
+  const index = geometry.index;
+  const otherPos = otherGeometry.attributes.position;
+  const otherIndex = otherGeometry.index;
+  const triangle4 = ExtendedTrianglePool.getPrimitive();
+  const triangle23 = ExtendedTrianglePool.getPrimitive();
+  let tempTarget1 = temp12;
+  let tempTargetDest1 = temp2;
+  let tempTarget2 = null;
+  let tempTargetDest2 = null;
+  if (target2) {
+    tempTarget2 = temp3;
+    tempTargetDest2 = temp4;
+  }
+  let closestDistance = Infinity;
+  let closestDistanceTriIndex = null;
+  let closestDistanceOtherTriIndex = null;
+  tempMatrix.copy(geometryToBvh).invert();
+  obb22.matrix.copy(tempMatrix);
+  bvh.shapecast(
+    {
+      boundsTraverseOrder: (box) => {
+        return obb3.distanceToBox(box);
+      },
+      intersectsBounds: (box, isLeaf, score) => {
+        if (score < closestDistance && score < maxThreshold) {
+          if (isLeaf) {
+            obb22.min.copy(box.min);
+            obb22.max.copy(box.max);
+            obb22.needsUpdate = true;
+          }
+          return true;
+        }
+        return false;
+      },
+      intersectsRange: (offset, count) => {
+        if (otherGeometry.boundsTree) {
+          const otherBvh = otherGeometry.boundsTree;
+          return otherBvh.shapecast({
+            boundsTraverseOrder: (box) => {
+              return obb22.distanceToBox(box);
+            },
+            intersectsBounds: (box, isLeaf, score) => {
+              return score < closestDistance && score < maxThreshold;
+            },
+            intersectsRange: (otherOffset, otherCount) => {
+              for (let i2 = otherOffset, l2 = otherOffset + otherCount; i2 < l2; i2++) {
+                setTriangle(triangle23, 3 * i2, otherIndex, otherPos);
+                triangle23.a.applyMatrix4(geometryToBvh);
+                triangle23.b.applyMatrix4(geometryToBvh);
+                triangle23.c.applyMatrix4(geometryToBvh);
+                triangle23.needsUpdate = true;
+                for (let i = offset, l = offset + count; i < l; i++) {
+                  setTriangle(triangle4, 3 * i, index, pos);
+                  triangle4.needsUpdate = true;
+                  const dist = triangle4.distanceToTriangle(triangle23, tempTarget1, tempTarget2);
+                  if (dist < closestDistance) {
+                    tempTargetDest1.copy(tempTarget1);
+                    if (tempTargetDest2) {
+                      tempTargetDest2.copy(tempTarget2);
+                    }
+                    closestDistance = dist;
+                    closestDistanceTriIndex = i;
+                    closestDistanceOtherTriIndex = i2;
+                  }
+                  if (dist < minThreshold) {
+                    return true;
+                  }
+                }
+              }
+            }
+          });
+        } else {
+          const triCount = getTriCount(otherGeometry);
+          for (let i2 = 0, l2 = triCount; i2 < l2; i2++) {
+            setTriangle(triangle23, 3 * i2, otherIndex, otherPos);
+            triangle23.a.applyMatrix4(geometryToBvh);
+            triangle23.b.applyMatrix4(geometryToBvh);
+            triangle23.c.applyMatrix4(geometryToBvh);
+            triangle23.needsUpdate = true;
+            for (let i = offset, l = offset + count; i < l; i++) {
+              setTriangle(triangle4, 3 * i, index, pos);
+              triangle4.needsUpdate = true;
+              const dist = triangle4.distanceToTriangle(triangle23, tempTarget1, tempTarget2);
+              if (dist < closestDistance) {
+                tempTargetDest1.copy(tempTarget1);
+                if (tempTargetDest2) {
+                  tempTargetDest2.copy(tempTarget2);
+                }
+                closestDistance = dist;
+                closestDistanceTriIndex = i;
+                closestDistanceOtherTriIndex = i2;
+              }
+              if (dist < minThreshold) {
+                return true;
+              }
+            }
+          }
+        }
+      }
+    }
+  );
+  ExtendedTrianglePool.releasePrimitive(triangle4);
+  ExtendedTrianglePool.releasePrimitive(triangle23);
+  if (closestDistance === Infinity) {
+    return null;
+  }
+  if (!target1.point) {
+    target1.point = tempTargetDest1.clone();
+  } else {
+    target1.point.copy(tempTargetDest1);
+  }
+  target1.distance = closestDistance, target1.faceIndex = closestDistanceTriIndex;
+  if (target2) {
+    if (!target2.point) target2.point = tempTargetDest2.clone();
+    else target2.point.copy(tempTargetDest2);
+    target2.point.applyMatrix4(tempMatrix);
+    tempTargetDest1.applyMatrix4(tempMatrix);
+    target2.distance = tempTargetDest1.sub(target2.point).length();
+    target2.faceIndex = closestDistanceOtherTriIndex;
+  }
+  return target1;
+}
+
+// node_modules/three-mesh-bvh/src/core/cast/refit_indirect.generated.js
+function refit_indirect(bvh, nodeIndices = null) {
+  if (nodeIndices && Array.isArray(nodeIndices)) {
+    nodeIndices = new Set(nodeIndices);
+  }
+  const geometry = bvh.geometry;
+  const indexArr = geometry.index ? geometry.index.array : null;
+  const posAttr = geometry.attributes.position;
+  let buffer, uint32Array2, uint16Array2, float32Array2;
+  let byteOffset = 0;
+  const roots = bvh._roots;
+  for (let i = 0, l = roots.length; i < l; i++) {
+    buffer = roots[i];
+    uint32Array2 = new Uint32Array(buffer);
+    uint16Array2 = new Uint16Array(buffer);
+    float32Array2 = new Float32Array(buffer);
+    _traverse2(0, byteOffset);
+    byteOffset += buffer.byteLength;
+  }
+  function _traverse2(node32Index, byteOffset2, force = false) {
+    const node16Index = node32Index * 2;
+    const isLeaf = uint16Array2[node16Index + 15] === IS_LEAFNODE_FLAG;
+    if (isLeaf) {
+      const offset = uint32Array2[node32Index + 6];
+      const count = uint16Array2[node16Index + 14];
+      let minx = Infinity;
+      let miny = Infinity;
+      let minz = Infinity;
+      let maxx = -Infinity;
+      let maxy = -Infinity;
+      let maxz = -Infinity;
+      for (let i = offset, l = offset + count; i < l; i++) {
+        const t2 = 3 * bvh.resolveTriangleIndex(i);
+        for (let j = 0; j < 3; j++) {
+          let index = t2 + j;
+          index = indexArr ? indexArr[index] : index;
+          const x = posAttr.getX(index);
+          const y = posAttr.getY(index);
+          const z = posAttr.getZ(index);
+          if (x < minx) minx = x;
+          if (x > maxx) maxx = x;
+          if (y < miny) miny = y;
+          if (y > maxy) maxy = y;
+          if (z < minz) minz = z;
+          if (z > maxz) maxz = z;
+        }
+      }
+      if (float32Array2[node32Index + 0] !== minx || float32Array2[node32Index + 1] !== miny || float32Array2[node32Index + 2] !== minz || float32Array2[node32Index + 3] !== maxx || float32Array2[node32Index + 4] !== maxy || float32Array2[node32Index + 5] !== maxz) {
+        float32Array2[node32Index + 0] = minx;
+        float32Array2[node32Index + 1] = miny;
+        float32Array2[node32Index + 2] = minz;
+        float32Array2[node32Index + 3] = maxx;
+        float32Array2[node32Index + 4] = maxy;
+        float32Array2[node32Index + 5] = maxz;
+        return true;
+      } else {
+        return false;
+      }
+    } else {
+      const left = node32Index + 8;
+      const right = uint32Array2[node32Index + 6];
+      const offsetLeft = left + byteOffset2;
+      const offsetRight = right + byteOffset2;
+      let forceChildren = force;
+      let includesLeft = false;
+      let includesRight = false;
+      if (nodeIndices) {
+        if (!forceChildren) {
+          includesLeft = nodeIndices.has(offsetLeft);
+          includesRight = nodeIndices.has(offsetRight);
+          forceChildren = !includesLeft && !includesRight;
+        }
+      } else {
+        includesLeft = true;
+        includesRight = true;
+      }
+      const traverseLeft = forceChildren || includesLeft;
+      const traverseRight = forceChildren || includesRight;
+      let leftChange = false;
+      if (traverseLeft) {
+        leftChange = _traverse2(left, byteOffset2, forceChildren);
+      }
+      let rightChange = false;
+      if (traverseRight) {
+        rightChange = _traverse2(right, byteOffset2, forceChildren);
+      }
+      const didChange = leftChange || rightChange;
+      if (didChange) {
+        for (let i = 0; i < 3; i++) {
+          const lefti = left + i;
+          const righti = right + i;
+          const minLeftValue = float32Array2[lefti];
+          const maxLeftValue = float32Array2[lefti + 3];
+          const minRightValue = float32Array2[righti];
+          const maxRightValue = float32Array2[righti + 3];
+          float32Array2[node32Index + i] = minLeftValue < minRightValue ? minLeftValue : minRightValue;
+          float32Array2[node32Index + i + 3] = maxLeftValue > maxRightValue ? maxLeftValue : maxRightValue;
+        }
+      }
+      return didChange;
+    }
+  }
+}
+
+// node_modules/three-mesh-bvh/src/core/cast/raycast_indirect.generated.js
+function raycast_indirect(bvh, root, side, ray, intersects2, near, far) {
+  BufferStack.setBuffer(bvh._roots[root]);
+  _raycast2(0, bvh, side, ray, intersects2, near, far);
+  BufferStack.clearBuffer();
+}
+function _raycast2(nodeIndex32, bvh, side, ray, intersects2, near, far) {
+  const { float32Array: float32Array2, uint16Array: uint16Array2, uint32Array: uint32Array2 } = BufferStack;
+  const nodeIndex16 = nodeIndex32 * 2;
+  const isLeaf = IS_LEAF(nodeIndex16, uint16Array2);
+  if (isLeaf) {
+    const offset = OFFSET(nodeIndex32, uint32Array2);
+    const count = COUNT(nodeIndex16, uint16Array2);
+    intersectTris_indirect(bvh, side, ray, offset, count, intersects2, near, far);
+  } else {
+    const leftIndex = LEFT_NODE(nodeIndex32);
+    if (intersectRay(leftIndex, float32Array2, ray, near, far)) {
+      _raycast2(leftIndex, bvh, side, ray, intersects2, near, far);
+    }
+    const rightIndex = RIGHT_NODE(nodeIndex32, uint32Array2);
+    if (intersectRay(rightIndex, float32Array2, ray, near, far)) {
+      _raycast2(rightIndex, bvh, side, ray, intersects2, near, far);
+    }
+  }
+}
+
+// node_modules/three-mesh-bvh/src/core/cast/raycastFirst_indirect.generated.js
+var _xyzFields2 = ["x", "y", "z"];
+function raycastFirst_indirect(bvh, root, side, ray, near, far) {
+  BufferStack.setBuffer(bvh._roots[root]);
+  const result = _raycastFirst2(0, bvh, side, ray, near, far);
+  BufferStack.clearBuffer();
+  return result;
+}
+function _raycastFirst2(nodeIndex32, bvh, side, ray, near, far) {
+  const { float32Array: float32Array2, uint16Array: uint16Array2, uint32Array: uint32Array2 } = BufferStack;
+  let nodeIndex16 = nodeIndex32 * 2;
+  const isLeaf = IS_LEAF(nodeIndex16, uint16Array2);
+  if (isLeaf) {
+    const offset = OFFSET(nodeIndex32, uint32Array2);
+    const count = COUNT(nodeIndex16, uint16Array2);
+    return intersectClosestTri_indirect(bvh, side, ray, offset, count, near, far);
+  } else {
+    const splitAxis = SPLIT_AXIS(nodeIndex32, uint32Array2);
+    const xyzAxis = _xyzFields2[splitAxis];
+    const rayDir = ray.direction[xyzAxis];
+    const leftToRight = rayDir >= 0;
+    let c1, c2;
+    if (leftToRight) {
+      c1 = LEFT_NODE(nodeIndex32);
+      c2 = RIGHT_NODE(nodeIndex32, uint32Array2);
+    } else {
+      c1 = RIGHT_NODE(nodeIndex32, uint32Array2);
+      c2 = LEFT_NODE(nodeIndex32);
+    }
+    const c1Intersection = intersectRay(c1, float32Array2, ray, near, far);
+    const c1Result = c1Intersection ? _raycastFirst2(c1, bvh, side, ray, near, far) : null;
+    if (c1Result) {
+      const point = c1Result.point[xyzAxis];
+      const isOutside = leftToRight ? point <= float32Array2[c2 + splitAxis] : (
+        // min bounding data
+        point >= float32Array2[c2 + splitAxis + 3]
+      );
+      if (isOutside) {
+        return c1Result;
+      }
+    }
+    const c2Intersection = intersectRay(c2, float32Array2, ray, near, far);
+    const c2Result = c2Intersection ? _raycastFirst2(c2, bvh, side, ray, near, far) : null;
+    if (c1Result && c2Result) {
+      return c1Result.distance <= c2Result.distance ? c1Result : c2Result;
+    } else {
+      return c1Result || c2Result || null;
+    }
+  }
+}
+
+// node_modules/three-mesh-bvh/src/core/cast/intersectsGeometry_indirect.generated.js
+var boundingBox2 = /* @__PURE__ */ new Box3();
+var triangle3 = /* @__PURE__ */ new ExtendedTriangle();
+var triangle22 = /* @__PURE__ */ new ExtendedTriangle();
+var invertedMat2 = /* @__PURE__ */ new Matrix4();
+var obb4 = /* @__PURE__ */ new OrientedBox();
+var obb23 = /* @__PURE__ */ new OrientedBox();
+function intersectsGeometry_indirect(bvh, root, otherGeometry, geometryToBvh) {
+  BufferStack.setBuffer(bvh._roots[root]);
+  const result = _intersectsGeometry2(0, bvh, otherGeometry, geometryToBvh);
+  BufferStack.clearBuffer();
+  return result;
+}
+function _intersectsGeometry2(nodeIndex32, bvh, otherGeometry, geometryToBvh, cachedObb = null) {
+  const { float32Array: float32Array2, uint16Array: uint16Array2, uint32Array: uint32Array2 } = BufferStack;
+  let nodeIndex16 = nodeIndex32 * 2;
+  if (cachedObb === null) {
+    if (!otherGeometry.boundingBox) {
+      otherGeometry.computeBoundingBox();
+    }
+    obb4.set(otherGeometry.boundingBox.min, otherGeometry.boundingBox.max, geometryToBvh);
+    cachedObb = obb4;
+  }
+  const isLeaf = IS_LEAF(nodeIndex16, uint16Array2);
+  if (isLeaf) {
+    const thisGeometry = bvh.geometry;
+    const thisIndex = thisGeometry.index;
+    const thisPos = thisGeometry.attributes.position;
+    const index = otherGeometry.index;
+    const pos = otherGeometry.attributes.position;
+    const offset = OFFSET(nodeIndex32, uint32Array2);
+    const count = COUNT(nodeIndex16, uint16Array2);
+    invertedMat2.copy(geometryToBvh).invert();
+    if (otherGeometry.boundsTree) {
+      arrayToBox(BOUNDING_DATA_INDEX(nodeIndex32), float32Array2, obb23);
+      obb23.matrix.copy(invertedMat2);
+      obb23.needsUpdate = true;
+      const res = otherGeometry.boundsTree.shapecast({
+        intersectsBounds: (box) => obb23.intersectsBox(box),
+        intersectsTriangle: (tri) => {
+          tri.a.applyMatrix4(geometryToBvh);
+          tri.b.applyMatrix4(geometryToBvh);
+          tri.c.applyMatrix4(geometryToBvh);
+          tri.needsUpdate = true;
+          for (let i = offset, l = count + offset; i < l; i++) {
+            setTriangle(triangle22, 3 * bvh.resolveTriangleIndex(i), thisIndex, thisPos);
+            triangle22.needsUpdate = true;
+            if (tri.intersectsTriangle(triangle22)) {
+              return true;
+            }
+          }
+          return false;
+        }
+      });
+      return res;
+    } else {
+      for (let i = offset, l = count + offset; i < l; i++) {
+        const ti = bvh.resolveTriangleIndex(i);
+        setTriangle(triangle3, 3 * ti, thisIndex, thisPos);
+        triangle3.a.applyMatrix4(invertedMat2);
+        triangle3.b.applyMatrix4(invertedMat2);
+        triangle3.c.applyMatrix4(invertedMat2);
+        triangle3.needsUpdate = true;
+        for (let i2 = 0, l2 = index.count; i2 < l2; i2 += 3) {
+          setTriangle(triangle22, i2, index, pos);
+          triangle22.needsUpdate = true;
+          if (triangle3.intersectsTriangle(triangle22)) {
+            return true;
+          }
+        }
+      }
+    }
+  } else {
+    const left = nodeIndex32 + 8;
+    const right = uint32Array2[nodeIndex32 + 6];
+    arrayToBox(BOUNDING_DATA_INDEX(left), float32Array2, boundingBox2);
+    const leftIntersection = cachedObb.intersectsBox(boundingBox2) && _intersectsGeometry2(left, bvh, otherGeometry, geometryToBvh, cachedObb);
+    if (leftIntersection) return true;
+    arrayToBox(BOUNDING_DATA_INDEX(right), float32Array2, boundingBox2);
+    const rightIntersection = cachedObb.intersectsBox(boundingBox2) && _intersectsGeometry2(right, bvh, otherGeometry, geometryToBvh, cachedObb);
+    if (rightIntersection) return true;
+    return false;
+  }
+}
+
+// node_modules/three-mesh-bvh/src/core/cast/closestPointToGeometry_indirect.generated.js
+var tempMatrix2 = /* @__PURE__ */ new Matrix4();
+var obb5 = /* @__PURE__ */ new OrientedBox();
+var obb24 = /* @__PURE__ */ new OrientedBox();
+var temp13 = /* @__PURE__ */ new Vector3();
+var temp22 = /* @__PURE__ */ new Vector3();
+var temp32 = /* @__PURE__ */ new Vector3();
+var temp42 = /* @__PURE__ */ new Vector3();
+function closestPointToGeometry_indirect(bvh, otherGeometry, geometryToBvh, target1 = {}, target2 = {}, minThreshold = 0, maxThreshold = Infinity) {
+  if (!otherGeometry.boundingBox) {
+    otherGeometry.computeBoundingBox();
+  }
+  obb5.set(otherGeometry.boundingBox.min, otherGeometry.boundingBox.max, geometryToBvh);
+  obb5.needsUpdate = true;
+  const geometry = bvh.geometry;
+  const pos = geometry.attributes.position;
+  const index = geometry.index;
+  const otherPos = otherGeometry.attributes.position;
+  const otherIndex = otherGeometry.index;
+  const triangle4 = ExtendedTrianglePool.getPrimitive();
+  const triangle23 = ExtendedTrianglePool.getPrimitive();
+  let tempTarget1 = temp13;
+  let tempTargetDest1 = temp22;
+  let tempTarget2 = null;
+  let tempTargetDest2 = null;
+  if (target2) {
+    tempTarget2 = temp32;
+    tempTargetDest2 = temp42;
+  }
+  let closestDistance = Infinity;
+  let closestDistanceTriIndex = null;
+  let closestDistanceOtherTriIndex = null;
+  tempMatrix2.copy(geometryToBvh).invert();
+  obb24.matrix.copy(tempMatrix2);
+  bvh.shapecast(
+    {
+      boundsTraverseOrder: (box) => {
+        return obb5.distanceToBox(box);
+      },
+      intersectsBounds: (box, isLeaf, score) => {
+        if (score < closestDistance && score < maxThreshold) {
+          if (isLeaf) {
+            obb24.min.copy(box.min);
+            obb24.max.copy(box.max);
+            obb24.needsUpdate = true;
+          }
+          return true;
+        }
+        return false;
+      },
+      intersectsRange: (offset, count) => {
+        if (otherGeometry.boundsTree) {
+          const otherBvh = otherGeometry.boundsTree;
+          return otherBvh.shapecast({
+            boundsTraverseOrder: (box) => {
+              return obb24.distanceToBox(box);
+            },
+            intersectsBounds: (box, isLeaf, score) => {
+              return score < closestDistance && score < maxThreshold;
+            },
+            intersectsRange: (otherOffset, otherCount) => {
+              for (let i2 = otherOffset, l2 = otherOffset + otherCount; i2 < l2; i2++) {
+                const ti2 = otherBvh.resolveTriangleIndex(i2);
+                setTriangle(triangle23, 3 * ti2, otherIndex, otherPos);
+                triangle23.a.applyMatrix4(geometryToBvh);
+                triangle23.b.applyMatrix4(geometryToBvh);
+                triangle23.c.applyMatrix4(geometryToBvh);
+                triangle23.needsUpdate = true;
+                for (let i = offset, l = offset + count; i < l; i++) {
+                  const ti = bvh.resolveTriangleIndex(i);
+                  setTriangle(triangle4, 3 * ti, index, pos);
+                  triangle4.needsUpdate = true;
+                  const dist = triangle4.distanceToTriangle(triangle23, tempTarget1, tempTarget2);
+                  if (dist < closestDistance) {
+                    tempTargetDest1.copy(tempTarget1);
+                    if (tempTargetDest2) {
+                      tempTargetDest2.copy(tempTarget2);
+                    }
+                    closestDistance = dist;
+                    closestDistanceTriIndex = i;
+                    closestDistanceOtherTriIndex = i2;
+                  }
+                  if (dist < minThreshold) {
+                    return true;
+                  }
+                }
+              }
+            }
+          });
+        } else {
+          const triCount = getTriCount(otherGeometry);
+          for (let i2 = 0, l2 = triCount; i2 < l2; i2++) {
+            setTriangle(triangle23, 3 * i2, otherIndex, otherPos);
+            triangle23.a.applyMatrix4(geometryToBvh);
+            triangle23.b.applyMatrix4(geometryToBvh);
+            triangle23.c.applyMatrix4(geometryToBvh);
+            triangle23.needsUpdate = true;
+            for (let i = offset, l = offset + count; i < l; i++) {
+              const ti = bvh.resolveTriangleIndex(i);
+              setTriangle(triangle4, 3 * ti, index, pos);
+              triangle4.needsUpdate = true;
+              const dist = triangle4.distanceToTriangle(triangle23, tempTarget1, tempTarget2);
+              if (dist < closestDistance) {
+                tempTargetDest1.copy(tempTarget1);
+                if (tempTargetDest2) {
+                  tempTargetDest2.copy(tempTarget2);
+                }
+                closestDistance = dist;
+                closestDistanceTriIndex = i;
+                closestDistanceOtherTriIndex = i2;
+              }
+              if (dist < minThreshold) {
+                return true;
+              }
+            }
+          }
+        }
+      }
+    }
+  );
+  ExtendedTrianglePool.releasePrimitive(triangle4);
+  ExtendedTrianglePool.releasePrimitive(triangle23);
+  if (closestDistance === Infinity) {
+    return null;
+  }
+  if (!target1.point) {
+    target1.point = tempTargetDest1.clone();
+  } else {
+    target1.point.copy(tempTargetDest1);
+  }
+  target1.distance = closestDistance, target1.faceIndex = closestDistanceTriIndex;
+  if (target2) {
+    if (!target2.point) target2.point = tempTargetDest2.clone();
+    else target2.point.copy(tempTargetDest2);
+    target2.point.applyMatrix4(tempMatrix2);
+    tempTargetDest1.applyMatrix4(tempMatrix2);
+    target2.distance = tempTargetDest1.sub(target2.point).length();
+    target2.faceIndex = closestDistanceOtherTriIndex;
+  }
+  return target1;
+}
+
+// node_modules/three-mesh-bvh/src/utils/BufferUtils.js
+function isSharedArrayBufferSupported() {
+  return typeof SharedArrayBuffer !== "undefined";
+}
+
+// node_modules/three-mesh-bvh/src/core/cast/bvhcast.js
+var _bufferStack1 = new BufferStack.constructor();
+var _bufferStack2 = new BufferStack.constructor();
+var _boxPool = new PrimitivePool(() => new Box3());
+var _leftBox1 = new Box3();
+var _rightBox1 = new Box3();
+var _leftBox2 = new Box3();
+var _rightBox2 = new Box3();
+var _active = false;
+function bvhcast(bvh, otherBvh, matrixToLocal, intersectsRanges) {
+  if (_active) {
+    throw new Error("MeshBVH: Recursive calls to bvhcast not supported.");
+  }
+  _active = true;
+  const roots = bvh._roots;
+  const otherRoots = otherBvh._roots;
+  let result;
+  let offset1 = 0;
+  let offset2 = 0;
+  const invMat = new Matrix4().copy(matrixToLocal).invert();
+  for (let i = 0, il = roots.length; i < il; i++) {
+    _bufferStack1.setBuffer(roots[i]);
+    offset2 = 0;
+    const localBox = _boxPool.getPrimitive();
+    arrayToBox(BOUNDING_DATA_INDEX(0), _bufferStack1.float32Array, localBox);
+    localBox.applyMatrix4(invMat);
+    for (let j = 0, jl = otherRoots.length; j < jl; j++) {
+      _bufferStack2.setBuffer(otherRoots[j]);
+      result = _traverse(
+        0,
+        0,
+        matrixToLocal,
+        invMat,
+        intersectsRanges,
+        offset1,
+        offset2,
+        0,
+        0,
+        localBox
+      );
+      _bufferStack2.clearBuffer();
+      offset2 += otherRoots[j].length;
+      if (result) {
+        break;
+      }
+    }
+    _boxPool.releasePrimitive(localBox);
+    _bufferStack1.clearBuffer();
+    offset1 += roots[i].length;
+    if (result) {
+      break;
+    }
+  }
+  _active = false;
+  return result;
+}
+function _traverse(node1Index32, node2Index32, matrix2to1, matrix1to2, intersectsRangesFunc, node1IndexByteOffset = 0, node2IndexByteOffset = 0, depth1 = 0, depth2 = 0, currBox = null, reversed = false) {
+  let bufferStack1, bufferStack2;
+  if (reversed) {
+    bufferStack1 = _bufferStack2;
+    bufferStack2 = _bufferStack1;
+  } else {
+    bufferStack1 = _bufferStack1;
+    bufferStack2 = _bufferStack2;
+  }
+  const float32Array1 = bufferStack1.float32Array, uint32Array1 = bufferStack1.uint32Array, uint16Array1 = bufferStack1.uint16Array, float32Array2 = bufferStack2.float32Array, uint32Array2 = bufferStack2.uint32Array, uint16Array2 = bufferStack2.uint16Array;
+  const node1Index16 = node1Index32 * 2;
+  const node2Index16 = node2Index32 * 2;
+  const isLeaf1 = IS_LEAF(node1Index16, uint16Array1);
+  const isLeaf2 = IS_LEAF(node2Index16, uint16Array2);
+  let result = false;
+  if (isLeaf2 && isLeaf1) {
+    if (reversed) {
+      result = intersectsRangesFunc(
+        OFFSET(node2Index32, uint32Array2),
+        COUNT(node2Index32 * 2, uint16Array2),
+        OFFSET(node1Index32, uint32Array1),
+        COUNT(node1Index32 * 2, uint16Array1),
+        depth2,
+        node2IndexByteOffset + node2Index32,
+        depth1,
+        node1IndexByteOffset + node1Index32
+      );
+    } else {
+      result = intersectsRangesFunc(
+        OFFSET(node1Index32, uint32Array1),
+        COUNT(node1Index32 * 2, uint16Array1),
+        OFFSET(node2Index32, uint32Array2),
+        COUNT(node2Index32 * 2, uint16Array2),
+        depth1,
+        node1IndexByteOffset + node1Index32,
+        depth2,
+        node2IndexByteOffset + node2Index32
+      );
+    }
+  } else if (isLeaf2) {
+    const newBox = _boxPool.getPrimitive();
+    arrayToBox(BOUNDING_DATA_INDEX(node2Index32), float32Array2, newBox);
+    newBox.applyMatrix4(matrix2to1);
+    const cl1 = LEFT_NODE(node1Index32);
+    const cr1 = RIGHT_NODE(node1Index32, uint32Array1);
+    arrayToBox(BOUNDING_DATA_INDEX(cl1), float32Array1, _leftBox1);
+    arrayToBox(BOUNDING_DATA_INDEX(cr1), float32Array1, _rightBox1);
+    const intersectCl1 = newBox.intersectsBox(_leftBox1);
+    const intersectCr1 = newBox.intersectsBox(_rightBox1);
+    result = intersectCl1 && _traverse(
+      node2Index32,
+      cl1,
+      matrix1to2,
+      matrix2to1,
+      intersectsRangesFunc,
+      node2IndexByteOffset,
+      node1IndexByteOffset,
+      depth2,
+      depth1 + 1,
+      newBox,
+      !reversed
+    ) || intersectCr1 && _traverse(
+      node2Index32,
+      cr1,
+      matrix1to2,
+      matrix2to1,
+      intersectsRangesFunc,
+      node2IndexByteOffset,
+      node1IndexByteOffset,
+      depth2,
+      depth1 + 1,
+      newBox,
+      !reversed
+    );
+    _boxPool.releasePrimitive(newBox);
+  } else {
+    const cl2 = LEFT_NODE(node2Index32);
+    const cr2 = RIGHT_NODE(node2Index32, uint32Array2);
+    arrayToBox(BOUNDING_DATA_INDEX(cl2), float32Array2, _leftBox2);
+    arrayToBox(BOUNDING_DATA_INDEX(cr2), float32Array2, _rightBox2);
+    const leftIntersects = currBox.intersectsBox(_leftBox2);
+    const rightIntersects = currBox.intersectsBox(_rightBox2);
+    if (leftIntersects && rightIntersects) {
+      result = _traverse(
+        node1Index32,
+        cl2,
+        matrix2to1,
+        matrix1to2,
+        intersectsRangesFunc,
+        node1IndexByteOffset,
+        node2IndexByteOffset,
+        depth1,
+        depth2 + 1,
+        currBox,
+        reversed
+      ) || _traverse(
+        node1Index32,
+        cr2,
+        matrix2to1,
+        matrix1to2,
+        intersectsRangesFunc,
+        node1IndexByteOffset,
+        node2IndexByteOffset,
+        depth1,
+        depth2 + 1,
+        currBox,
+        reversed
+      );
+    } else if (leftIntersects) {
+      if (isLeaf1) {
+        result = _traverse(
+          node1Index32,
+          cl2,
+          matrix2to1,
+          matrix1to2,
+          intersectsRangesFunc,
+          node1IndexByteOffset,
+          node2IndexByteOffset,
+          depth1,
+          depth2 + 1,
+          currBox,
+          reversed
+        );
+      } else {
+        const newBox = _boxPool.getPrimitive();
+        newBox.copy(_leftBox2).applyMatrix4(matrix2to1);
+        const cl1 = LEFT_NODE(node1Index32);
+        const cr1 = RIGHT_NODE(node1Index32, uint32Array1);
+        arrayToBox(BOUNDING_DATA_INDEX(cl1), float32Array1, _leftBox1);
+        arrayToBox(BOUNDING_DATA_INDEX(cr1), float32Array1, _rightBox1);
+        const intersectCl1 = newBox.intersectsBox(_leftBox1);
+        const intersectCr1 = newBox.intersectsBox(_rightBox1);
+        result = intersectCl1 && _traverse(
+          cl2,
+          cl1,
+          matrix1to2,
+          matrix2to1,
+          intersectsRangesFunc,
+          node2IndexByteOffset,
+          node1IndexByteOffset,
+          depth2,
+          depth1 + 1,
+          newBox,
+          !reversed
+        ) || intersectCr1 && _traverse(
+          cl2,
+          cr1,
+          matrix1to2,
+          matrix2to1,
+          intersectsRangesFunc,
+          node2IndexByteOffset,
+          node1IndexByteOffset,
+          depth2,
+          depth1 + 1,
+          newBox,
+          !reversed
+        );
+        _boxPool.releasePrimitive(newBox);
+      }
+    } else if (rightIntersects) {
+      if (isLeaf1) {
+        result = _traverse(
+          node1Index32,
+          cr2,
+          matrix2to1,
+          matrix1to2,
+          intersectsRangesFunc,
+          node1IndexByteOffset,
+          node2IndexByteOffset,
+          depth1,
+          depth2 + 1,
+          currBox,
+          reversed
+        );
+      } else {
+        const newBox = _boxPool.getPrimitive();
+        newBox.copy(_rightBox2).applyMatrix4(matrix2to1);
+        const cl1 = LEFT_NODE(node1Index32);
+        const cr1 = RIGHT_NODE(node1Index32, uint32Array1);
+        arrayToBox(BOUNDING_DATA_INDEX(cl1), float32Array1, _leftBox1);
+        arrayToBox(BOUNDING_DATA_INDEX(cr1), float32Array1, _rightBox1);
+        const intersectCl1 = newBox.intersectsBox(_leftBox1);
+        const intersectCr1 = newBox.intersectsBox(_rightBox1);
+        result = intersectCl1 && _traverse(
+          cr2,
+          cl1,
+          matrix1to2,
+          matrix2to1,
+          intersectsRangesFunc,
+          node2IndexByteOffset,
+          node1IndexByteOffset,
+          depth2,
+          depth1 + 1,
+          newBox,
+          !reversed
+        ) || intersectCr1 && _traverse(
+          cr2,
+          cr1,
+          matrix1to2,
+          matrix2to1,
+          intersectsRangesFunc,
+          node2IndexByteOffset,
+          node1IndexByteOffset,
+          depth2,
+          depth1 + 1,
+          newBox,
+          !reversed
+        );
+        _boxPool.releasePrimitive(newBox);
+      }
+    }
+  }
+  return result;
+}
+
+// node_modules/three-mesh-bvh/src/core/MeshBVH.js
+var obb6 = /* @__PURE__ */ new OrientedBox();
+var tempBox = /* @__PURE__ */ new Box3();
+var DEFAULT_OPTIONS = {
+  strategy: CENTER,
+  maxDepth: 40,
+  maxLeafTris: 10,
+  useSharedArrayBuffer: false,
+  setBoundingBox: true,
+  onProgress: null,
+  indirect: false,
+  verbose: true,
+  range: null
+};
+var MeshBVH = class _MeshBVH {
+  static serialize(bvh, options = {}) {
+    options = {
+      cloneBuffers: true,
+      ...options
+    };
+    const geometry = bvh.geometry;
+    const rootData = bvh._roots;
+    const indirectBuffer = bvh._indirectBuffer;
+    const indexAttribute = geometry.getIndex();
+    let result;
+    if (options.cloneBuffers) {
+      result = {
+        roots: rootData.map((root) => root.slice()),
+        index: indexAttribute ? indexAttribute.array.slice() : null,
+        indirectBuffer: indirectBuffer ? indirectBuffer.slice() : null
+      };
+    } else {
+      result = {
+        roots: rootData,
+        index: indexAttribute ? indexAttribute.array : null,
+        indirectBuffer
+      };
+    }
+    return result;
+  }
+  static deserialize(data, geometry, options = {}) {
+    options = {
+      setIndex: true,
+      indirect: Boolean(data.indirectBuffer),
+      ...options
+    };
+    const { index, roots, indirectBuffer } = data;
+    const bvh = new _MeshBVH(geometry, { ...options, [SKIP_GENERATION]: true });
+    bvh._roots = roots;
+    bvh._indirectBuffer = indirectBuffer || null;
+    if (options.setIndex) {
+      const indexAttribute = geometry.getIndex();
+      if (indexAttribute === null) {
+        const newIndex = new BufferAttribute(data.index, 1, false);
+        geometry.setIndex(newIndex);
+      } else if (indexAttribute.array !== index) {
+        indexAttribute.array.set(index);
+        indexAttribute.needsUpdate = true;
+      }
+    }
+    return bvh;
+  }
+  get indirect() {
+    return !!this._indirectBuffer;
+  }
+  constructor(geometry, options = {}) {
+    if (!geometry.isBufferGeometry) {
+      throw new Error("MeshBVH: Only BufferGeometries are supported.");
+    } else if (geometry.index && geometry.index.isInterleavedBufferAttribute) {
+      throw new Error("MeshBVH: InterleavedBufferAttribute is not supported for the index attribute.");
+    }
+    options = Object.assign({
+      ...DEFAULT_OPTIONS,
+      // undocumented options
+      // Whether to skip generating the tree. Used for deserialization.
+      [SKIP_GENERATION]: false
+    }, options);
+    if (options.useSharedArrayBuffer && !isSharedArrayBufferSupported()) {
+      throw new Error("MeshBVH: SharedArrayBuffer is not available.");
+    }
+    this.geometry = geometry;
+    this._roots = null;
+    this._indirectBuffer = null;
+    if (!options[SKIP_GENERATION]) {
+      buildPackedTree(this, options);
+      if (!geometry.boundingBox && options.setBoundingBox) {
+        geometry.boundingBox = this.getBoundingBox(new Box3());
+      }
+    }
+    this.resolveTriangleIndex = options.indirect ? (i) => this._indirectBuffer[i] : (i) => i;
+  }
+  refit(nodeIndices = null) {
+    const refitFunc = this.indirect ? refit_indirect : refit;
+    return refitFunc(this, nodeIndices);
+  }
+  traverse(callback, rootIndex = 0) {
+    const buffer = this._roots[rootIndex];
+    const uint32Array2 = new Uint32Array(buffer);
+    const uint16Array2 = new Uint16Array(buffer);
+    _traverse2(0);
+    function _traverse2(node32Index, depth = 0) {
+      const node16Index = node32Index * 2;
+      const isLeaf = uint16Array2[node16Index + 15] === IS_LEAFNODE_FLAG;
+      if (isLeaf) {
+        const offset = uint32Array2[node32Index + 6];
+        const count = uint16Array2[node16Index + 14];
+        callback(depth, isLeaf, new Float32Array(buffer, node32Index * 4, 6), offset, count);
+      } else {
+        const left = node32Index + BYTES_PER_NODE / 4;
+        const right = uint32Array2[node32Index + 6];
+        const splitAxis = uint32Array2[node32Index + 7];
+        const stopTraversal = callback(depth, isLeaf, new Float32Array(buffer, node32Index * 4, 6), splitAxis);
+        if (!stopTraversal) {
+          _traverse2(left, depth + 1);
+          _traverse2(right, depth + 1);
+        }
+      }
+    }
+  }
+  /* Core Cast Functions */
+  raycast(ray, materialOrSide = FrontSide, near = 0, far = Infinity) {
+    const roots = this._roots;
+    const geometry = this.geometry;
+    const intersects2 = [];
+    const isMaterial = materialOrSide.isMaterial;
+    const isArrayMaterial = Array.isArray(materialOrSide);
+    const groups = geometry.groups;
+    const side = isMaterial ? materialOrSide.side : materialOrSide;
+    const raycastFunc = this.indirect ? raycast_indirect : raycast2;
+    for (let i = 0, l = roots.length; i < l; i++) {
+      const materialSide = isArrayMaterial ? materialOrSide[groups[i].materialIndex].side : side;
+      const startCount = intersects2.length;
+      raycastFunc(this, i, materialSide, ray, intersects2, near, far);
+      if (isArrayMaterial) {
+        const materialIndex = groups[i].materialIndex;
+        for (let j = startCount, jl = intersects2.length; j < jl; j++) {
+          intersects2[j].face.materialIndex = materialIndex;
+        }
+      }
+    }
+    return intersects2;
+  }
+  raycastFirst(ray, materialOrSide = FrontSide, near = 0, far = Infinity) {
+    const roots = this._roots;
+    const geometry = this.geometry;
+    const isMaterial = materialOrSide.isMaterial;
+    const isArrayMaterial = Array.isArray(materialOrSide);
+    let closestResult = null;
+    const groups = geometry.groups;
+    const side = isMaterial ? materialOrSide.side : materialOrSide;
+    const raycastFirstFunc = this.indirect ? raycastFirst_indirect : raycastFirst;
+    for (let i = 0, l = roots.length; i < l; i++) {
+      const materialSide = isArrayMaterial ? materialOrSide[groups[i].materialIndex].side : side;
+      const result = raycastFirstFunc(this, i, materialSide, ray, near, far);
+      if (result != null && (closestResult == null || result.distance < closestResult.distance)) {
+        closestResult = result;
+        if (isArrayMaterial) {
+          result.face.materialIndex = groups[i].materialIndex;
+        }
+      }
+    }
+    return closestResult;
+  }
+  intersectsGeometry(otherGeometry, geomToMesh) {
+    let result = false;
+    const roots = this._roots;
+    const intersectsGeometryFunc = this.indirect ? intersectsGeometry_indirect : intersectsGeometry;
+    for (let i = 0, l = roots.length; i < l; i++) {
+      result = intersectsGeometryFunc(this, i, otherGeometry, geomToMesh);
+      if (result) {
+        break;
+      }
+    }
+    return result;
+  }
+  shapecast(callbacks) {
+    const triangle4 = ExtendedTrianglePool.getPrimitive();
+    const iterateFunc = this.indirect ? iterateOverTriangles_indirect : iterateOverTriangles;
+    let {
+      boundsTraverseOrder,
+      intersectsBounds,
+      intersectsRange,
+      intersectsTriangle
+    } = callbacks;
+    if (intersectsRange && intersectsTriangle) {
+      const originalIntersectsRange = intersectsRange;
+      intersectsRange = (offset, count, contained, depth, nodeIndex) => {
+        if (!originalIntersectsRange(offset, count, contained, depth, nodeIndex)) {
+          return iterateFunc(offset, count, this, intersectsTriangle, contained, depth, triangle4);
+        }
+        return true;
+      };
+    } else if (!intersectsRange) {
+      if (intersectsTriangle) {
+        intersectsRange = (offset, count, contained, depth) => {
+          return iterateFunc(offset, count, this, intersectsTriangle, contained, depth, triangle4);
+        };
+      } else {
+        intersectsRange = (offset, count, contained) => {
+          return contained;
+        };
+      }
+    }
+    let result = false;
+    let byteOffset = 0;
+    const roots = this._roots;
+    for (let i = 0, l = roots.length; i < l; i++) {
+      const root = roots[i];
+      result = shapecast(this, i, intersectsBounds, intersectsRange, boundsTraverseOrder, byteOffset);
+      if (result) {
+        break;
+      }
+      byteOffset += root.byteLength;
+    }
+    ExtendedTrianglePool.releasePrimitive(triangle4);
+    return result;
+  }
+  bvhcast(otherBvh, matrixToLocal, callbacks) {
+    let {
+      intersectsRanges,
+      intersectsTriangles
+    } = callbacks;
+    const triangle1 = ExtendedTrianglePool.getPrimitive();
+    const indexAttr1 = this.geometry.index;
+    const positionAttr1 = this.geometry.attributes.position;
+    const assignTriangle1 = this.indirect ? (i1) => {
+      const ti = this.resolveTriangleIndex(i1);
+      setTriangle(triangle1, ti * 3, indexAttr1, positionAttr1);
+    } : (i1) => {
+      setTriangle(triangle1, i1 * 3, indexAttr1, positionAttr1);
+    };
+    const triangle23 = ExtendedTrianglePool.getPrimitive();
+    const indexAttr2 = otherBvh.geometry.index;
+    const positionAttr2 = otherBvh.geometry.attributes.position;
+    const assignTriangle2 = otherBvh.indirect ? (i2) => {
+      const ti2 = otherBvh.resolveTriangleIndex(i2);
+      setTriangle(triangle23, ti2 * 3, indexAttr2, positionAttr2);
+    } : (i2) => {
+      setTriangle(triangle23, i2 * 3, indexAttr2, positionAttr2);
+    };
+    if (intersectsTriangles) {
+      const iterateOverDoubleTriangles = (offset1, count1, offset2, count2, depth1, index1, depth2, index2) => {
+        for (let i2 = offset2, l2 = offset2 + count2; i2 < l2; i2++) {
+          assignTriangle2(i2);
+          triangle23.a.applyMatrix4(matrixToLocal);
+          triangle23.b.applyMatrix4(matrixToLocal);
+          triangle23.c.applyMatrix4(matrixToLocal);
+          triangle23.needsUpdate = true;
+          for (let i1 = offset1, l1 = offset1 + count1; i1 < l1; i1++) {
+            assignTriangle1(i1);
+            triangle1.needsUpdate = true;
+            if (intersectsTriangles(triangle1, triangle23, i1, i2, depth1, index1, depth2, index2)) {
+              return true;
+            }
+          }
+        }
+        return false;
+      };
+      if (intersectsRanges) {
+        const originalIntersectsRanges = intersectsRanges;
+        intersectsRanges = function(offset1, count1, offset2, count2, depth1, index1, depth2, index2) {
+          if (!originalIntersectsRanges(offset1, count1, offset2, count2, depth1, index1, depth2, index2)) {
+            return iterateOverDoubleTriangles(offset1, count1, offset2, count2, depth1, index1, depth2, index2);
+          }
+          return true;
+        };
+      } else {
+        intersectsRanges = iterateOverDoubleTriangles;
+      }
+    }
+    return bvhcast(this, otherBvh, matrixToLocal, intersectsRanges);
+  }
+  /* Derived Cast Functions */
+  intersectsBox(box, boxToMesh) {
+    obb6.set(box.min, box.max, boxToMesh);
+    obb6.needsUpdate = true;
+    return this.shapecast(
+      {
+        intersectsBounds: (box2) => obb6.intersectsBox(box2),
+        intersectsTriangle: (tri) => obb6.intersectsTriangle(tri)
+      }
+    );
+  }
+  intersectsSphere(sphere) {
+    return this.shapecast(
+      {
+        intersectsBounds: (box) => sphere.intersectsBox(box),
+        intersectsTriangle: (tri) => tri.intersectsSphere(sphere)
+      }
+    );
+  }
+  closestPointToGeometry(otherGeometry, geometryToBvh, target1 = {}, target2 = {}, minThreshold = 0, maxThreshold = Infinity) {
+    const closestPointToGeometryFunc = this.indirect ? closestPointToGeometry_indirect : closestPointToGeometry;
+    return closestPointToGeometryFunc(
+      this,
+      otherGeometry,
+      geometryToBvh,
+      target1,
+      target2,
+      minThreshold,
+      maxThreshold
+    );
+  }
+  closestPointToPoint(point, target = {}, minThreshold = 0, maxThreshold = Infinity) {
+    return closestPointToPoint(
+      this,
+      point,
+      target,
+      minThreshold,
+      maxThreshold
+    );
+  }
+  getBoundingBox(target) {
+    target.makeEmpty();
+    const roots = this._roots;
+    roots.forEach((buffer) => {
+      arrayToBox(0, new Float32Array(buffer), tempBox);
+      target.union(tempBox);
+    });
+    return target;
+  }
+};
+
+// node_modules/three-mesh-bvh/src/gpu/glsl/common_functions.glsl.js
+var common_functions = (
+  /* glsl */
+  `
+
+// A stack of uint32 indices can can store the indices for
+// a perfectly balanced tree with a depth up to 31. Lower stack
+// depth gets higher performance.
+//
+// However not all trees are balanced. Best value to set this to
+// is the trees max depth.
+#ifndef BVH_STACK_DEPTH
+#define BVH_STACK_DEPTH 60
+#endif
+
+#ifndef INFINITY
+#define INFINITY 1e20
+#endif
+
+// Utilities
+uvec4 uTexelFetch1D( usampler2D tex, uint index ) {
+
+	uint width = uint( textureSize( tex, 0 ).x );
+	uvec2 uv;
+	uv.x = index % width;
+	uv.y = index / width;
+
+	return texelFetch( tex, ivec2( uv ), 0 );
+
+}
+
+ivec4 iTexelFetch1D( isampler2D tex, uint index ) {
+
+	uint width = uint( textureSize( tex, 0 ).x );
+	uvec2 uv;
+	uv.x = index % width;
+	uv.y = index / width;
+
+	return texelFetch( tex, ivec2( uv ), 0 );
+
+}
+
+vec4 texelFetch1D( sampler2D tex, uint index ) {
+
+	uint width = uint( textureSize( tex, 0 ).x );
+	uvec2 uv;
+	uv.x = index % width;
+	uv.y = index / width;
+
+	return texelFetch( tex, ivec2( uv ), 0 );
+
+}
+
+vec4 textureSampleBarycoord( sampler2D tex, vec3 barycoord, uvec3 faceIndices ) {
+
+	return
+		barycoord.x * texelFetch1D( tex, faceIndices.x ) +
+		barycoord.y * texelFetch1D( tex, faceIndices.y ) +
+		barycoord.z * texelFetch1D( tex, faceIndices.z );
+
+}
+
+void ndcToCameraRay(
+	vec2 coord, mat4 cameraWorld, mat4 invProjectionMatrix,
+	out vec3 rayOrigin, out vec3 rayDirection
+) {
+
+	// get camera look direction and near plane for camera clipping
+	vec4 lookDirection = cameraWorld * vec4( 0.0, 0.0, - 1.0, 0.0 );
+	vec4 nearVector = invProjectionMatrix * vec4( 0.0, 0.0, - 1.0, 1.0 );
+	float near = abs( nearVector.z / nearVector.w );
+
+	// get the camera direction and position from camera matrices
+	vec4 origin = cameraWorld * vec4( 0.0, 0.0, 0.0, 1.0 );
+	vec4 direction = invProjectionMatrix * vec4( coord, 0.5, 1.0 );
+	direction /= direction.w;
+	direction = cameraWorld * direction - origin;
+
+	// slide the origin along the ray until it sits at the near clip plane position
+	origin.xyz += direction.xyz * near / dot( direction, lookDirection );
+
+	rayOrigin = origin.xyz;
+	rayDirection = direction.xyz;
+
+}
+`
+);
+
+// node_modules/three-mesh-bvh/src/gpu/glsl/bvh_ray_functions.glsl.js
+var bvh_ray_functions = (
+  /* glsl */
+  `
+
+#ifndef TRI_INTERSECT_EPSILON
+#define TRI_INTERSECT_EPSILON 1e-5
+#endif
+
+// Raycasting
+bool intersectsBounds( vec3 rayOrigin, vec3 rayDirection, vec3 boundsMin, vec3 boundsMax, out float dist ) {
+
+	// https://www.reddit.com/r/opengl/comments/8ntzz5/fast_glsl_ray_box_intersection/
+	// https://tavianator.com/2011/ray_box.html
+	vec3 invDir = 1.0 / rayDirection;
+
+	// find intersection distances for each plane
+	vec3 tMinPlane = invDir * ( boundsMin - rayOrigin );
+	vec3 tMaxPlane = invDir * ( boundsMax - rayOrigin );
+
+	// get the min and max distances from each intersection
+	vec3 tMinHit = min( tMaxPlane, tMinPlane );
+	vec3 tMaxHit = max( tMaxPlane, tMinPlane );
+
+	// get the furthest hit distance
+	vec2 t = max( tMinHit.xx, tMinHit.yz );
+	float t0 = max( t.x, t.y );
+
+	// get the minimum hit distance
+	t = min( tMaxHit.xx, tMaxHit.yz );
+	float t1 = min( t.x, t.y );
+
+	// set distance to 0.0 if the ray starts inside the box
+	dist = max( t0, 0.0 );
+
+	return t1 >= dist;
+
+}
+
+bool intersectsTriangle(
+	vec3 rayOrigin, vec3 rayDirection, vec3 a, vec3 b, vec3 c,
+	out vec3 barycoord, out vec3 norm, out float dist, out float side
+) {
+
+	// https://stackoverflow.com/questions/42740765/intersection-between-line-and-triangle-in-3d
+	vec3 edge1 = b - a;
+	vec3 edge2 = c - a;
+	norm = cross( edge1, edge2 );
+
+	float det = - dot( rayDirection, norm );
+	float invdet = 1.0 / det;
+
+	vec3 AO = rayOrigin - a;
+	vec3 DAO = cross( AO, rayDirection );
+
+	vec4 uvt;
+	uvt.x = dot( edge2, DAO ) * invdet;
+	uvt.y = - dot( edge1, DAO ) * invdet;
+	uvt.z = dot( AO, norm ) * invdet;
+	uvt.w = 1.0 - uvt.x - uvt.y;
+
+	// set the hit information
+	barycoord = uvt.wxy; // arranged in A, B, C order
+	dist = uvt.z;
+	side = sign( det );
+	norm = side * normalize( norm );
+
+	// add an epsilon to avoid misses between triangles
+	uvt += vec4( TRI_INTERSECT_EPSILON );
+
+	return all( greaterThanEqual( uvt, vec4( 0.0 ) ) );
+
+}
+
+bool intersectTriangles(
+	// geometry info and triangle range
+	sampler2D positionAttr, usampler2D indexAttr, uint offset, uint count,
+
+	// ray
+	vec3 rayOrigin, vec3 rayDirection,
+
+	// outputs
+	inout float minDistance, inout uvec4 faceIndices, inout vec3 faceNormal, inout vec3 barycoord,
+	inout float side, inout float dist
+) {
+
+	bool found = false;
+	vec3 localBarycoord, localNormal;
+	float localDist, localSide;
+	for ( uint i = offset, l = offset + count; i < l; i ++ ) {
+
+		uvec3 indices = uTexelFetch1D( indexAttr, i ).xyz;
+		vec3 a = texelFetch1D( positionAttr, indices.x ).rgb;
+		vec3 b = texelFetch1D( positionAttr, indices.y ).rgb;
+		vec3 c = texelFetch1D( positionAttr, indices.z ).rgb;
+
+		if (
+			intersectsTriangle( rayOrigin, rayDirection, a, b, c, localBarycoord, localNormal, localDist, localSide )
+			&& localDist < minDistance
+		) {
+
+			found = true;
+			minDistance = localDist;
+
+			faceIndices = uvec4( indices.xyz, i );
+			faceNormal = localNormal;
+
+			side = localSide;
+			barycoord = localBarycoord;
+			dist = localDist;
+
+		}
+
+	}
+
+	return found;
+
+}
+
+bool intersectsBVHNodeBounds( vec3 rayOrigin, vec3 rayDirection, sampler2D bvhBounds, uint currNodeIndex, out float dist ) {
+
+	uint cni2 = currNodeIndex * 2u;
+	vec3 boundsMin = texelFetch1D( bvhBounds, cni2 ).xyz;
+	vec3 boundsMax = texelFetch1D( bvhBounds, cni2 + 1u ).xyz;
+	return intersectsBounds( rayOrigin, rayDirection, boundsMin, boundsMax, dist );
+
+}
+
+// use a macro to hide the fact that we need to expand the struct into separate fields
+#define	bvhIntersectFirstHit(		bvh,		rayOrigin, rayDirection, faceIndices, faceNormal, barycoord, side, dist	)	_bvhIntersectFirstHit(		bvh.position, bvh.index, bvh.bvhBounds, bvh.bvhContents,		rayOrigin, rayDirection, faceIndices, faceNormal, barycoord, side, dist	)
+
+bool _bvhIntersectFirstHit(
+	// bvh info
+	sampler2D bvh_position, usampler2D bvh_index, sampler2D bvh_bvhBounds, usampler2D bvh_bvhContents,
+
+	// ray
+	vec3 rayOrigin, vec3 rayDirection,
+
+	// output variables split into separate variables due to output precision
+	inout uvec4 faceIndices, inout vec3 faceNormal, inout vec3 barycoord,
+	inout float side, inout float dist
+) {
+
+	// stack needs to be twice as long as the deepest tree we expect because
+	// we push both the left and right child onto the stack every traversal
+	int ptr = 0;
+	uint stack[ BVH_STACK_DEPTH ];
+	stack[ 0 ] = 0u;
+
+	float triangleDistance = INFINITY;
+	bool found = false;
+	while ( ptr > - 1 && ptr < BVH_STACK_DEPTH ) {
+
+		uint currNodeIndex = stack[ ptr ];
+		ptr --;
+
+		// check if we intersect the current bounds
+		float boundsHitDistance;
+		if (
+			! intersectsBVHNodeBounds( rayOrigin, rayDirection, bvh_bvhBounds, currNodeIndex, boundsHitDistance )
+			|| boundsHitDistance > triangleDistance
+		) {
+
+			continue;
+
+		}
+
+		uvec2 boundsInfo = uTexelFetch1D( bvh_bvhContents, currNodeIndex ).xy;
+		bool isLeaf = bool( boundsInfo.x & 0xffff0000u );
+
+		if ( isLeaf ) {
+
+			uint count = boundsInfo.x & 0x0000ffffu;
+			uint offset = boundsInfo.y;
+
+			found = intersectTriangles(
+				bvh_position, bvh_index, offset, count,
+				rayOrigin, rayDirection, triangleDistance,
+				faceIndices, faceNormal, barycoord, side, dist
+			) || found;
+
+		} else {
+
+			uint leftIndex = currNodeIndex + 1u;
+			uint splitAxis = boundsInfo.x & 0x0000ffffu;
+			uint rightIndex = boundsInfo.y;
+
+			bool leftToRight = rayDirection[ splitAxis ] >= 0.0;
+			uint c1 = leftToRight ? leftIndex : rightIndex;
+			uint c2 = leftToRight ? rightIndex : leftIndex;
+
+			// set c2 in the stack so we traverse it later. We need to keep track of a pointer in
+			// the stack while we traverse. The second pointer added is the one that will be
+			// traversed first
+			ptr ++;
+			stack[ ptr ] = c2;
+
+			ptr ++;
+			stack[ ptr ] = c1;
+
+		}
+
+	}
+
+	return found;
+
+}
+`
+);
+
+// node_modules/three-mesh-bvh/src/index.js
+var shaderIntersectFunction = `
+	${common_functions}
+	${bvh_ray_functions}
+`;
+
+// frontend/js/viewer/symmetry.js
+var CORRESPONDENCE_BUDGET = 6e8;
+var STRONG_MEDIAN = 0.01;
+var STRONG_AGREE = 0.7;
+var MODERATE_MEDIAN = 0.025;
+var MODERATE_AGREE = 0.5;
+var DEFAULT_SAMPLES = 1024;
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function() {
+    a |= 0;
+    a = a + 1831565813 | 0;
+    let t2 = Math.imul(a ^ a >>> 15, 1 | a);
+    t2 = t2 + Math.imul(t2 ^ t2 >>> 7, 61 | t2) ^ t2;
+    return ((t2 ^ t2 >>> 14) >>> 0) / 4294967296;
+  };
+}
+function gatherLocalTriangles(entry) {
+  const wrapperInv = entry.wrapper.matrixWorld.clone().invert();
+  const chunks = [];
+  let total = 0;
+  const L = new Matrix4();
+  const v = new Vector3();
+  entry.model.updateMatrixWorld(true);
+  entry.model.traverse((c) => {
+    if (!c.isMesh || !c.geometry) return;
+    const pos = c.geometry.getAttribute("position");
+    if (!pos) return;
+    const idx = c.geometry.getIndex();
+    const triCount = Math.floor((idx ? idx.count : pos.count) / 3);
+    if (triCount === 0) return;
+    L.multiplyMatrices(wrapperInv, c.matrixWorld);
+    const arr = new Float32Array(triCount * 9);
+    const vi = (t2, k) => idx ? idx.getX(t2 * 3 + k) : t2 * 3 + k;
+    for (let t2 = 0; t2 < triCount; t2++) {
+      for (let k = 0; k < 3; k++) {
+        v.fromBufferAttribute(pos, vi(t2, k)).applyMatrix4(L);
+        const o2 = t2 * 9 + k * 3;
+        arr[o2] = v.x;
+        arr[o2 + 1] = v.y;
+        arr[o2 + 2] = v.z;
+      }
+    }
+    chunks.push(arr);
+    total += arr.length;
+  });
+  if (!chunks.length) return null;
+  const out = new Float32Array(total);
+  let o = 0;
+  for (const a of chunks) {
+    out.set(a, o);
+    o += a.length;
+  }
+  const geo = new BufferGeometry();
+  geo.setAttribute("position", new BufferAttribute(out, 3));
+  return geo;
+}
+function localBVH(entry) {
+  const cache = entry._symBVH;
+  if (cache && cache.rev === entry.geometryRev) return cache;
+  if (cache && cache.geometry) cache.geometry.dispose();
+  const geometry = gatherLocalTriangles(entry);
+  if (!geometry) throw new Error("Active object has no triangles.");
+  const bvh = new MeshBVH(geometry);
+  entry._symBVH = { rev: entry.geometryRev, bvh, geometry };
+  return entry._symBVH;
+}
+function triIds(geometry, f) {
+  const idx = geometry.getIndex();
+  return idx ? [idx.getX(f * 3), idx.getX(f * 3 + 1), idx.getX(f * 3 + 2)] : [f * 3, f * 3 + 1, f * 3 + 2];
+}
+function soupNormal(geometry, f, out) {
+  const p = geometry.getAttribute("position");
+  const [i0, i1, i2] = triIds(geometry, f);
+  const ax = p.getX(i0), ay = p.getY(i0), az = p.getZ(i0);
+  out.set(p.getX(i1) - ax, p.getY(i1) - ay, p.getZ(i1) - az);
+  _e2.set(p.getX(i2) - ax, p.getY(i2) - ay, p.getZ(i2) - az);
+  out.cross(_e2);
+  return out.lengthSq() > 1e-20 ? out.normalize() : out.set(0, 1, 0);
+}
+var _e2 = new Vector3();
+function localSamples(entry, count, seed) {
+  const soup = localBVH(entry).geometry;
+  const pos = soup.getAttribute("position");
+  const triCount = pos.count / 3;
+  const cum = new Float64Array(triCount);
+  let total = 0;
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const ab = new Vector3(), ac = new Vector3(), cr = new Vector3();
+  for (let t2 = 0; t2 < triCount; t2++) {
+    a.fromBufferAttribute(pos, t2 * 3);
+    b.fromBufferAttribute(pos, t2 * 3 + 1);
+    c.fromBufferAttribute(pos, t2 * 3 + 2);
+    ab.subVectors(b, a);
+    ac.subVectors(c, a);
+    const area2 = cr.crossVectors(ab, ac).length() / 2;
+    total += Number.isFinite(area2) ? area2 : 0;
+    cum[t2] = total;
+  }
+  if (!(total > 0)) throw new Error("Active object has no sampleable surface.");
+  const rand = mulberry32(seed);
+  const points = new Float32Array(count * 3);
+  const normals = new Float32Array(count * 3);
+  const n2 = new Vector3();
+  for (let i = 0; i < count; i++) {
+    const r = rand() * total;
+    let lo = 0, hi = triCount - 1;
+    while (lo < hi) {
+      const mid = lo + hi >> 1;
+      if (cum[mid] < r) lo = mid + 1;
+      else hi = mid;
+    }
+    a.fromBufferAttribute(pos, lo * 3);
+    b.fromBufferAttribute(pos, lo * 3 + 1);
+    c.fromBufferAttribute(pos, lo * 3 + 2);
+    const su = Math.sqrt(rand());
+    const vv = rand();
+    const w0 = 1 - su, w1 = su * (1 - vv), w2 = su * vv;
+    points[i * 3] = w0 * a.x + w1 * b.x + w2 * c.x;
+    points[i * 3 + 1] = w0 * a.y + w1 * b.y + w2 * c.y;
+    points[i * 3 + 2] = w0 * a.z + w1 * b.z + w2 * c.z;
+    ab.subVectors(b, a);
+    ac.subVectors(c, a);
+    n2.crossVectors(ab, ac);
+    if (n2.lengthSq() > 1e-20) n2.normalize();
+    else n2.set(0, 1, 0);
+    normals[i * 3] = n2.x;
+    normals[i * 3 + 1] = n2.y;
+    normals[i * 3 + 2] = n2.z;
+  }
+  return { points, normals, count };
+}
+function eigenSym3(m) {
+  const a = m.slice();
+  const v = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  for (let sweep = 0; sweep < 12; sweep++) {
+    let off = Math.abs(a[1]) + Math.abs(a[2]) + Math.abs(a[5]);
+    if (off < 1e-12) break;
+    for (const [p, q] of [[0, 1], [0, 2], [1, 2]]) {
+      const apq = a[p * 3 + q];
+      if (Math.abs(apq) < 1e-14) continue;
+      const app = a[p * 3 + p], aqq = a[q * 3 + q];
+      const theta = 0.5 * Math.atan2(2 * apq, aqq - app);
+      const cs = Math.cos(theta), sn = Math.sin(theta);
+      for (let k = 0; k < 3; k++) {
+        const akp = a[k * 3 + p], akq = a[k * 3 + q];
+        a[k * 3 + p] = cs * akp - sn * akq;
+        a[k * 3 + q] = sn * akp + cs * akq;
+      }
+      for (let k = 0; k < 3; k++) {
+        const apk = a[p * 3 + k], aqk = a[q * 3 + k];
+        a[p * 3 + k] = cs * apk - sn * aqk;
+        a[q * 3 + k] = sn * apk + cs * aqk;
+      }
+      for (let k = 0; k < 3; k++) {
+        const vkp = v[k * 3 + p], vkq = v[k * 3 + q];
+        v[k * 3 + p] = cs * vkp - sn * vkq;
+        v[k * 3 + q] = sn * vkp + cs * vkq;
+      }
+    }
+  }
+  return [0, 1, 2].map((i) => new Vector3(v[i], v[3 + i], v[6 + i]).normalize());
+}
+function reflectPoint(p, nrm, o) {
+  const d = (p.x - o.x) * nrm.x + (p.y - o.y) * nrm.y + (p.z - o.z) * nrm.z;
+  p.x -= 2 * d * nrm.x;
+  p.y -= 2 * d * nrm.y;
+  p.z -= 2 * d * nrm.z;
+  return p;
+}
+function reflectDir(n2, nrm) {
+  const d = n2.x * nrm.x + n2.y * nrm.y + n2.z * nrm.z;
+  n2.x -= 2 * d * nrm.x;
+  n2.y -= 2 * d * nrm.y;
+  n2.z -= 2 * d * nrm.z;
+  return n2;
+}
+function scorePlane(entry, samples, nrm, origin) {
+  const { bvh, geometry } = localBVH(entry);
+  const p = new Vector3(), n2 = new Vector3(), hitN = new Vector3();
+  const hit = {};
+  const dists = new Float32Array(samples.count);
+  let agreeSum = 0;
+  for (let i = 0; i < samples.count; i++) {
+    p.set(samples.points[i * 3], samples.points[i * 3 + 1], samples.points[i * 3 + 2]);
+    reflectPoint(p, nrm, origin);
+    bvh.closestPointToPoint(p, hit);
+    dists[i] = hit.distance;
+    n2.set(samples.normals[i * 3], samples.normals[i * 3 + 1], samples.normals[i * 3 + 2]);
+    reflectDir(n2, nrm);
+    soupNormal(geometry, hit.faceIndex, hitN);
+    agreeSum += n2.dot(hitN);
+  }
+  const sorted = Array.from(dists).sort((x, y) => x - y);
+  const pct = (q) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))];
+  return { median: pct(0.5), p90: pct(0.9), agreement: agreeSum / samples.count };
+}
+function verdictOf(medianRel, agreement) {
+  if (medianRel <= STRONG_MEDIAN && agreement >= STRONG_AGREE) return "strong";
+  if (medianRel <= MODERATE_MEDIAN && agreement >= MODERATE_AGREE) return "moderate";
+  return "weak";
+}
+var r4 = (x) => Math.round(x * 1e4) / 1e4;
+function detectSymmetry(viewer, opts = {}) {
+  const entry = viewer._activeEntry();
+  if (!entry) throw new Error("No model loaded. load / add_model / add_primitive first.");
+  const count = Math.max(128, Math.min(4096, opts.samples || DEFAULT_SAMPLES));
+  const samples = localSamples(entry, count, opts.seed !== void 0 ? opts.seed : 42);
+  const cen = new Vector3();
+  for (let i = 0; i < count; i++) {
+    cen.x += samples.points[i * 3];
+    cen.y += samples.points[i * 3 + 1];
+    cen.z += samples.points[i * 3 + 2];
+  }
+  cen.divideScalar(count);
+  const cov = new Array(9).fill(0);
+  for (let i = 0; i < count; i++) {
+    const dx = samples.points[i * 3] - cen.x;
+    const dy = samples.points[i * 3 + 1] - cen.y;
+    const dz = samples.points[i * 3 + 2] - cen.z;
+    cov[0] += dx * dx;
+    cov[1] += dx * dy;
+    cov[2] += dx * dz;
+    cov[4] += dy * dy;
+    cov[5] += dy * dz;
+    cov[8] += dz * dz;
+  }
+  cov[3] = cov[1];
+  cov[6] = cov[2];
+  cov[7] = cov[5];
+  const axes = [
+    { name: "x", n: new Vector3(1, 0, 0) },
+    { name: "y", n: new Vector3(0, 1, 0) },
+    { name: "z", n: new Vector3(0, 0, 1) }
+  ];
+  for (const e of eigenSym3(cov)) {
+    if (axes.some((a) => Math.abs(a.n.dot(e)) > 0.98)) continue;
+    axes.push({ name: `pca(${r4(e.x)},${r4(e.y)},${r4(e.z)})`, n: e });
+  }
+  const soup = localBVH(entry).geometry;
+  soup.computeBoundingBox();
+  const diag = soup.boundingBox.getSize(new Vector3()).length() || 1;
+  const candidates = axes.map(({ name, n: n2 }, i) => {
+    const s = scorePlane(entry, samples, n2, cen);
+    return {
+      axis: name,
+      normal: [r4(n2.x), r4(n2.y), r4(n2.z)],
+      medianDistRel: r4(s.median / diag),
+      p90DistRel: r4(s.p90 / diag),
+      normalAgreement: r4(s.agreement),
+      _n: n2,
+      _pref: i < 3 ? 0 : 1
+      // axis planes are canonical; PCA breaks ties last
+    };
+  });
+  const EPS = STRONG_MEDIAN * 0.25;
+  candidates.sort((a, b) => {
+    if (Math.abs(a.medianDistRel - b.medianDistRel) > EPS) {
+      return a.medianDistRel - b.medianDistRel;
+    }
+    if (a._pref !== b._pref) return a._pref - b._pref;
+    return b.normalAgreement - a.normalAgreement || a.medianDistRel - b.medianDistRel;
+  });
+  const best = candidates[0];
+  const verdict = verdictOf(best.medianDistRel, best.normalAgreement);
+  let bestOrigin = cen.clone();
+  {
+    const probe = localSamples(entry, 256, 12345);
+    let bestMedian = Infinity;
+    for (const stepRel of [
+      -0.02,
+      -0.01,
+      -5e-3,
+      -25e-4,
+      0,
+      25e-4,
+      5e-3,
+      0.01,
+      0.02
+    ]) {
+      const o = cen.clone().addScaledVector(best._n, stepRel * diag);
+      const s = scorePlane(entry, probe, best._n, o);
+      if (s.median < bestMedian) {
+        bestMedian = s.median;
+        bestOrigin = o;
+      }
+    }
+  }
+  entry.symmetry = {
+    normal: best._n.clone(),
+    origin: bestOrigin,
+    axis: best.axis,
+    medianDistRel: best.medianDistRel,
+    normalAgreement: best.normalAgreement,
+    verdict,
+    geometryRev: entry.geometryRev
+  };
+  return {
+    plane: {
+      axis: best.axis,
+      normal: best.normal,
+      originLocal: [r4(bestOrigin.x), r4(bestOrigin.y), r4(bestOrigin.z)]
+    },
+    verdict,
+    medianDistRel: best.medianDistRel,
+    p90DistRel: best.p90DistRel,
+    normalAgreement: best.normalAgreement,
+    samples: count,
+    geometryRev: entry.geometryRev,
+    candidates: candidates.map(({ _n, _pref, ...rest }) => rest),
+    note: verdict === "weak" ? "No convincing mirror plane \u2014 mirror_paint will refuse without an explicit plane." : `mirror_paint will heal across the ${best.axis} plane. Geometric symmetry does not guarantee TEXTURE symmetry (a thin plate's faces mirror geometrically with unrelated content) \u2014 verify with a before/after render.`
+  };
+}
+function resolvePlane(viewer, entry, opts) {
+  if (opts.plane) {
+    const n2 = {
+      x: new Vector3(1, 0, 0),
+      y: new Vector3(0, 1, 0),
+      z: new Vector3(0, 0, 1)
+    }[opts.plane];
+    let origin;
+    if (opts.plane_origin) {
+      origin = new Vector3(...opts.plane_origin);
+    } else if (entry.symmetry && entry.symmetry.geometryRev === entry.geometryRev) {
+      origin = entry.symmetry.origin;
+    } else {
+      const s2 = localSamples(entry, 256, 42);
+      origin = new Vector3();
+      for (let i = 0; i < s2.count; i++) {
+        origin.x += s2.points[i * 3];
+        origin.y += s2.points[i * 3 + 1];
+        origin.z += s2.points[i * 3 + 2];
+      }
+      origin.divideScalar(s2.count);
+    }
+    const probe = localSamples(entry, 256, 42);
+    const soup = localBVH(entry).geometry;
+    soup.computeBoundingBox();
+    const diag = soup.boundingBox.getSize(new Vector3()).length() || 1;
+    const s = scorePlane(entry, probe, n2, origin);
+    const score = {
+      medianDistRel: r4(s.median / diag),
+      normalAgreement: r4(s.agreement),
+      verdict: verdictOf(s.median / diag, s.agreement)
+    };
+    let note;
+    if (score.verdict === "weak") {
+      note = `WARNING: the explicit ${opts.plane} plane scores WEAK on this object (median ${score.medianDistRel}, agreement ${score.normalAgreement}) \u2014 mirrored content may be unrelated. Verify with a render.`;
+    } else if (entry.symmetry && entry.symmetry.geometryRev === entry.geometryRev && entry.symmetry.axis !== opts.plane) {
+      note = `Note: the detected best plane is '${entry.symmetry.axis}' (this override uses '${opts.plane}'). Verify with a render.`;
+    }
+    return {
+      normal: n2,
+      origin,
+      axis: opts.plane,
+      explicit: true,
+      autoDetected: false,
+      score,
+      overrideNote: note
+    };
+  }
+  let sym = entry.symmetry;
+  let autoDetected = false;
+  if (!sym || sym.geometryRev !== entry.geometryRev) {
+    detectSymmetry(viewer, {});
+    sym = entry.symmetry;
+    autoDetected = true;
+  }
+  if (sym.verdict === "weak") {
+    throw new Error(
+      `mirror_paint: the object is not convincingly mirror-symmetric (median reflected distance ${sym.medianDistRel} of bbox diagonal, normal agreement ${sym.normalAgreement}; gate: median \u2264 ${MODERATE_MEDIAN} and agreement \u2265 ${MODERATE_AGREE}). Use clone_paint with a manual donor, or override with plane:"x"|"y"|"z" (+ optional plane_origin:[x,y,z] local) if you know better.`
+    );
+  }
+  return {
+    normal: sym.normal,
+    origin: sym.origin,
+    axis: sym.axis,
+    score: {
+      medianDistRel: sym.medianDistRel,
+      normalAgreement: sym.normalAgreement,
+      verdict: sym.verdict
+    },
+    explicit: false,
+    autoDetected
+  };
+}
+function mirrorPaint(viewer, opts = {}) {
+  assertNotSkinned(viewer);
+  const entry = viewer._activeEntry();
+  if (!entry) throw new Error("No model loaded.");
+  if (!opts.center || opts.center.length !== 3) {
+    throw new Error("mirror_paint requires center: [x,y,z] (world \u2014 use pick on the defect).");
+  }
+  const radius = resolveRadius(viewer, opts, "mirror_paint");
+  const strength = opts.strength !== void 0 ? Math.max(0, Math.min(1, opts.strength)) : 1;
+  const falloffFn = FALLOFFS[opts.falloff || "smooth"] || FALLOFFS.smooth;
+  const plane = resolvePlane(viewer, entry, opts);
+  beginPaintOp("mirror_paint", opts.undo_group);
+  const W = entry.wrapper.matrixWorld.clone();
+  const Winv = W.clone().invert();
+  const center = new Vector3(...opts.center);
+  const mapPoint = (p2) => {
+    p2.applyMatrix4(Winv);
+    reflectPoint(p2, plane.normal, plane.origin);
+    return p2.applyMatrix4(W);
+  };
+  const A3 = new Matrix3().setFromMatrix4(
+    new Matrix4().multiplyMatrices(
+      W,
+      new Matrix4().multiplyMatrices(reflectionMatrix4(plane), Winv)
+    )
+  );
+  const nrmMat = A3.clone().invert().transpose();
+  const reflCenter = mapPoint(center.clone());
+  const s = entry.wrapper.scale;
+  const aniso = Math.max(s.x, s.y, s.z) / Math.max(1e-9, Math.min(s.x, s.y, s.z));
+  const srcRadius = radius * 1.5 * aniso;
+  let healed = 0, alphaSum = 0, selfSource = 0;
+  const skipped = { noSource: 0, normalReject: 0 };
+  let crossMeshHint = null;
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const p = new Vector3(), q = new Vector3();
+  const e1 = new Vector3(), eB = new Vector3();
+  const triangle4 = new Triangle();
+  const bary = new Vector3();
+  const closest = new Vector3();
+  const nTmp = new Vector3(), nDst = new Vector3();
+  const meshes = [];
+  entry.model.traverse((m) => {
+    if (m.isMesh && m.geometry) meshes.push(m);
+  });
+  for (const mesh of meshes) {
+    const geometry = mesh.geometry;
+    const uvAttr = geometry.getAttribute("uv");
+    if (!uvAttr) continue;
+    mesh.updateMatrixWorld(true);
+    const m4 = mesh.matrixWorld;
+    const pos = geometry.getAttribute("position");
+    const index = geometry.getIndex();
+    const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+    const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+    const srcTris = [];
+    let srcAnchorN = null, srcD2 = Infinity;
+    for (let t2 = 0; t2 < triCount; t2++) {
+      a.fromBufferAttribute(pos, idxOf(t2, 0)).applyMatrix4(m4);
+      b.fromBufferAttribute(pos, idxOf(t2, 1)).applyMatrix4(m4);
+      c.fromBufferAttribute(pos, idxOf(t2, 2)).applyMatrix4(m4);
+      p.copy(a).add(b).add(c).divideScalar(3);
+      const triR = Math.max(a.distanceTo(p), b.distanceTo(p), c.distanceTo(p));
+      const d2 = p.distanceToSquared(reflCenter);
+      if (d2 > (srcRadius + triR) ** 2) continue;
+      e1.copy(b).sub(a);
+      eB.copy(c).sub(a);
+      const n2 = e1.clone().cross(eB).normalize();
+      srcTris.push({ t: t2, n: n2 });
+      if (d2 < srcD2) {
+        srcD2 = d2;
+        srcAnchorN = n2;
+      }
+    }
+    if (!srcTris.length) continue;
+    let dstAnchorN = null, dstD2 = Infinity;
+    for (let t2 = 0; t2 < triCount; t2++) {
+      a.fromBufferAttribute(pos, idxOf(t2, 0)).applyMatrix4(m4);
+      b.fromBufferAttribute(pos, idxOf(t2, 1)).applyMatrix4(m4);
+      c.fromBufferAttribute(pos, idxOf(t2, 2)).applyMatrix4(m4);
+      p.copy(a).add(b).add(c).divideScalar(3);
+      const d2 = p.distanceToSquared(center);
+      if (d2 < dstD2) {
+        dstD2 = d2;
+        e1.copy(b).sub(a);
+        eB.copy(c).sub(a);
+        dstAnchorN = e1.clone().cross(eB).normalize();
+      }
+    }
+    if (srcAnchorN && dstAnchorN) {
+      nTmp.copy(srcAnchorN).applyMatrix3(nrmMat).normalize();
+      if (nTmp.dot(dstAnchorN) < Math.cos(Math.PI / 4)) {
+        skipped.normalReject++;
+        continue;
+      }
+    }
+    const layer = ensureRepairableLayer(viewer, mesh, opts.texture_size);
+    const foot = brushFootprint(
+      mesh,
+      layer,
+      center,
+      radius,
+      opts.hardness !== void 0 ? opts.hardness : 0.6,
+      falloffFn
+    );
+    if (!foot || foot.size === 0) continue;
+    const work = foot.size * srcTris.length;
+    if (work > CORRESPONDENCE_BUDGET) {
+      throw new Error(
+        `mirror_paint region too large: ${foot.size.toLocaleString()} texels \xD7 ${srcTris.length.toLocaleString()} source triangles \u2248 ${Math.round(work / 1e6)}M correspondence tests (budget ${Math.round(CORRESPONDENCE_BUDGET / 1e6)}M). Use a smaller radius/radius_rel (heal in passes) or a lower texture_size.`
+      );
+    }
+    const dim = layer.size;
+    const snapshot = layer.ctx.getImageData(0, 0, dim, dim).data;
+    for (const st of srcTris) {
+      st.rn = st.n.clone().applyMatrix3(nrmMat).normalize();
+      const i0 = idxOf(st.t, 0), i1 = idxOf(st.t, 1), i2 = idxOf(st.t, 2);
+      a.fromBufferAttribute(pos, i0).applyMatrix4(m4);
+      b.fromBufferAttribute(pos, i1).applyMatrix4(m4);
+      c.fromBufferAttribute(pos, i2).applyMatrix4(m4);
+      p.copy(a).add(b).add(c).divideScalar(3);
+      st.cx = p.x;
+      st.cy = p.y;
+      st.cz = p.z;
+      st.r = Math.max(a.distanceTo(p), b.distanceTo(p), c.distanceTo(p));
+    }
+    let minX = dim, maxX = 0, minY = dim, maxY = 0;
+    for (const key of foot.keys()) {
+      const px2 = key % dim, py2 = (key - px2) / dim;
+      if (px2 < minX) minX = px2;
+      if (px2 > maxX) maxX = px2;
+      if (py2 < minY) minY = py2;
+      if (py2 > maxY) maxY = py2;
+    }
+    const w = maxX - minX + 1;
+    const img = layer.ctx.getImageData(minX, minY, w, maxY - minY + 1);
+    const data = img.data;
+    const selfR2 = radius * radius;
+    for (const [key, rec] of foot) {
+      p.set(rec.world[0], rec.world[1], rec.world[2]);
+      q.copy(p);
+      mapPoint(q);
+      if (rec.n) nDst.set(rec.n[0], rec.n[1], rec.n[2]);
+      let bestD = Infinity, bestUV = null;
+      for (const st of srcTris) {
+        if (rec.n && st.rn.dot(nDst) < 0.2) continue;
+        const dcx = q.x - st.cx, dcy = q.y - st.cy, dcz = q.z - st.cz;
+        const dc = Math.sqrt(dcx * dcx + dcy * dcy + dcz * dcz) - st.r;
+        if (dc > 0 && dc * dc > bestD) continue;
+        const i0 = idxOf(st.t, 0), i1 = idxOf(st.t, 1), i2 = idxOf(st.t, 2);
+        a.fromBufferAttribute(pos, i0).applyMatrix4(m4);
+        b.fromBufferAttribute(pos, i1).applyMatrix4(m4);
+        c.fromBufferAttribute(pos, i2).applyMatrix4(m4);
+        triangle4.set(a, b, c);
+        triangle4.closestPointToPoint(q, closest);
+        const d = closest.distanceToSquared(q);
+        if (d < bestD) {
+          bestD = d;
+          triangle4.getBarycoord(closest, bary);
+          bestUV = [
+            uvAttr.getX(i0) * bary.x + uvAttr.getX(i1) * bary.y + uvAttr.getX(i2) * bary.z,
+            uvAttr.getY(i0) * bary.x + uvAttr.getY(i1) * bary.y + uvAttr.getY(i2) * bary.z
+          ];
+        }
+      }
+      if (!bestUV || bestD > (radius * aniso) ** 2) {
+        skipped.noSource++;
+        continue;
+      }
+      const sx = bestUV[0] * dim - 0.5;
+      const sy = (layer.flipY ? 1 - bestUV[1] : bestUV[1]) * dim - 0.5;
+      const x0 = Math.max(0, Math.min(dim - 1, Math.floor(sx)));
+      const y0 = Math.max(0, Math.min(dim - 1, Math.floor(sy)));
+      const x1 = Math.min(dim - 1, x0 + 1), y1 = Math.min(dim - 1, y0 + 1);
+      const fx = Math.max(0, Math.min(1, sx - x0)), fy = Math.max(0, Math.min(1, sy - y0));
+      let r = 0, g3 = 0, b22 = 0;
+      for (const [xx, yy, wgt] of [
+        [x0, y0, (1 - fx) * (1 - fy)],
+        [x1, y0, fx * (1 - fy)],
+        [x0, y1, (1 - fx) * fy],
+        [x1, y1, fx * fy]
+      ]) {
+        const o2 = (yy * dim + xx) * 4;
+        r += snapshot[o2] * wgt;
+        g3 += snapshot[o2 + 1] * wgt;
+        b22 += snapshot[o2 + 2] * wgt;
+      }
+      const px2 = key % dim, py2 = (key - px2) / dim;
+      const o = ((py2 - minY) * w + (px2 - minX)) * 4;
+      const alpha = rec.alpha * strength;
+      data[o] = Math.round(data[o] * (1 - alpha) + r * alpha);
+      data[o + 1] = Math.round(data[o + 1] * (1 - alpha) + g3 * alpha);
+      data[o + 2] = Math.round(data[o + 2] * (1 - alpha) + b22 * alpha);
+      data[o + 3] = 255;
+      healed++;
+      alphaSum += alpha;
+      if (p.distanceToSquared(q) < selfR2) selfSource++;
+    }
+    stashPaintPatch("mirror_paint", layer, minX, minY, img.width, img.height);
+    layer.ctx.putImageData(img, minX, minY);
+    layer.texture.needsUpdate = true;
+  }
+  if (healed === 0) {
+    let brushMesh = null;
+    for (const mesh of meshes) {
+      mesh.geometry.computeBoundingBox();
+      const box = mesh.geometry.boundingBox.clone().applyMatrix4(mesh.matrixWorld);
+      if (box.distanceToPoint(center) < radius) {
+        brushMesh = mesh;
+        break;
+      }
+    }
+    for (const mesh of meshes) {
+      if (mesh === brushMesh || !mesh.geometry.getAttribute("uv")) continue;
+      mesh.geometry.computeBoundingBox();
+      const box = mesh.geometry.boundingBox.clone().applyMatrix4(mesh.matrixWorld);
+      if (box.distanceToPoint(reflCenter) < radius) {
+        crossMeshHint = mesh.name || "(unnamed mesh)";
+        break;
+      }
+    }
+    const nothingTouched = skipped.noSource === 0 && skipped.normalReject === 0;
+    const cross = crossMeshHint ? ` The mirror counterpart appears to live on mesh '${crossMeshHint}' \u2014 mirror_paint heals within ONE mesh's texture (cross-mesh donors are not supported); use clone_paint or paint directly.` : nothingTouched ? " The brush rasterized ZERO texels \u2014 the radius is likely smaller than one texel at this texture size; raise radius/radius_rel." : "";
+    throw new Error(
+      `mirror_paint healed nothing \u2014 the reflected region found no matching source surface (skipped: ${skipped.noSource} no-source, ${skipped.normalReject} normal-rejected).${cross}` + wrongObjectHint(viewer, opts.center)
+    );
+  }
+  entry.modified = true;
+  viewer.invalidate();
+  const out = {
+    healed,
+    meanAlpha: Math.round(alphaSum / healed * 1e3) / 1e3,
+    skipped,
+    selfSourceFraction: Math.round(selfSource / healed * 1e3) / 1e3,
+    plane: { axis: plane.axis, originLocal: [r4(plane.origin.x), r4(plane.origin.y), r4(plane.origin.z)] }
+  };
+  if (plane.score) out.score = plane.score;
+  if (plane.autoDetected) out.autoDetected = true;
+  const notes = [];
+  if (plane.overrideNote) notes.push(plane.overrideNote);
+  if (out.selfSourceFraction > 0.4) {
+    notes.push("A large share of the brush straddles the symmetry plane \u2014 those texels sample from inside the brush itself (self-copy, little visible change). Verify with a render.");
+  } else if (out.meanAlpha < 0.25) {
+    notes.push("Low meanAlpha \u2014 the heal may be nearly invisible; raise strength.");
+  }
+  if (notes.length) out.note = notes.join(" ");
+  return out;
+}
+function reflectionMatrix4(plane) {
+  const n2 = plane.normal, o = plane.origin;
+  const m = new Matrix4();
+  const d = 2 * (o.x * n2.x + o.y * n2.y + o.z * n2.z);
+  m.set(
+    1 - 2 * n2.x * n2.x,
+    -2 * n2.x * n2.y,
+    -2 * n2.x * n2.z,
+    d * n2.x,
+    -2 * n2.y * n2.x,
+    1 - 2 * n2.y * n2.y,
+    -2 * n2.y * n2.z,
+    d * n2.y,
+    -2 * n2.z * n2.x,
+    -2 * n2.z * n2.y,
+    1 - 2 * n2.z * n2.z,
+    d * n2.z,
+    0,
+    0,
+    0,
+    1
+  );
+  return m;
+}
+function releaseSymmetryCache(entry) {
+  if (entry && entry._symBVH) {
+    if (entry._symBVH.geometry) entry._symBVH.geometry.dispose();
+    entry._symBVH = null;
+  }
+}
 
 // frontend/js/viewer/timeline.js
+var TIMELINE_MAX_TRACKS = 64;
 var TIMELINE_MAX_KEYS = 256;
 var EASINGS = {
   linear: (u2) => u2,
@@ -43216,6 +49240,240 @@ function effectiveDuration(tl2) {
 function tl(viewer) {
   if (!viewer._timeline) viewer._timeline = createTimeline();
   return viewer._timeline;
+}
+function requireEntry(viewer, id) {
+  const entry = viewer._entryById(id);
+  if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
+  return entry;
+}
+function quatAngleDeg(a, b) {
+  const qa = new Quaternion(...a);
+  const qb = new Quaternion(...b);
+  return MathUtils.radToDeg(qa.angleTo(qb));
+}
+function setKeyframe(viewer, opts) {
+  const timeline = tl(viewer);
+  const entry = requireEntry(viewer, opts.id);
+  if (timeline.playing) pauseTimeline(viewer);
+  const time = opts.time;
+  if (!(time >= 0)) throw new Error("set_keyframe requires time >= 0 (seconds)");
+  const hasExplicit = opts.position || opts.rotation || opts.quaternion || opts.scale !== void 0;
+  if (!hasExplicit && !opts.capture) {
+    throw new Error(
+      "set_keyframe: pass position/rotation/scale values, or capture:true to key the object's CURRENT pose (pose with set_object_transform or look_at first, then capture)."
+    );
+  }
+  if (!timeline.tracks.has(opts.id)) {
+    if (timeline.tracks.size >= TIMELINE_MAX_TRACKS) {
+      throw new Error(`Timeline cap: max ${TIMELINE_MAX_TRACKS} animated objects.`);
+    }
+    timeline.tracks.set(opts.id, { position: [], rotation: [], scale: [] });
+    entry.basePlacement = {
+      p: entry.logical.p.clone(),
+      q: entry.logical.q.clone(),
+      s: entry.logical.s.clone()
+    };
+  }
+  const channels = timeline.tracks.get(opts.id);
+  const easing = opts.easing || "linear";
+  if (!EASINGS[easing]) {
+    throw new Error(`Unknown easing '${easing}'. Use ${Object.keys(EASINGS).join("|")}.`);
+  }
+  const upsert = (keys, value) => {
+    if (keys.length >= TIMELINE_MAX_KEYS) {
+      throw new Error(`Timeline cap: max ${TIMELINE_MAX_KEYS} keys per channel.`);
+    }
+    const existing = keys.findIndex((k) => Math.abs(k.t - time) < 1e-6);
+    const key = { t: time, v: value, easing };
+    if (existing >= 0) keys[existing] = key;
+    else {
+      keys.push(key);
+      keys.sort((a, b) => a.t - b.t);
+    }
+  };
+  const written = [];
+  const L = entry.logical;
+  const d2r = Math.PI / 180;
+  let captureSet = null;
+  if (opts.capture && !hasExplicit) {
+    captureSet = new Set(opts.channels || ["position", "rotation", "scale"]);
+    for (const ch of captureSet) {
+      if (!["position", "rotation", "scale"].includes(ch)) {
+        throw new Error(`Unknown channel '${ch}'. Use position|rotation|scale.`);
+      }
+    }
+  }
+  if (opts.position || captureSet && captureSet.has("position")) {
+    const v = opts.position || [L.p.x, L.p.y, L.p.z];
+    upsert(channels.position, [v[0], v[1], v[2]]);
+    written.push("position");
+  }
+  let quatValue = null;
+  if (opts.quaternion) {
+    quatValue = new Quaternion(...opts.quaternion).normalize();
+  } else if (opts.rotation) {
+    quatValue = new Quaternion().setFromEuler(new Euler(
+      opts.rotation[0] * d2r,
+      opts.rotation[1] * d2r,
+      opts.rotation[2] * d2r,
+      "XYZ"
+    ));
+  } else if (captureSet && captureSet.has("rotation")) {
+    quatValue = L.q.clone();
+  }
+  let note;
+  if (quatValue) {
+    const arr = [quatValue.x, quatValue.y, quatValue.z, quatValue.w];
+    const eulerReq = opts.rotation ? [...opts.rotation] : null;
+    const keys = channels.rotation;
+    const idx = keys.findIndex((k) => k.t > time);
+    const neighbors = [];
+    if (keys.length) {
+      const before = idx === -1 ? keys[keys.length - 1] : keys[idx - 1];
+      const after = idx === -1 ? null : keys[idx];
+      if (before && Math.abs(before.t - time) > 1e-6) neighbors.push(before);
+      if (after) neighbors.push(after);
+    }
+    for (const n2 of neighbors) {
+      const quatDeg = quatAngleDeg(n2.v, arr);
+      if (eulerReq && n2.e) {
+        const axisDelta = Math.max(
+          Math.abs(eulerReq[0] - n2.e[0]),
+          Math.abs(eulerReq[1] - n2.e[1]),
+          Math.abs(eulerReq[2] - n2.e[2])
+        );
+        if (axisDelta >= 90 && quatDeg < 5) {
+          note = `WARNING: the keys at t=${n2.t} and t=${time} differ by ${Math.round(axisDelta)}\xB0 in requested angles but are IDENTICAL in rotation space (360\xB0 = 0\xB0) \u2014 this segment will NOT move. Key full turns in steps \u2264120\xB0: e.g. a 720\xB0 spin as 0/90/180/.../720.`;
+          continue;
+        }
+        if (axisDelta > 120) {
+          note = `rotation step to the key at t=${n2.t} is ${Math.round(axisDelta)}\xB0 as requested \u2014 interpolation takes the SHORT arc and cannot exceed 180\xB0/segment. Use steps \u2264120\xB0 (e.g. 0/90/180/270/360 for a full spin).`;
+          continue;
+        }
+      }
+      if (quatDeg > 120) {
+        note = `rotation delta to the key at t=${n2.t} is ${Math.round(quatDeg)}\xB0 \u2014 interpolation takes the SHORT arc (a 270\xB0 turn plays as \u221290\xB0). Use steps \u2264120\xB0 (e.g. 0/90/180/270/360 for a full spin).`;
+      }
+    }
+    const key = { t: time, v: arr, easing };
+    if (eulerReq) key.e = eulerReq;
+    if (keys.length >= TIMELINE_MAX_KEYS) {
+      throw new Error(`Timeline cap: max ${TIMELINE_MAX_KEYS} keys per channel.`);
+    }
+    const existing = keys.findIndex((k) => Math.abs(k.t - time) < 1e-6);
+    if (existing >= 0) keys[existing] = key;
+    else {
+      keys.push(key);
+      keys.sort((a, b) => a.t - b.t);
+    }
+    written.push("rotation");
+  }
+  if (opts.scale !== void 0 || captureSet && captureSet.has("scale")) {
+    let v;
+    if (typeof opts.scale === "number") v = [opts.scale, opts.scale, opts.scale];
+    else if (Array.isArray(opts.scale)) v = [opts.scale[0], opts.scale[1], opts.scale[2]];
+    else v = [L.s.x, L.s.y, L.s.z];
+    upsert(channels.scale, v);
+    written.push("scale");
+  }
+  const keyCount = channels.position.length + channels.rotation.length + channels.scale.length;
+  const result = {
+    objectId: opts.id,
+    time,
+    channels: written,
+    keyCount,
+    duration: Math.round(effectiveDuration(timeline) * 1e3) / 1e3
+  };
+  if (note) result.note = note;
+  return result;
+}
+function deleteKeyframe(viewer, { id, time, channel } = {}) {
+  const timeline = tl(viewer);
+  requireEntry(viewer, id);
+  const channels = timeline.tracks.get(id);
+  if (!channels) throw new Error(`Object ${id} has no timeline tracks.`);
+  const names = channel ? [channel] : ["position", "rotation", "scale"];
+  let removed = 0;
+  for (const name of names) {
+    if (!channels[name]) throw new Error(`Unknown channel '${name}'. Use position|rotation|scale.`);
+    if (time === void 0) {
+      removed += channels[name].length;
+      channels[name] = [];
+    } else {
+      const before = channels[name].length;
+      channels[name] = channels[name].filter((k) => Math.abs(k.t - time) > 1e-6);
+      removed += before - channels[name].length;
+    }
+  }
+  if (!channels.position.length && !channels.rotation.length && !channels.scale.length) {
+    timeline.tracks.delete(id);
+  }
+  return { objectId: id, removed };
+}
+function getTimeline(viewer) {
+  const timeline = tl(viewer);
+  const r34 = (v) => Math.round(v * 1e3) / 1e3;
+  const tracks = [];
+  for (const [objectId, channels] of timeline.tracks) {
+    const entry = viewer._entryById(objectId);
+    const track = { objectId, name: entry ? entry.name : "(removed)" };
+    for (const [name, keys] of Object.entries(channels)) {
+      if (!keys.length) continue;
+      track[name] = keys.map((k) => {
+        const out = { t: r34(k.t) };
+        if (name === "rotation") {
+          if (k.e) {
+            out.v = k.e.map(r34);
+          } else {
+            const e = new Euler().setFromQuaternion(
+              new Quaternion(...k.v),
+              "XYZ"
+            );
+            const r2d = 180 / Math.PI;
+            out.v = [r34(e.x * r2d), r34(e.y * r2d), r34(e.z * r2d)];
+            out.derived = true;
+          }
+        } else {
+          out.v = k.v.map(r34);
+        }
+        if (k.easing !== "linear") out.easing = k.easing;
+        return out;
+      });
+    }
+    tracks.push(track);
+  }
+  return {
+    duration: r34(effectiveDuration(timeline)),
+    time: r34(timeline.time),
+    playing: timeline.playing,
+    loop: timeline.loop,
+    tracks,
+    // Rotations converted from stored quaternions for readability.
+    rotationDerived: true
+  };
+}
+function clearTimeline(viewer, { id } = {}) {
+  const timeline = tl(viewer);
+  timeline.playing = false;
+  const ids = id !== void 0 ? [id] : [...timeline.tracks.keys()];
+  let cleared = 0;
+  for (const objectId of ids) {
+    if (!timeline.tracks.has(objectId)) continue;
+    timeline.tracks.delete(objectId);
+    cleared++;
+    const entry = viewer._entryById(objectId);
+    if (entry && entry.basePlacement) {
+      entry.logical.p.copy(entry.basePlacement.p);
+      entry.logical.q.copy(entry.basePlacement.q);
+      entry.logical.s.copy(entry.basePlacement.s);
+      viewer._composeWrapper(entry);
+      entry.basePlacement = null;
+    }
+  }
+  if (timeline.tracks.size === 0) timeline.time = 0;
+  viewer._updateSceneRig(viewer._visibleUnionBox());
+  viewer.invalidate();
+  return { clearedTracks: cleared, remaining: timeline.tracks.size };
 }
 function sampleChannel(keys, t2, interpolate) {
   if (!keys.length) return null;
@@ -43287,6 +49545,14 @@ function seekTimeline(viewer, { time } = {}) {
   viewer.invalidate();
   return { time: Math.round(time * 1e3) / 1e3 };
 }
+function setTimelineDuration(viewer, { duration } = {}) {
+  const timeline = tl(viewer);
+  if (duration !== void 0) {
+    if (!(duration > 0)) throw new Error("duration must be > 0 seconds");
+    timeline.duration = duration;
+  }
+  return { duration: Math.round(effectiveDuration(timeline) * 1e3) / 1e3 };
+}
 function tickTimeline(viewer, delta) {
   const timeline = viewer._timeline;
   if (!timeline || !timeline.playing) return false;
@@ -43329,19 +49595,19 @@ function sweptBox(viewer) {
 function timelineState(viewer) {
   const timeline = viewer._timeline;
   if (!timeline || timeline.tracks.size === 0) return { tracks: 0 };
-  const r3 = (v) => Math.round(v * 1e3) / 1e3;
+  const r34 = (v) => Math.round(v * 1e3) / 1e3;
   return {
     tracks: timeline.tracks.size,
     playing: timeline.playing,
-    time: r3(timeline.time),
-    duration: r3(effectiveDuration(timeline)),
+    time: r34(timeline.time),
+    duration: r34(effectiveDuration(timeline)),
     loop: timeline.loop
   };
 }
 function serializeTimeline(viewer) {
   const timeline = viewer._timeline;
   if (!timeline || timeline.tracks.size === 0) return null;
-  const r4 = (v) => Math.round(v * 1e4) / 1e4;
+  const r43 = (v) => Math.round(v * 1e4) / 1e4;
   const tracks = [];
   for (const [objectId, channels] of timeline.tracks) {
     for (const [channel, keys] of Object.entries(channels)) {
@@ -43350,18 +49616,18 @@ function serializeTimeline(viewer) {
         objectId,
         channel,
         keys: keys.map((k) => ({
-          t: r4(k.t),
-          v: k.v.map(r4),
+          t: r43(k.t),
+          v: k.v.map(r43),
           // Requested Euler degrees round-trip through manifests so
           // get_timeline after load_scene shows the AUTHORED angles
           // (a stored 120° yaw otherwise reads [-180, 60, -180]).
-          ...k.e ? { e: k.e.map(r4) } : {},
+          ...k.e ? { e: k.e.map(r43) } : {},
           ...k.easing !== "linear" ? { easing: k.easing } : {}
         }))
       });
     }
   }
-  return { duration: r4(timeline.duration), tracks };
+  return { duration: r43(timeline.duration), tracks };
 }
 function restoreTimeline(viewer, data) {
   const timeline = tl(viewer);
@@ -43903,6 +50169,7 @@ var _Viewer3D = class _Viewer3D {
    */
   _disposeEntry(entry) {
     releasePaintBudget(entry.model);
+    releaseSymmetryCache(entry);
     entry.model.traverse((child) => {
       if (child.isMesh && child._mvOriginalMaterial) {
         const override = child.material;
@@ -43949,14 +50216,14 @@ var _Viewer3D = class _Viewer3D {
   // ---- registry public surface (control API + app UI) ----------------------
   /** Summaries of every object (id, name, active, visibility, opacity, source). */
   listObjects() {
-    const r3 = (v) => Math.round(v * 1e3) / 1e3;
+    const r34 = (v) => Math.round(v * 1e3) / 1e3;
     return this._objects.map((e) => {
       const painted = paintedMeshNames(e.model);
       e.wrapper.updateMatrixWorld(true);
       const box = new Box3().setFromObject(e.wrapper);
       const bounds = box.isEmpty() ? null : {
-        min: [r3(box.min.x), r3(box.min.y), r3(box.min.z)],
-        max: [r3(box.max.x), r3(box.max.y), r3(box.max.z)]
+        min: [r34(box.min.x), r34(box.min.y), r34(box.min.z)],
+        max: [r34(box.max.x), r34(box.max.y), r34(box.max.z)]
       };
       return {
         id: e.id,
@@ -44115,28 +50382,28 @@ var _Viewer3D = class _Viewer3D {
   /** Placement transform of an object (LOGICAL TRS — parent-relative, which
    *  equals world space for unparented objects; pivot-independent). */
   _transformOf(entry) {
-    const r3 = (v) => Math.round(v * 1e4) / 1e4;
+    const r34 = (v) => Math.round(v * 1e4) / 1e4;
     const { p, q, s } = entry.logical;
     return {
-      position: [r3(p.x), r3(p.y), r3(p.z)],
-      quaternion: [r3(q.x), r3(q.y), r3(q.z), r3(q.w)],
-      scale: [r3(s.x), r3(s.y), r3(s.z)]
+      position: [r34(p.x), r34(p.y), r34(p.z)],
+      quaternion: [r34(q.x), r34(q.y), r34(q.z), r34(q.w)],
+      scale: [r34(s.x), r34(s.y), r34(s.z)]
     };
   }
   getObjectTransform(id) {
     const entry = this._entryById(id);
     if (!entry) throw new Error(`No object with id ${id}. Use list_objects.`);
     const out = this._transformOf(entry);
-    const r4 = (v) => Math.round(v * 1e4) / 1e4;
+    const r43 = (v) => Math.round(v * 1e4) / 1e4;
     entry.wrapper.updateMatrixWorld(true);
     const wp = entry.wrapper.getWorldPosition(new Vector3());
     const wq = entry.wrapper.getWorldQuaternion(new Quaternion());
     out.world = {
-      position: [r4(wp.x), r4(wp.y), r4(wp.z)],
-      quaternion: [r4(wq.x), r4(wq.y), r4(wq.z), r4(wq.w)]
+      position: [r43(wp.x), r43(wp.y), r43(wp.z)],
+      quaternion: [r43(wq.x), r43(wq.y), r43(wq.z), r43(wq.w)]
     };
     const pv = entry.pivot;
-    if (pv.lengthSq() > 0) out.pivot = [r4(pv.x), r4(pv.y), r4(pv.z)];
+    if (pv.lengthSq() > 0) out.pivot = [r43(pv.x), r43(pv.y), r43(pv.z)];
     if (entry.parentId != null) out.parentId = entry.parentId;
     return out;
   }
@@ -44188,10 +50455,10 @@ var _Viewer3D = class _Viewer3D {
     );
     entry.pivot.copy(local);
     this._syncLogicalFromWrapper(entry);
-    const r4 = (v) => Math.round(v * 1e4) / 1e4;
+    const r43 = (v) => Math.round(v * 1e4) / 1e4;
     return {
-      pivot: [r4(local.x), r4(local.y), r4(local.z)],
-      pivotWorld: worldPoint.map(r4),
+      pivot: [r43(local.x), r43(local.y), r43(local.z)],
+      pivotWorld: worldPoint.map(r43),
       note: "rotation in set_object_transform / keyframes now swings about this pivot"
     };
   }
@@ -44267,13 +50534,13 @@ var _Viewer3D = class _Viewer3D {
   }
   /** Bounds + position summary for composition command returns (terse). */
   _placementSummary(entry) {
-    const r3 = (v) => Math.round(v * 1e3) / 1e3;
+    const r34 = (v) => Math.round(v * 1e3) / 1e3;
     const box = this._entryWorldBox(entry);
     return {
       position: this._transformOf(entry).position,
       bounds: box.isEmpty() ? null : {
-        min: [r3(box.min.x), r3(box.min.y), r3(box.min.z)],
-        max: [r3(box.max.x), r3(box.max.y), r3(box.max.z)]
+        min: [r34(box.min.x), r34(box.min.y), r34(box.min.z)],
+        max: [r34(box.max.x), r34(box.max.y), r34(box.max.z)]
       }
     };
   }
@@ -44411,7 +50678,7 @@ var _Viewer3D = class _Viewer3D {
     if (factor > 0 && this._objects.length < 2) {
       throw new Error("Exploded view needs at least 2 objects (use detect_parts + split_object to separate parts first).");
     }
-    const r3 = (v) => Math.round(v * 1e3) / 1e3;
+    const r34 = (v) => Math.round(v * 1e3) / 1e3;
     if (factor <= 0) {
       let restored = 0;
       for (const e of this._objects) {
@@ -44426,30 +50693,61 @@ var _Viewer3D = class _Viewer3D {
       this.invalidate();
       return { exploded: false, restored };
     }
+    for (const e of this._objects) {
+      if (!e._explodeBase) e._explodeBase = e.logical.p.clone();
+      else {
+        e.logical.p.copy(e._explodeBase);
+        this._composeWrapper(e);
+      }
+    }
     const sceneBox = this._visibleUnionBox();
     if (!sceneBox) throw new Error("Nothing visible to explode.");
     const sceneCenter = sceneBox.getCenter(new Vector3());
     const sceneRadius = sceneBox.getSize(new Vector3()).length() / 2 || 1;
+    const ownBox = (e) => {
+      e.model.updateMatrixWorld(true);
+      return new Box3().setFromObject(e.model);
+    };
     const preCenters = /* @__PURE__ */ new Map();
     for (const e of this._objects) {
-      const box = this._entryWorldBox(e);
+      const box = ownBox(e);
       if (!box.isEmpty()) preCenters.set(e.id, box.getCenter(new Vector3()));
     }
+    const depthOf = (e) => {
+      let d = 0, pid = e.parentId, guard = 0;
+      while (pid !== null && pid !== void 0 && guard++ < 64) {
+        const pe = this._objects.find((o) => o.id === pid);
+        if (!pe) break;
+        d++;
+        pid = pe.parentId;
+      }
+      return d;
+    };
+    const ordered = [...this._objects].sort((a, b) => depthOf(a) - depthOf(b));
     const moved = [];
-    for (const e of this._objects) {
-      if (!e._explodeBase) e._explodeBase = e.logical.p.clone();
-      const box = this._entryWorldBox(e);
-      if (box.isEmpty()) continue;
-      const dir = box.getCenter(new Vector3()).sub(sceneCenter);
+    const invLin = new Matrix3();
+    for (const e of ordered) {
+      const pre = preCenters.get(e.id);
+      if (!pre) continue;
+      const dir = pre.clone().sub(sceneCenter);
       if (dir.lengthSq() < 1e-9) dir.set(0, 1, 0);
       dir.normalize();
-      e.logical.p.copy(e._explodeBase).addScaledVector(dir, sceneRadius * factor * 0.6);
+      const target = pre.clone().addScaledVector(dir, sceneRadius * factor * 0.6);
+      const nowCenter = ownBox(e).getCenter(new Vector3());
+      const worldDelta = target.sub(nowCenter);
+      const parentNode = e.wrapper.parent;
+      if (parentNode) {
+        parentNode.updateMatrixWorld(true);
+        invLin.setFromMatrix4(parentNode.matrixWorld).invert();
+        worldDelta.applyMatrix3(invLin);
+      }
+      e.logical.p.add(worldDelta);
       this._composeWrapper(e);
       moved.push({ entry: e, dir });
     }
     const post = [];
     for (const { entry: e, dir } of moved) {
-      const box = this._entryWorldBox(e);
+      const box = ownBox(e);
       const c = box.getCenter(new Vector3());
       const before = preCenters.get(e.id);
       post.push({ e, box });
@@ -44457,7 +50755,7 @@ var _Viewer3D = class _Viewer3D {
       e._lastExplodeReport = {
         id: e.id,
         name: e.name,
-        worldOffset: [r3(d.x), r3(d.y), r3(d.z)]
+        worldOffset: [r34(d.x), r34(d.y), r34(d.z)]
       };
     }
     let minGap = Infinity;
@@ -44482,7 +50780,7 @@ var _Viewer3D = class _Viewer3D {
       exploded: true,
       factor,
       objects: moved.map(({ entry: e }) => e._lastExplodeReport),
-      minGapWorld: Number.isFinite(minGap) ? r3(minGap) : null,
+      minGapWorld: Number.isFinite(minGap) ? r34(minGap) : null,
       note: "explode_view {factor: 0} restores placements \u2014 do it BEFORE save_scene/export or the offsets persist."
     };
     if (overlapping.length) {
@@ -44523,17 +50821,17 @@ var _Viewer3D = class _Viewer3D {
     w.updateMatrixWorld(true);
     this._updateSceneRig(this._visibleUnionBox());
     this.invalidate();
-    const r4 = (v) => Math.round(v * 1e4) / 1e4;
+    const r43 = (v) => Math.round(v * 1e4) / 1e4;
     const e = new Euler().setFromQuaternion(w.quaternion, "XYZ");
     const r2d = 180 / Math.PI;
     return {
       quaternion: [
-        r4(w.quaternion.x),
-        r4(w.quaternion.y),
-        r4(w.quaternion.z),
-        r4(w.quaternion.w)
+        r43(w.quaternion.x),
+        r43(w.quaternion.y),
+        r43(w.quaternion.z),
+        r43(w.quaternion.w)
       ],
-      rotation: [r4(e.x * r2d), r4(e.y * r2d), r4(e.z * r2d)]
+      rotation: [r43(e.x * r2d), r43(e.y * r2d), r43(e.z * r2d)]
     };
   }
   /** Frame the union of all visible objects (the whole composed scene). */
@@ -44572,8 +50870,8 @@ var _Viewer3D = class _Viewer3D {
         opacity: e.opacity
       };
       if (e.pivot.lengthSq() > 0) {
-        const r4 = (v) => Math.round(v * 1e4) / 1e4;
-        obj.pivot = [r4(e.pivot.x), r4(e.pivot.y), r4(e.pivot.z)];
+        const r43 = (v) => Math.round(v * 1e4) / 1e4;
+        obj.pivot = [r43(e.pivot.x), r43(e.pivot.y), r43(e.pivot.z)];
       }
       objects.push(obj);
     }
@@ -44610,11 +50908,11 @@ var _Viewer3D = class _Viewer3D {
     return manifest;
   }
   _logicalToTransform(L) {
-    const r4 = (v) => Math.round(v * 1e4) / 1e4;
+    const r43 = (v) => Math.round(v * 1e4) / 1e4;
     return {
-      position: [r4(L.p.x), r4(L.p.y), r4(L.p.z)],
-      quaternion: [r4(L.q.x), r4(L.q.y), r4(L.q.z), r4(L.q.w)],
-      scale: [r4(L.s.x), r4(L.s.y), r4(L.s.z)]
+      position: [r43(L.p.x), r43(L.p.y), r43(L.p.z)],
+      quaternion: [r43(L.q.x), r43(L.q.y), r43(L.q.z), r43(L.q.w)],
+      scale: [r43(L.s.x), r43(L.s.y), r43(L.s.z)]
     };
   }
   /**
@@ -44769,14 +51067,7 @@ var _Viewer3D = class _Viewer3D {
    * Ensures clean slate: camera, navigation mode, FPV angles, scale, keys.
    */
   _resetViewerState() {
-    if (this._navMode === "fpv") {
-      this._navMode = "orbit";
-      this._controls.enabled = true;
-      this._fpvMouseDown = false;
-      this._container.dispatchEvent(new CustomEvent("navmodechange", {
-        detail: { mode: "orbit" }
-      }));
-    }
+    if (this._navMode === "fpv") this.setNavMode("orbit");
     this._keysPressed.clear();
     this._fpvYaw = 0;
     this._fpvPitch = 0;
@@ -45414,6 +51705,9 @@ var _Viewer3D = class _Viewer3D {
     }
     this._navMode = mode;
     this._fpvMouseDown = false;
+    this._container.dispatchEvent(new CustomEvent("navmodechange", {
+      detail: { mode }
+    }));
   }
   /** Get the current navigation mode. */
   getNavMode() {
@@ -45430,12 +51724,8 @@ var _Viewer3D = class _Viewer3D {
     this._controls.enabled = true;
     this._controls.update();
     if (this._navMode === "fpv") {
-      this._navMode = "orbit";
-      this._fpvMouseDown = false;
+      this.setNavMode("orbit");
       this._keysPressed.clear();
-      this._container.dispatchEvent(new CustomEvent("navmodechange", {
-        detail: { mode: "orbit" }
-      }));
     }
   }
   // ==========================================================
@@ -45609,15 +51899,15 @@ var _Viewer3D = class _Viewer3D {
     this._controls.maxDistance = Math.max(this._preFocusClip.maxDistance, modelSpan * 4);
     this._controls.update();
     this._refreshCameraClip && this._refreshCameraClip();
-    const r3 = (v) => Math.round(v * 1e3) / 1e3;
+    const r34 = (v) => Math.round(v * 1e3) / 1e3;
     return {
       target,
-      center: [r3(center.x), r3(center.y), r3(center.z)],
-      size: [r3(size.x), r3(size.y), r3(size.z)],
-      distance: r3(distance),
+      center: [r34(center.x), r34(center.y), r34(center.z)],
+      size: [r34(size.x), r34(size.y), r34(size.z)],
+      distance: r34(distance),
       camera: {
-        position: [r3(this._camera.position.x), r3(this._camera.position.y), r3(this._camera.position.z)],
-        target: [r3(center.x), r3(center.y), r3(center.z)]
+        position: [r34(this._camera.position.x), r34(this._camera.position.y), r34(this._camera.position.z)],
+        target: [r34(center.x), r34(center.y), r34(center.z)]
       },
       note: "View direction kept. The part may be occluded by surrounding geometry \u2014 use set_clip or set_render_mode wireframe to see through. reset_camera restores the whole-model view."
     };
@@ -46611,11 +52901,11 @@ var _Viewer3D = class _Viewer3D {
       const matName = mat.name || "";
       let changed = false;
       this._sanitizeMaterialTextureSlots(mat);
-      const pick = (slot) => this._pickBestTextureEntry(textureEntries, matName, slot);
+      const pick2 = (slot) => this._pickBestTextureEntry(textureEntries, matName, slot);
       const currentMapName = this._extractTextureFilename(mat.map);
       const mapLooksWrong = this._isLikelyNonColorTextureName(currentMapName);
       if (!this._isUsableTexture(mat.map) || mapLooksWrong) {
-        const entry = pick("map");
+        const entry = pick2("map");
         const tex = await this._loadTextureFromAbsPath(
           entry?.path,
           SRGBColorSpace,
@@ -46629,7 +52919,7 @@ var _Viewer3D = class _Viewer3D {
         }
       }
       if (!this._isUsableTexture(mat.normalMap)) {
-        const entry = pick("normalMap");
+        const entry = pick2("normalMap");
         const tex = await this._loadTextureFromAbsPath(
           entry?.path,
           LinearSRGBColorSpace,
@@ -46644,7 +52934,7 @@ var _Viewer3D = class _Viewer3D {
         }
       }
       if (!this._isUsableTexture(mat.aoMap)) {
-        const entry = pick("aoMap");
+        const entry = pick2("aoMap");
         const tex = await this._loadTextureFromAbsPath(
           entry?.path,
           LinearSRGBColorSpace,
@@ -46658,7 +52948,7 @@ var _Viewer3D = class _Viewer3D {
         }
       }
       if (mat.roughness !== void 0 && !this._isUsableTexture(mat.roughnessMap)) {
-        const entry = pick("roughnessMap");
+        const entry = pick2("roughnessMap");
         const tex = await this._loadTextureFromAbsPath(
           entry?.path,
           LinearSRGBColorSpace,
@@ -46671,7 +52961,7 @@ var _Viewer3D = class _Viewer3D {
         }
       }
       if (mat.metalness !== void 0 && !this._isUsableTexture(mat.metalnessMap)) {
-        const entry = pick("metalnessMap");
+        const entry = pick2("metalnessMap");
         const tex = await this._loadTextureFromAbsPath(
           entry?.path,
           LinearSRGBColorSpace,
@@ -46684,7 +52974,7 @@ var _Viewer3D = class _Viewer3D {
         }
       }
       if (!this._isUsableTexture(mat.bumpMap)) {
-        const entry = pick("bumpMap");
+        const entry = pick2("bumpMap");
         const tex = await this._loadTextureFromAbsPath(
           entry?.path,
           LinearSRGBColorSpace,
@@ -46697,7 +52987,7 @@ var _Viewer3D = class _Viewer3D {
         }
       }
       if (!this._isUsableTexture(mat.emissiveMap)) {
-        const entry = pick("emissiveMap");
+        const entry = pick2("emissiveMap");
         const tex = await this._loadTextureFromAbsPath(
           entry?.path,
           SRGBColorSpace,
@@ -48864,6 +55154,3268 @@ __publicField(_Viewer3D, "PRIMITIVE_PARAMS", {
 });
 var Viewer3D = _Viewer3D;
 
+// frontend/js/viewer/describe_scene.js
+var CHECK_TRIANGLE_BUDGET = 3e5;
+function describeScene(viewer, opts = {}) {
+  const maxItems = Math.max(1, Math.min(50, opts.maxItems || 8));
+  const state = viewer.getState();
+  if (!state.model.loaded) {
+    return { loaded: false, summary: "No model is loaded." };
+  }
+  const model = viewer._currentModel;
+  const meshes = collectMeshes(model);
+  const materials = collectMaterials(meshes);
+  const hierarchy = collectHierarchy(model, maxItems * 3);
+  const totalTriangles = meshes.reduce((s, m) => s + m.triangles, 0);
+  const totalVertices = meshes.reduce((s, m) => s + m.vertices, 0);
+  const bounds = viewer.getBounds();
+  const dimensions = bounds ? { width: r3(bounds.size[0]), height: r3(bounds.size[1]), depth: r3(bounds.size[2]) } : state.model.dimensions;
+  const format = extOf(state.model.name);
+  const issues = opts.checks === false ? [] : runChecks(meshes, materials, dimensions);
+  const report = {
+    loaded: true,
+    summary: "",
+    // filled last, from the assembled facts
+    model: {
+      name: state.model.name,
+      format,
+      // Sum of position-attribute counts (same basis as meshes.items[].vertices).
+      // Seam-duplicated vertices count once per duplicate.
+      vertices: totalVertices,
+      triangles: totalTriangles,
+      meshCount: meshes.length,
+      materialCount: materials.length,
+      textureCount: countTextures(materials),
+      animated: state.animation.hasAnimations,
+      animationClips: state.animation.clips,
+      dimensions,
+      bounds,
+      sizeHint: sizeHint(dimensions, format),
+      userScale: state.model.scale,
+      modified: state.model.modified
+    },
+    hierarchy,
+    meshes: topMeshes(meshes, maxItems),
+    materials: materialSummaries(materials, maxItems),
+    issues,
+    view: {
+      camera: {
+        position: state.camera.position,
+        target: state.camera.target,
+        fov: state.camera.fov,
+        mode: state.camera.mode
+      },
+      renderMode: state.display.renderMode,
+      environment: state.display.environment,
+      clip: state.display.clip,
+      grid: state.display.grid
+    }
+  };
+  if (state.scene && state.scene.objectCount > 1) {
+    const objs = state.scene.objects || [];
+    report.scene = {
+      objectCount: state.scene.objectCount,
+      activeObjectId: state.scene.activeObjectId,
+      // Scene-wide totals come from the per-entry loader stats (cheap); the
+      // ACTIVE object's numbers above are live-recomputed as before.
+      totalVertices: objs.reduce((s, o) => s + (o.vertices || 0), 0),
+      totalFaces: objs.reduce((s, o) => s + (o.faces || 0), 0),
+      bounds: state.scene.bounds,
+      objects: objs.slice(0, maxItems).map((o) => ({
+        id: o.id,
+        name: o.name,
+        active: o.active,
+        visible: o.visible,
+        opacity: o.opacity,
+        vertices: o.vertices,
+        faces: o.faces,
+        position: o.transform ? o.transform.position : null
+      })),
+      truncated: Math.max(0, objs.length - maxItems),
+      note: "model/meshes/materials/issues above describe the ACTIVE object only. Use set_active_object to inspect another; frame_all to view the whole scene."
+    };
+  }
+  if (opts.views) {
+    try {
+      const ranked = viewer.scoreViews({ size: 96 });
+      report.suggestedViews = ranked.slice(0, 3).map((r) => ({
+        azimuth: r.azimuth,
+        elevation: r.elevation,
+        score: Math.round(r.score * 1e3) / 1e3
+      }));
+    } catch {
+    }
+  }
+  report.summary = buildSummary(report);
+  return report;
+}
+var r3 = (v) => Math.round(v * 1e3) / 1e3;
+function extOf(name) {
+  const m = /\.[a-z0-9]+$/i.exec(name || "");
+  return m ? m[0].toLowerCase() : null;
+}
+function collectMeshes(model) {
+  const out = [];
+  model.updateMatrixWorld(true);
+  let id = 0;
+  model.traverse((child) => {
+    if (!child.isMesh || !child.geometry) return;
+    const geo = child.geometry;
+    const pos = geo.getAttribute("position");
+    const index = geo.getIndex();
+    const vertices = pos ? pos.count : 0;
+    const triangles = Math.floor(index ? index.count / 3 : vertices / 3);
+    let center = null, size = null;
+    if (!geo.boundingBox) geo.computeBoundingBox();
+    if (geo.boundingBox && !geo.boundingBox.isEmpty()) {
+      const wb = geo.boundingBox.clone().applyMatrix4(child.matrixWorld);
+      const c = wb.getCenter(new Vector3());
+      const s = wb.getSize(new Vector3());
+      center = [r3(c.x), r3(c.y), r3(c.z)];
+      size = [r3(s.x), r3(s.y), r3(s.z)];
+    }
+    const raw = child._mvOriginalMaterial || child.material;
+    const mats = (Array.isArray(raw) ? raw : [raw]).filter(Boolean);
+    out.push({
+      id: id++,
+      center,
+      size,
+      name: child.name || "(unnamed)",
+      mesh: child,
+      geometry: geo,
+      vertices,
+      triangles,
+      indexed: !!index,
+      hasNormals: !!geo.getAttribute("normal"),
+      hasUVs: !!geo.getAttribute("uv"),
+      hasVertexColors: !!geo.getAttribute("color"),
+      skinned: !!child.isSkinnedMesh,
+      materials: mats
+    });
+  });
+  return out;
+}
+var MAP_SLOTS = [
+  "map",
+  "normalMap",
+  "roughnessMap",
+  "metalnessMap",
+  "aoMap",
+  "emissiveMap",
+  "bumpMap",
+  "displacementMap",
+  "alphaMap"
+];
+function collectMaterials(meshes) {
+  const seen = /* @__PURE__ */ new Map();
+  for (const m of meshes) {
+    for (const mat of m.materials) {
+      if (seen.has(mat)) {
+        seen.get(mat).meshes.push(m.name);
+        continue;
+      }
+      const maps = MAP_SLOTS.filter((slot) => mat[slot] && mat[slot].isTexture);
+      const textures = {};
+      for (const slot of maps) {
+        const tex = mat[slot];
+        const img = tex.image || {};
+        textures[slot] = {
+          width: img.width || null,
+          height: img.height || null,
+          // three uses "" (NoColorSpace) for linear data textures — say
+          // "linear" instead of leaving agents to guess what null means.
+          colorSpace: tex.colorSpace || "linear"
+        };
+      }
+      const authored = mat.userData && mat.userData._mvAuthored ? mat.userData._mvAuthored : null;
+      const displayed = {
+        metalness: numOrNull(mat.metalness),
+        roughness: numOrNull(mat.roughness)
+      };
+      const modifiedByViewer = !!(authored && (authored.metalness !== null && authored.metalness !== displayed.metalness || authored.roughness !== null && authored.roughness !== displayed.roughness || authored.color && mat.color && authored.color !== `#${mat.color.getHexString()}`));
+      seen.set(mat, {
+        material: mat,
+        name: mat.name || "(unnamed)",
+        type: mat.type,
+        color: mat.color ? `#${mat.color.getHexString()}` : null,
+        metalness: displayed.metalness,
+        roughness: displayed.roughness,
+        authored,
+        modifiedByViewer,
+        maps,
+        textures,
+        // Agent-painted layer (CanvasTexture) vs authored texture — lets a
+        // material audit distinguish the two.
+        painted: !!(mat.userData && mat.userData._mvPaint) || void 0,
+        transparent: !!mat.transparent,
+        doubleSided: mat.side === DoubleSide,
+        meshes: [m.name]
+      });
+    }
+  }
+  return [...seen.values()];
+}
+function numOrNull(v) {
+  return typeof v === "number" ? Math.round(v * 100) / 100 : null;
+}
+function countTextures(materials) {
+  const set = /* @__PURE__ */ new Set();
+  for (const m of materials) {
+    for (const slot of m.maps) {
+      const tex = m.material[slot];
+      if (tex) set.add(tex.uuid);
+    }
+  }
+  return set.size;
+}
+function collectHierarchy(model, cap) {
+  const nodes = [];
+  let total = 0;
+  let truncated = 0;
+  const walk = (obj, depth) => {
+    const kind = obj.isMesh ? "mesh" : obj.isBone ? "bone" : obj.isLight ? "light" : obj.isCamera ? "camera" : "group";
+    const anonymous = !obj.name && kind === "group" && obj.children.length === 1;
+    if (!anonymous) {
+      total += 1;
+      if (nodes.length < cap && depth <= 4) {
+        nodes.push({ name: obj.name || "(unnamed)", kind, depth });
+      } else {
+        truncated += 1;
+      }
+    }
+    for (const c of obj.children) walk(c, depth + 1);
+  };
+  walk(model, 0);
+  return { nodes, totalNodes: total, truncated };
+}
+function topMeshes(meshes, maxItems) {
+  const sorted = [...meshes].sort((a, b) => b.triangles - a.triangles);
+  const items = sorted.slice(0, maxItems).map((m) => ({
+    id: m.id,
+    // stable traversal-order id — pass to `focus { id }`
+    name: m.name,
+    triangles: m.triangles,
+    vertices: m.vertices,
+    center: m.center,
+    // world-space part placement
+    size: m.size,
+    materials: m.materials.map((x) => x.name || "(unnamed)"),
+    hasUVs: m.hasUVs,
+    hasVertexColors: m.hasVertexColors || void 0,
+    skinned: m.skinned || void 0
+  }));
+  return { items, omitted: Math.max(0, meshes.length - items.length) };
+}
+function materialSummaries(materials, maxItems) {
+  const items = materials.slice(0, maxItems).map((m) => ({
+    name: m.name,
+    type: m.type,
+    color: m.color,
+    metalness: m.metalness,
+    roughness: m.roughness,
+    // Present only when the viewer changed something: the asset's original values.
+    authored: m.modifiedByViewer ? m.authored : void 0,
+    modifiedByViewer: m.modifiedByViewer || void 0,
+    maps: m.maps,
+    textures: Object.keys(m.textures).length ? m.textures : void 0,
+    painted: m.painted,
+    transparent: m.transparent,
+    doubleSided: m.doubleSided
+  }));
+  return { items, omitted: Math.max(0, materials.length - items.length) };
+}
+function sizeHint(dim, format) {
+  const maxDim = Math.max(dim.width, dim.height, dim.depth);
+  if (!maxDim || !Number.isFinite(maxDim)) return "size unknown";
+  const s = maxDim.toPrecision(3);
+  const isGltf = format === ".glb" || format === ".gltf";
+  if (isGltf) {
+    if (maxDim < 0.01) return `${s} m (glTF units are meters) \u2014 under 1 cm; possibly a mis-scaled export`;
+    if (maxDim > 1e3) return `${s} m (glTF units are meters) \u2014 over 1 km; possibly a mis-scaled export`;
+    return `${s} m (glTF units are meters)`;
+  }
+  if (maxDim < 0.01) return `${s} units \u2014 tiny; if meters, likely wrong units (millimeter-authored?)`;
+  if (maxDim <= 5) return `${s} units \u2014 human/object scale if meters`;
+  if (maxDim <= 100) return `${s} units \u2014 room/building scale if meters, or object scale if centimeters`;
+  if (maxDim <= 5e3) return `${s} units \u2014 likely centimeters or millimeters (common for CAD/print)`;
+  return `${s} units \u2014 very large; likely millimeters or an unscaled export`;
+}
+function runChecks(meshes, materials, dimensions) {
+  const issues = [];
+  const add = (severity, code, message, meshNames) => {
+    issues.push({ severity, code, message, ...meshNames && meshNames.length ? { meshes: meshNames.slice(0, 6) } : {} });
+  };
+  const totalTris = meshes.reduce((s, m) => s + m.triangles, 0);
+  const overBudget = totalTris > CHECK_TRIANGLE_BUDGET;
+  const noNormals = meshes.filter((m) => !m.hasNormals).map((m) => m.name);
+  if (noNormals.length) add("warning", "missing_normals", "Meshes without vertex normals (will shade flat/black until recomputed \u2014 see recompute_normals).", noNormals);
+  const texturedMats = new Set(materials.filter((m) => m.maps.length > 0).map((m) => m.material));
+  const noUVsButTextured = meshes.filter((m) => !m.hasUVs && m.materials.some((mat) => texturedMats.has(mat))).map((m) => m.name);
+  if (noUVsButTextured.length) add("error", "missing_uvs", "Meshes whose material has texture maps but which have no UV coordinates \u2014 textures cannot display on them.", noUVsButTextured);
+  const empty = meshes.filter((m) => m.vertices === 0).map((m) => m.name);
+  if (empty.length) add("warning", "empty_meshes", "Meshes with zero vertices.", empty);
+  const unindexed = meshes.filter((m) => !m.indexed).map((m) => m.name);
+  if (unindexed.length === meshes.length && meshes.length > 0) {
+    add("info", "unindexed_geometry", "All geometry is unindexed (soup of triangles) \u2014 normal for STL and some exports; vertex-welding operations may be slower.");
+  }
+  const maxDim = Math.max(dimensions.width, dimensions.height, dimensions.depth);
+  if (maxDim > 0 && maxDim < 1e-3) add("warning", "scale_tiny", `Model is only ${maxDim.toPrecision(2)} units across \u2014 probably wrong units.`);
+  if (maxDim > 1e5) add("warning", "scale_huge", `Model is ${maxDim.toPrecision(3)} units across \u2014 probably wrong units.`);
+  if (overBudget) {
+    add("info", "checks_skipped", `Per-triangle checks (degenerate faces, watertightness, normal orientation) skipped: ${totalTris.toLocaleString()} triangles exceeds the ${CHECK_TRIANGLE_BUDGET.toLocaleString()} budget.`);
+    return issues;
+  }
+  const degenerate = [];
+  const notWatertight = [];
+  const nonManifold = [];
+  const maybeFlipped = [];
+  const nanMeshes = [];
+  for (const m of meshes) {
+    if (m.vertices === 0) continue;
+    const r = analyzeGeometry(m.geometry);
+    if (r.hasNaN) nanMeshes.push(m.name);
+    if (r.degenerate > 0) degenerate.push(`${m.name} (${r.degenerate})`);
+    if (r.boundaryEdges > 0) notWatertight.push(`${m.name} (${r.boundaryEdges} open edges)`);
+    if (r.nonManifoldEdges > 0) nonManifold.push(`${m.name} (${r.nonManifoldEdges})`);
+    if (r.boundaryEdges === 0 && r.signedVolume < 0) maybeFlipped.push(m.name);
+  }
+  if (nanMeshes.length) add("error", "nan_positions", "Meshes containing NaN vertex positions (corrupt geometry).", nanMeshes);
+  if (degenerate.length) add("warning", "degenerate_faces", "Meshes with zero-area (sliver/collapsed) triangles (count in parentheses).", degenerate);
+  if (notWatertight.length) add("info", "not_watertight", "Meshes with open (boundary) edges \u2014 not watertight; relevant for 3D printing, harmless for display. Edges are counted on position-welded vertices, so UV seams do not trigger this.", notWatertight);
+  if (nonManifold.length) add("info", "non_manifold_edges", "Meshes with edges shared by more than two faces (non-manifold).", nonManifold);
+  if (maybeFlipped.length) add("warning", "normals_maybe_flipped", "Closed meshes whose signed volume is negative \u2014 face windings point inward, normals are likely flipped (verify visually or recompute_normals).", maybeFlipped);
+  return issues;
+}
+function analyzeGeometry(geo) {
+  const pos = geo.getAttribute("position");
+  const index = geo.getIndex();
+  const triCount = Math.floor((index ? index.count : pos.count) / 3);
+  const bb = geo.boundingBox || (geo.computeBoundingBox(), geo.boundingBox);
+  const scale = Math.max(1e-30, bb.max.distanceTo(bb.min));
+  const q = 1e-6 * scale;
+  const canon = /* @__PURE__ */ new Map();
+  const canonOf = new Int32Array(pos.count);
+  let hasNaN = false;
+  let nextId = 0;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    if (Number.isNaN(x) || Number.isNaN(y) || Number.isNaN(z)) {
+      hasNaN = true;
+      canonOf[i] = -1;
+      continue;
+    }
+    const key = `${Math.round(x / q)},${Math.round(y / q)},${Math.round(z / q)}`;
+    let id = canon.get(key);
+    if (id === void 0) {
+      id = nextId++;
+      canon.set(key, id);
+    }
+    canonOf[i] = id;
+  }
+  const edgeCount = /* @__PURE__ */ new Map();
+  const nVerts = Math.max(1, nextId);
+  let degenerate = 0;
+  let vol6 = 0;
+  const vi = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const i0 = vi(t2, 0), i1 = vi(t2, 1), i2 = vi(t2, 2);
+    const c0 = canonOf[i0], c1 = canonOf[i1], c2 = canonOf[i2];
+    if (c0 < 0 || c1 < 0 || c2 < 0) continue;
+    const ax = pos.getX(i0), ay = pos.getY(i0), az = pos.getZ(i0);
+    const bx = pos.getX(i1), by = pos.getY(i1), bz = pos.getZ(i1);
+    const cx = pos.getX(i2), cy = pos.getY(i2), cz = pos.getZ(i2);
+    const abx = bx - ax, aby = by - ay, abz = bz - az;
+    const acx = cx - ax, acy = cy - ay, acz = cz - az;
+    const nx = aby * acz - abz * acy;
+    const ny = abz * acx - abx * acz;
+    const nz = abx * acy - aby * acx;
+    const area2 = nx * nx + ny * ny + nz * nz;
+    const lenSq = (abx * abx + aby * aby + abz * abz) * (acx * acx + acy * acy + acz * acz);
+    if (area2 < 1e-12 * lenSq) {
+      degenerate += 1;
+      continue;
+    }
+    if (c0 !== c1) {
+      const k = c0 < c1 ? c0 * nVerts + c1 : c1 * nVerts + c0;
+      edgeCount.set(k, (edgeCount.get(k) || 0) + 1);
+    }
+    if (c1 !== c2) {
+      const k = c1 < c2 ? c1 * nVerts + c2 : c2 * nVerts + c1;
+      edgeCount.set(k, (edgeCount.get(k) || 0) + 1);
+    }
+    if (c2 !== c0) {
+      const k = c2 < c0 ? c2 * nVerts + c0 : c0 * nVerts + c2;
+      edgeCount.set(k, (edgeCount.get(k) || 0) + 1);
+    }
+    vol6 += ax * (by * cz - bz * cy) + ay * (bz * cx - bx * cz) + az * (bx * cy - by * cx);
+  }
+  let boundaryEdges = 0, nonManifoldEdges = 0;
+  for (const count of edgeCount.values()) {
+    if (count === 1) boundaryEdges += 1;
+    else if (count > 2) nonManifoldEdges += 1;
+  }
+  return {
+    hasNaN,
+    degenerate,
+    boundaryEdges,
+    nonManifoldEdges,
+    signedVolume: vol6 / 6
+  };
+}
+function buildSummary(r) {
+  const m = r.model;
+  const d = m.dimensions;
+  const parts = [];
+  if (r.scene && r.scene.objectCount > 1) {
+    parts.push(
+      `Composed scene: ${r.scene.objectCount} objects, ${r.scene.totalFaces.toLocaleString()} faces total. ACTIVE object described below (others summarized in \`scene.objects\`).`
+    );
+  }
+  parts.push(
+    `"${m.name}": ${m.meshCount} mesh${m.meshCount === 1 ? "" : "es"}, ${m.materialCount} material${m.materialCount === 1 ? "" : "s"}${m.textureCount ? ` (${m.textureCount} texture${m.textureCount === 1 ? "" : "s"})` : " (untextured)"}, ${m.triangles.toLocaleString()} triangles, ${d.width}\xD7${d.height}\xD7${d.depth} units (${m.sizeHint}).`
+  );
+  parts.push(m.animated ? `Animated (${m.animationClips.length} clip${m.animationClips.length === 1 ? "" : "s"}).` : "Not animated.");
+  const errors = r.issues.filter((i) => i.severity === "error");
+  const warnings = r.issues.filter((i) => i.severity === "warning");
+  const infos = r.issues.filter((i) => i.severity === "info");
+  if (errors.length || warnings.length) {
+    parts.push(`Issues: ${[...errors, ...warnings].map((i) => i.code).join(", ")}${infos.length ? ` (+${infos.length} informational: ${infos.map((i) => i.code).join(", ")})` : ""}.`);
+  } else if (infos.length) {
+    parts.push(`No blocking geometry issues (${infos.length} informational: ${infos.map((i) => i.code).join(", ")}).`);
+  } else {
+    parts.push("No geometry issues detected.");
+  }
+  parts.push(`Current view: ${r.view.renderMode} render mode, camera at [${r.view.camera.position.join(", ")}].`);
+  return parts.join(" ");
+}
+
+// frontend/js/viewer/mesh_stats.js
+var TRIANGLE_BUDGET = 3e5;
+var MAX_LOCALIZED = 5;
+var MAX_SAMPLES2 = 2e3;
+function meshStatistics(viewer, opts = {}) {
+  if (!viewer._currentModel) return { loaded: false, error: "No model loaded" };
+  const model = viewer._currentModel;
+  model.updateMatrixWorld(true);
+  const perMesh = [];
+  let totalTris = 0;
+  model.traverse((child) => {
+    if (child.isMesh && child.geometry) {
+      const pos = child.geometry.getAttribute("position");
+      const idx = child.geometry.getIndex();
+      totalTris += Math.floor((idx ? idx.count : pos ? pos.count : 0) / 3);
+    }
+  });
+  if (totalTris > TRIANGLE_BUDGET) {
+    return {
+      loaded: true,
+      skipped: true,
+      triangles: totalTris,
+      note: `Statistics skipped: ${totalTris.toLocaleString()} triangles exceeds the ${TRIANGLE_BUDGET.toLocaleString()} budget.`
+    };
+  }
+  let id = 0;
+  model.traverse((child) => {
+    if (!child.isMesh || !child.geometry) {
+      return;
+    }
+    const meshId = id++;
+    const stats = analyzeMesh(child);
+    if (stats) perMesh.push({ id: meshId, name: child.name || "(unnamed)", ...stats });
+  });
+  const agg = aggregate(perMesh);
+  return { loaded: true, skipped: false, total: agg, meshes: perMesh };
+}
+function aggregate(perMesh) {
+  const total = {
+    triangles: 0,
+    surfaceArea: 0,
+    volume: 0,
+    sliverPct: 0,
+    openEdges: 0,
+    nonManifoldEdges: 0,
+    degenerate: 0,
+    dihedral: { meanDeg: 0, p95Deg: 0 },
+    edgeLength: { min: Infinity, median: 0, p95: 0, max: 0 },
+    issuePoints: { openEdges: [], nonManifold: [], degenerate: [] }
+  };
+  let tris = 0;
+  let anyOpenVolume = false;
+  for (const m of perMesh) {
+    tris += m.triangles;
+    total.triangles += m.triangles;
+    total.surfaceArea += m.surfaceArea;
+    if (m.volume === null) anyOpenVolume = true;
+    else total.volume += m.volume;
+    total.sliverPct += m.sliverPct * m.triangles;
+    total.openEdges += m.openEdges;
+    total.nonManifoldEdges += m.nonManifoldEdges;
+    total.degenerate += m.degenerate;
+    total.dihedral.meanDeg += m.dihedral.meanDeg * m.triangles;
+    total.dihedral.p95Deg = Math.max(total.dihedral.p95Deg, m.dihedral.p95Deg);
+    total.edgeLength.min = Math.min(total.edgeLength.min, m.edgeLength.min);
+    total.edgeLength.max = Math.max(total.edgeLength.max, m.edgeLength.max);
+    total.edgeLength.median += m.edgeLength.median * m.triangles;
+    total.edgeLength.p95 = Math.max(total.edgeLength.p95, m.edgeLength.p95);
+    for (const k of ["openEdges", "nonManifold", "degenerate"]) {
+      total.issuePoints[k].push(...m.issuePoints[k]);
+    }
+  }
+  if (tris > 0) {
+    total.sliverPct = r42(total.sliverPct / tris);
+    total.dihedral.meanDeg = r2(total.dihedral.meanDeg / tris);
+    total.edgeLength.median = sci(total.edgeLength.median / tris);
+  }
+  if (perMesh.length > 1) {
+    total.edgeLength.approx = true;
+    total.dihedral.approx = true;
+  }
+  if (!Number.isFinite(total.edgeLength.min)) total.edgeLength.min = 0;
+  total.surfaceArea = sci(total.surfaceArea);
+  total.volume = anyOpenVolume ? null : sci(total.volume);
+  total.edgeLength.min = sci(total.edgeLength.min);
+  total.edgeLength.max = sci(total.edgeLength.max);
+  total.edgeLength.p95 = sci(total.edgeLength.p95);
+  for (const k of ["openEdges", "nonManifold", "degenerate"]) {
+    total.issuePoints[k] = spread(total.issuePoints[k], MAX_LOCALIZED);
+  }
+  return total;
+}
+function analyzeMesh(mesh) {
+  const geo = mesh.geometry;
+  const pos = geo.getAttribute("position");
+  if (!pos || pos.count === 0) return null;
+  const idx = geo.getIndex();
+  const triCount = Math.floor((idx ? idx.count : pos.count) / 3);
+  if (triCount === 0) return null;
+  const mw = mesh.matrixWorld;
+  if (!geo.boundingBox) geo.computeBoundingBox();
+  const scale = Math.max(1e-30, geo.boundingBox.max.distanceTo(geo.boundingBox.min));
+  const q = 1e-6 * scale;
+  const canon = /* @__PURE__ */ new Map();
+  const canonOf = new Int32Array(pos.count);
+  let nextId = 0;
+  for (let i = 0; i < pos.count; i++) {
+    const key = `${Math.round(pos.getX(i) / q)},${Math.round(pos.getY(i) / q)},${Math.round(pos.getZ(i) / q)}`;
+    let cid = canon.get(key);
+    if (cid === void 0) {
+      cid = nextId++;
+      canon.set(key, cid);
+    }
+    canonOf[i] = cid;
+  }
+  const nVerts = Math.max(1, nextId);
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const ab = new Vector3(), ac = new Vector3(), n2 = new Vector3();
+  const edgeInfo = /* @__PURE__ */ new Map();
+  const edgeLengths = [];
+  const dihedrals = [];
+  const degeneratePts = [];
+  let area2sum = 0, vol6 = 0, sliver = 0;
+  const vi = (t2, k) => idx ? idx.getX(t2 * 3 + k) : t2 * 3 + k;
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const i0 = vi(t2, 0), i1 = vi(t2, 1), i2 = vi(t2, 2);
+    a.fromBufferAttribute(pos, i0).applyMatrix4(mw);
+    b.fromBufferAttribute(pos, i1).applyMatrix4(mw);
+    c.fromBufferAttribute(pos, i2).applyMatrix4(mw);
+    ab.subVectors(b, a);
+    ac.subVectors(c, a);
+    n2.crossVectors(ab, ac);
+    const area2 = n2.lengthSq();
+    const lenSq = ab.lengthSq() * ac.lengthSq();
+    if (area2 < 1e-12 * lenSq) {
+      sliver += 1;
+      if (degeneratePts.length < MAX_SAMPLES2) {
+        degeneratePts.push([(a.x + b.x + c.x) / 3, (a.y + b.y + c.y) / 3, (a.z + b.z + c.z) / 3]);
+      }
+      continue;
+    }
+    const area3 = Math.sqrt(area2) / 2;
+    area2sum += area3;
+    vol6 += a.x * (b.y * c.z - b.z * c.y) + a.y * (b.z * c.x - b.x * c.z) + a.z * (b.x * c.y - b.y * c.x);
+    n2.normalize();
+    const corners = [[i0, i1, a, b], [i1, i2, b, c], [i2, i0, c, a]];
+    for (const [u2, v, p1, p2] of corners) {
+      const cu = canonOf[u2], cv = canonOf[v];
+      if (cu === cv) continue;
+      edgeLengths.push(p1.distanceTo(p2));
+      const key = cu < cv ? cu * nVerts + cv : cv * nVerts + cu;
+      const e = edgeInfo.get(key);
+      if (!e) {
+        edgeInfo.set(key, {
+          count: 1,
+          nx: n2.x,
+          ny: n2.y,
+          nz: n2.z,
+          mx: (p1.x + p2.x) / 2,
+          my: (p1.y + p2.y) / 2,
+          mz: (p1.z + p2.z) / 2
+        });
+      } else {
+        e.count += 1;
+        if (e.count === 2) {
+          const dot = Math.min(1, Math.max(-1, e.nx * n2.x + e.ny * n2.y + e.nz * n2.z));
+          dihedrals.push(Math.acos(dot) * (180 / Math.PI));
+        }
+      }
+    }
+  }
+  let openEdges = 0, nonManifoldEdges = 0;
+  const openPts = [], nmPts = [];
+  for (const e of edgeInfo.values()) {
+    if (e.count === 1) {
+      openEdges += 1;
+      if (openPts.length < MAX_SAMPLES2) openPts.push([e.mx, e.my, e.mz]);
+    } else if (e.count > 2) {
+      nonManifoldEdges += 1;
+      if (nmPts.length < MAX_SAMPLES2) nmPts.push([e.mx, e.my, e.mz]);
+    }
+  }
+  edgeLengths.sort((x, y) => x - y);
+  dihedrals.sort((x, y) => x - y);
+  const pct = (arr, p) => arr.length ? arr[Math.min(arr.length - 1, Math.floor(arr.length * p))] : 0;
+  const mean = (arr) => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : 0;
+  return {
+    triangles: triCount,
+    surfaceArea: sci(area2sum),
+    // Signed-volume sums are only translation-invariant for CLOSED surfaces; on an
+    // open mesh the number silently changes with the origin (verified live: a pure
+    // `center` changed it). Report null rather than a plausible-looking lie.
+    volume: openEdges === 0 ? sci(Math.abs(vol6) / 6) : null,
+    sliverPct: r42(triCount ? sliver / triCount * 100 : 0),
+    degenerate: sliver,
+    openEdges,
+    nonManifoldEdges,
+    edgeLength: {
+      min: sci(edgeLengths[0] || 0),
+      median: sci(pct(edgeLengths, 0.5)),
+      p95: sci(pct(edgeLengths, 0.95)),
+      max: sci(edgeLengths[edgeLengths.length - 1] || 0)
+    },
+    // Roughness: how much adjacent faces disagree. Smooth surface → small angles.
+    dihedral: { meanDeg: r2(mean(dihedrals)), p95Deg: r2(pct(dihedrals, 0.95)) },
+    issuePoints: {
+      openEdges: spread(openPts, MAX_LOCALIZED),
+      nonManifold: spread(nmPts, MAX_LOCALIZED),
+      degenerate: spread(degeneratePts, MAX_LOCALIZED)
+    }
+  };
+}
+function spread(points, k) {
+  if (points.length <= k) return points.map(roundPt);
+  const chosen = [points[0]];
+  while (chosen.length < k) {
+    let best = null, bestD = -1;
+    for (const p of points) {
+      let d = Infinity;
+      for (const c of chosen) {
+        const dx = p[0] - c[0], dy = p[1] - c[1], dz = p[2] - c[2];
+        d = Math.min(d, dx * dx + dy * dy + dz * dz);
+      }
+      if (d > bestD) {
+        bestD = d;
+        best = p;
+      }
+    }
+    chosen.push(best);
+  }
+  return chosen.map(roundPt);
+}
+var roundPt = (p) => p.map((v) => Math.round(v * 1e3) / 1e3);
+var r2 = (v) => Math.round(v * 100) / 100;
+var r42 = (v) => Math.round(v * 1e4) / 1e4;
+var sci = (v) => v === 0 ? 0 : Number(v.toPrecision(4));
+
+// frontend/js/viewer/sample_points.js
+var MAX_POINTS = 2e4;
+function mulberry322(seed) {
+  let a = seed >>> 0;
+  return function() {
+    a |= 0;
+    a = a + 1831565813 | 0;
+    let t2 = Math.imul(a ^ a >>> 15, 1 | a);
+    t2 = t2 + Math.imul(t2 ^ t2 >>> 7, 61 | t2) ^ t2;
+    return ((t2 ^ t2 >>> 14) >>> 0) / 4294967296;
+  };
+}
+function samplePoints(viewer, opts = {}) {
+  if (!viewer._currentModel) return { error: "No model loaded" };
+  const count = Math.max(16, Math.min(MAX_POINTS, opts.count || 4096));
+  const rand = mulberry322(opts.seed !== void 0 ? opts.seed : 42);
+  const model = viewer._currentModel;
+  model.updateMatrixWorld(true);
+  const tris = [];
+  const cumArea = [];
+  let total = 0;
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  model.traverse((child) => {
+    if (!child.isMesh || !child.geometry) return;
+    const pos = child.geometry.getAttribute("position");
+    if (!pos) return;
+    const idx = child.geometry.getIndex();
+    const triCount = Math.floor((idx ? idx.count : pos.count) / 3);
+    const mw = child.matrixWorld;
+    const vi = (t2, k) => idx ? idx.getX(t2 * 3 + k) : t2 * 3 + k;
+    for (let t2 = 0; t2 < triCount; t2++) {
+      a.fromBufferAttribute(pos, vi(t2, 0)).applyMatrix4(mw);
+      b.fromBufferAttribute(pos, vi(t2, 1)).applyMatrix4(mw);
+      c.fromBufferAttribute(pos, vi(t2, 2)).applyMatrix4(mw);
+      const area2 = triArea(a, b, c);
+      if (!(area2 > 0) || !Number.isFinite(area2)) continue;
+      total += area2;
+      tris.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+      cumArea.push(total);
+    }
+  });
+  if (cumArea.length === 0) return { error: "Model has no sampleable surface" };
+  const bbox = new Box3().setFromObject(model);
+  const span = bbox.getSize(new Vector3()).length() || 1;
+  const roundP = Math.max(3, Math.min(9, Math.ceil(-Math.log10(span * 1e-6))));
+  const rnd = (v) => Number(v.toFixed(roundP));
+  const points = new Array(count);
+  for (let i = 0; i < count; i++) {
+    const r = rand() * total;
+    let lo = 0, hi = cumArea.length - 1;
+    while (lo < hi) {
+      const mid = lo + hi >> 1;
+      if (cumArea[mid] < r) lo = mid + 1;
+      else hi = mid;
+    }
+    const o = lo * 9;
+    const su = Math.sqrt(rand());
+    const v = rand();
+    const w0 = 1 - su, w1 = su * (1 - v), w2 = su * v;
+    points[i] = [
+      rnd(w0 * tris[o] + w1 * tris[o + 3] + w2 * tris[o + 6]),
+      rnd(w0 * tris[o + 1] + w1 * tris[o + 4] + w2 * tris[o + 7]),
+      rnd(w0 * tris[o + 2] + w1 * tris[o + 5] + w2 * tris[o + 8])
+    ];
+  }
+  return {
+    count,
+    seed: opts.seed !== void 0 ? opts.seed : 42,
+    surfaceArea: Number(total.toPrecision(5)),
+    points
+  };
+}
+var _ab3 = new Vector3();
+var _ac = new Vector3();
+var _cr = new Vector3();
+function triArea(a, b, c) {
+  _ab3.subVectors(b, a);
+  _ac.subVectors(c, a);
+  return _cr.crossVectors(_ab3, _ac).length() / 2;
+}
+
+// frontend/js/viewer/articulation.js
+var DETECT_TRIANGLE_BUDGET = 3e5;
+var MAX_PARTS = 24;
+var MIN_COMPONENT_TRIS = 20;
+function requireActive(viewer) {
+  const entry = viewer._activeEntry();
+  if (!entry) throw new Error("No object loaded. load / add_model / add_primitive first.");
+  return entry;
+}
+function meshesOf(entry) {
+  const meshes = [];
+  entry.model.traverse((c) => {
+    if (c.isMesh && c.geometry) meshes.push(c);
+  });
+  return meshes;
+}
+function triCountOf(geometry) {
+  const index = geometry.getIndex();
+  const pos = geometry.getAttribute("position");
+  return Math.floor(index ? index.count / 3 : pos ? pos.count / 3 : 0);
+}
+var r32 = (v) => Math.round(v * 1e3) / 1e3;
+var vec3 = (v) => [r32(v.x), r32(v.y), r32(v.z)];
+function triangleBox(mesh, tris) {
+  const pos = mesh.geometry.getAttribute("position");
+  const index = mesh.geometry.getIndex();
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const box = new Box3();
+  const v = new Vector3();
+  for (const t2 of tris) {
+    for (let k = 0; k < 3; k++) {
+      v.fromBufferAttribute(pos, idxOf(t2, k)).applyMatrix4(mesh.matrixWorld);
+      box.expandByPoint(v);
+    }
+  }
+  return box;
+}
+function connectedComponents(mesh) {
+  const geometry = mesh.geometry;
+  const pos = geometry.getAttribute("position");
+  const index = geometry.getIndex();
+  const triCount = triCountOf(geometry);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  geometry.computeBoundingBox();
+  const diag = geometry.boundingBox ? geometry.boundingBox.getSize(new Vector3()).length() || 1 : 1;
+  const quant = diag * 1e-6;
+  const byKey = /* @__PURE__ */ new Map();
+  const canonical = new Int32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) {
+    const k = `${Math.round(pos.getX(i) / quant)}_${Math.round(pos.getY(i) / quant)}_${Math.round(pos.getZ(i) / quant)}`;
+    const seen = byKey.get(k);
+    if (seen !== void 0) canonical[i] = seen;
+    else {
+      byKey.set(k, i);
+      canonical[i] = i;
+    }
+  }
+  const parent = new Int32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) parent[i] = i;
+  const find = (x) => {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]];
+      x = parent[x];
+    }
+    return x;
+  };
+  const union = (a, b) => {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent[rb] = ra;
+  };
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const a = canonical[idxOf(t2, 0)];
+    union(a, canonical[idxOf(t2, 1)]);
+    union(a, canonical[idxOf(t2, 2)]);
+  }
+  const byRoot = /* @__PURE__ */ new Map();
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const root = find(canonical[idxOf(t2, 0)]);
+    let list = byRoot.get(root);
+    if (!list) {
+      list = [];
+      byRoot.set(root, list);
+    }
+    list.push(t2);
+  }
+  return [...byRoot.values()];
+}
+function detectParts(viewer) {
+  const entry = requireActive(viewer);
+  const meshes = meshesOf(entry);
+  entry.model.updateMatrixWorld(true);
+  const totalTris = meshes.reduce((sum, m) => sum + triCountOf(m.geometry), 0);
+  if (totalTris > DETECT_TRIANGLE_BUDGET) {
+    return {
+      parts: [],
+      partitionId: entry.geometryRev,
+      skipped: true,
+      note: `Object exceeds the ${DETECT_TRIANGLE_BUDGET.toLocaleString()}-triangle detection budget \u2014 simplify first (simplify / simplify_region).`
+    };
+  }
+  const parts = [];
+  let kind;
+  if (meshes.length > 1) {
+    kind = "mesh";
+    meshes.forEach((mesh, mi) => {
+      const tris = [...Array(triCountOf(mesh.geometry)).keys()];
+      const box = triangleBox(mesh, tris);
+      parts.push({
+        partId: parts.length,
+        kind,
+        meshIndex: mi,
+        name: mesh.name || void 0,
+        triangles: tris.length,
+        center: vec3(box.getCenter(new Vector3())),
+        size: vec3(box.getSize(new Vector3())),
+        suggestedPivot: vec3(box.getCenter(new Vector3())),
+        _tris: tris
+      });
+    });
+  } else if (meshes.length === 1 && meshes[0].geometry.groups && meshes[0].geometry.groups.length > 1) {
+    kind = "group";
+    const mesh = meshes[0];
+    const index = mesh.geometry.getIndex();
+    meshes[0].geometry.groups.forEach((g3, gi) => {
+      const count = g3.count === Infinity ? (index ? index.count : mesh.geometry.getAttribute("position").count) - g3.start : g3.count;
+      const tris = [];
+      for (let i = g3.start / 3; i < (g3.start + count) / 3; i++) tris.push(i);
+      if (!tris.length) return;
+      const box = triangleBox(mesh, tris);
+      parts.push({
+        partId: parts.length,
+        kind,
+        meshIndex: 0,
+        groupIndex: gi,
+        triangles: tris.length,
+        center: vec3(box.getCenter(new Vector3())),
+        size: vec3(box.getSize(new Vector3())),
+        suggestedPivot: vec3(box.getCenter(new Vector3())),
+        _tris: tris
+      });
+    });
+  } else if (meshes.length === 1) {
+    kind = "component";
+    const comps = connectedComponents(meshes[0]).filter((tris) => tris.length >= MIN_COMPONENT_TRIS).sort((a, b) => b.length - a.length);
+    comps.forEach((tris) => {
+      const box = triangleBox(meshes[0], tris);
+      parts.push({
+        partId: parts.length,
+        kind,
+        meshIndex: 0,
+        triangles: tris.length,
+        center: vec3(box.getCenter(new Vector3())),
+        size: vec3(box.getSize(new Vector3())),
+        suggestedPivot: vec3(box.getCenter(new Vector3())),
+        _tris: tris
+      });
+    });
+  }
+  entry._partition = { rev: entry.geometryRev, parts, meshes };
+  const omitted = Math.max(0, parts.length - MAX_PARTS);
+  const publicParts = parts.slice(0, MAX_PARTS).map(({ _tris, ...p }) => p);
+  let note;
+  if (parts.length <= 1) {
+    note = "Single fused component \u2014 image-to-3D outputs usually are. Articulation requires split_object with a plane cut ({axis, at} or {plane}), which is a REAL geometry cut.";
+  } else {
+    note = "Partial detection is NORMAL on generated meshes (most parts fuse during generation) \u2014 verify candidates with focus + screenshot before splitting.";
+  }
+  return {
+    parts: publicParts,
+    omitted: omitted || void 0,
+    partitionId: entry.geometryRev,
+    note
+  };
+}
+function extractSubGeometry(mesh, tris) {
+  const src = mesh.geometry;
+  const index = src.getIndex();
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const names = Object.keys(src.attributes);
+  const remap = /* @__PURE__ */ new Map();
+  const newIndex = [];
+  for (const t2 of tris) {
+    for (let k = 0; k < 3; k++) {
+      const vi = idxOf(t2, k);
+      let ni = remap.get(vi);
+      if (ni === void 0) {
+        ni = remap.size;
+        remap.set(vi, ni);
+      }
+      newIndex.push(ni);
+    }
+  }
+  const geo = new BufferGeometry();
+  for (const name of names) {
+    const attr = src.getAttribute(name);
+    const size = attr.itemSize;
+    const out = new Float32Array(remap.size * size);
+    for (const [vi, ni] of remap) {
+      for (let c = 0; c < size; c++) {
+        out[ni * size + c] = attr.getComponent(vi, c);
+      }
+    }
+    geo.setAttribute(name, new BufferAttribute(out, size));
+  }
+  geo.setIndex(newIndex);
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
+  return geo;
+}
+function cutEdgeCount(mesh, selected) {
+  const geometry = mesh.geometry;
+  const pos = geometry.getAttribute("position");
+  const index = geometry.getIndex();
+  const triCount = triCountOf(geometry);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  geometry.computeBoundingBox();
+  const diag = geometry.boundingBox ? geometry.boundingBox.getSize(new Vector3()).length() || 1 : 1;
+  const quant = diag * 1e-6;
+  const canon = /* @__PURE__ */ new Map();
+  const canonOf = (vi) => {
+    const k = `${Math.round(pos.getX(vi) / quant)}_${Math.round(pos.getY(vi) / quant)}_${Math.round(pos.getZ(vi) / quant)}`;
+    let c = canon.get(k);
+    if (c === void 0) {
+      c = canon.size;
+      canon.set(k, c);
+    }
+    return c;
+  };
+  const inSel = new Uint8Array(triCount);
+  for (const t2 of selected) inSel[t2] = 1;
+  const edges = /* @__PURE__ */ new Map();
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const cs = [canonOf(idxOf(t2, 0)), canonOf(idxOf(t2, 1)), canonOf(idxOf(t2, 2))];
+    for (let k = 0; k < 3; k++) {
+      const a = Math.min(cs[k], cs[(k + 1) % 3]);
+      const b = Math.max(cs[k], cs[(k + 1) % 3]);
+      const key = a * 16777216 + b;
+      let e = edges.get(key);
+      if (!e) {
+        e = { sel: 0, out: 0 };
+        edges.set(key, e);
+      }
+      if (inSel[t2]) e.sel++;
+      else e.out++;
+    }
+  }
+  let cut = 0;
+  for (const e of edges.values()) {
+    if (e.sel > 0 && e.out > 0) cut++;
+  }
+  return cut;
+}
+function splitObject(viewer, opts = {}) {
+  const entry = requireActive(viewer);
+  if (entry.skinned) {
+    throw new Error("Splitting skinned (rigged) models is not supported \u2014 the skeleton cannot be safely torn apart.");
+  }
+  if (entry.animation && entry.animation.clips && entry.animation.clips.length) {
+    throw new Error("This object carries loaded animation clips that bind to its node tree \u2014 splitting would break them. Split a static copy (export_glb without animation, reload) instead.");
+  }
+  if (viewer._timeline && viewer._timeline.tracks.has(entry.id)) {
+    throw new Error(`This object has timeline tracks \u2014 clear_timeline {id: ${entry.id}} first (split changes what the track animates).`);
+  }
+  const meshes = meshesOf(entry);
+  entry.model.updateMatrixWorld(true);
+  const geometryUse = /* @__PURE__ */ new Map();
+  for (const e of viewer._objects) {
+    e.model.traverse((c) => {
+      if (c.isMesh && c.geometry) {
+        geometryUse.set(c.geometry, (geometryUse.get(c.geometry) || 0) + 1);
+      }
+    });
+  }
+  for (const mesh of meshes) {
+    if (geometryUse.get(mesh.geometry) > 1) {
+      throw new Error("This object shares geometry with other meshes (glTF instancing) \u2014 splitting would mutate every instance. clone_object first, then split the clone.");
+    }
+  }
+  const selections = /* @__PURE__ */ new Map();
+  let suggestedPivot = null;
+  let mode;
+  if (opts.parts && opts.parts.length) {
+    mode = "parts";
+    const partition2 = entry._partition;
+    if (!partition2 || partition2.rev !== entry.geometryRev || opts.partitionId !== partition2.rev) {
+      throw new Error(
+        `Stale or missing partition \u2014 geometry changed since detect_parts (or partitionId mismatch). Re-run detect_parts and pass its partitionId (current rev: ${entry.geometryRev}).`
+      );
+    }
+    for (const pid of opts.parts) {
+      const part = partition2.parts[pid];
+      if (!part) throw new Error(`No part ${pid}. detect_parts returned ${partition2.parts.length} parts.`);
+      const mesh = partition2.meshes[part.meshIndex];
+      let set = selections.get(mesh);
+      if (!set) {
+        set = /* @__PURE__ */ new Set();
+        selections.set(mesh, set);
+      }
+      for (const t2 of part._tris) set.add(t2);
+    }
+  } else if (opts.plane || opts.axis) {
+    mode = "plane";
+    let point, normal;
+    if (opts.axis) {
+      if (!["x", "y", "z"].includes(opts.axis)) {
+        throw new Error("axis must be x|y|z (with `at` = world coordinate).");
+      }
+      if (typeof opts.at !== "number") {
+        throw new Error("Plane cut by axis requires `at` (world coordinate).");
+      }
+      const sign2 = opts.side === "-" ? -1 : 1;
+      if (opts.side !== void 0 && opts.side !== "+" && opts.side !== "-") {
+        throw new Error("side must be '+' (extract the +axis half, default) or '-'.");
+      }
+      normal = new Vector3(
+        (opts.axis === "x" ? 1 : 0) * sign2,
+        (opts.axis === "y" ? 1 : 0) * sign2,
+        (opts.axis === "z" ? 1 : 0) * sign2
+      );
+      point = new Vector3(
+        opts.axis === "x" ? opts.at : 0,
+        opts.axis === "y" ? opts.at : 0,
+        opts.axis === "z" ? opts.at : 0
+      );
+    } else {
+      const pl = opts.plane;
+      if (!Array.isArray(pl.point) || !Array.isArray(pl.normal)) {
+        throw new Error("plane needs {point:[x,y,z], normal:[x,y,z]}.");
+      }
+      point = new Vector3(...pl.point);
+      normal = new Vector3(...pl.normal).normalize();
+      if (normal.lengthSq() < 1e-12) throw new Error("plane.normal must be non-zero.");
+    }
+    const v = new Vector3();
+    const centroid = new Vector3();
+    for (const mesh of meshes) {
+      const pos = mesh.geometry.getAttribute("position");
+      const index = mesh.geometry.getIndex();
+      const triCount = triCountOf(mesh.geometry);
+      const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+      const set = /* @__PURE__ */ new Set();
+      for (let t2 = 0; t2 < triCount; t2++) {
+        centroid.set(0, 0, 0);
+        for (let k = 0; k < 3; k++) {
+          centroid.add(v.fromBufferAttribute(pos, idxOf(t2, k)).applyMatrix4(mesh.matrixWorld));
+        }
+        centroid.divideScalar(3);
+        if (centroid.clone().sub(point).dot(normal) > 0) set.add(t2);
+      }
+      if (set.size) selections.set(mesh, set);
+    }
+    if (![...selections.values()].some((s) => s.size)) {
+      throw new Error("The plane selects no triangles on the positive side \u2014 check `at`/plane against get_bounds (nothing was split).");
+    }
+  } else {
+    throw new Error("split_object needs `parts` (from detect_parts, with partitionId) OR a plane cut: {axis:'x'|'y'|'z', at:<world coord>} or {plane:{point,normal}}.");
+  }
+  const built = [];
+  let selectedTotal = 0;
+  let openEdgesAdded = 0;
+  const pivotAccum = new Vector3();
+  let pivotCount = 0;
+  for (const mesh of meshes) {
+    const set = selections.get(mesh);
+    if (!set || set.size === 0) continue;
+    const triCount = triCountOf(mesh.geometry);
+    const selected = [...set];
+    selectedTotal += selected.length;
+    openEdgesAdded += mode === "plane" ? cutEdgeCount(mesh, selected) : 0;
+    const box = triangleBox(mesh, selected);
+    pivotAccum.add(box.getCenter(new Vector3()));
+    pivotCount++;
+    const rest = [];
+    for (let t2 = 0; t2 < triCount; t2++) if (!set.has(t2)) rest.push(t2);
+    built.push({
+      mesh,
+      extracted: extractSubGeometry(mesh, selected),
+      remainder: rest.length ? extractSubGeometry(mesh, rest) : null
+    });
+  }
+  if (!built.length) throw new Error("Selection resolved to no triangles.");
+  if (pivotCount) {
+    suggestedPivot = pivotAccum.divideScalar(pivotCount);
+    if (mode === "plane") {
+      const normal = opts.axis ? new Vector3(
+        opts.axis === "x" ? 1 : 0,
+        opts.axis === "y" ? 1 : 0,
+        opts.axis === "z" ? 1 : 0
+      ) : new Vector3(...opts.plane.normal).normalize();
+      const point = opts.axis ? new Vector3(
+        opts.axis === "x" ? opts.at : 0,
+        opts.axis === "y" ? opts.at : 0,
+        opts.axis === "z" ? opts.at : 0
+      ) : new Vector3(...opts.plane.point);
+      const dist = suggestedPivot.clone().sub(point).dot(normal);
+      suggestedPivot.addScaledVector(normal, -dist);
+    }
+  }
+  const newRoot = new Group();
+  newRoot.name = opts.name || `${entry.name}_part`;
+  for (const b of built) {
+    const stash = b.mesh._mvOriginalMaterial || b.mesh.material;
+    const material = clonePaintedMaterial(stash);
+    const newMesh = new Mesh(b.extracted, material);
+    newMesh.name = `${b.mesh.name || "mesh"}_part`;
+    const rel = new Matrix4().copy(entry.wrapper.matrixWorld).invert().multiply(b.mesh.matrixWorld);
+    newMesh.applyMatrix4(rel);
+    newRoot.add(newMesh);
+  }
+  const newEntry = viewer._insertEntry(newRoot, "", "", {
+    name: opts.name || `${entry.name}_part`,
+    source: { kind: "volatile" }
+    // derived geometry has no file identity
+  });
+  newEntry.pivot.copy(entry.pivot);
+  viewer.setObjectTransform(newEntry.id, viewer._transformOf(entry));
+  if (opts.keep_active && viewer._entryById(entry.id)) {
+    viewer.setActiveObject(entry.id);
+  }
+  let remaining = null;
+  let sourceRemoved = false;
+  for (const b of built) {
+    if (b.remainder) {
+      b.mesh.geometry.dispose();
+      b.mesh.geometry = b.remainder;
+    } else {
+      b.mesh.removeFromParent();
+      b.mesh.geometry.dispose();
+    }
+  }
+  const leftMeshes = meshesOf(entry);
+  if (leftMeshes.length === 0) {
+    viewer.removeObject(entry.id);
+    sourceRemoved = true;
+  } else {
+    entry.originalState = null;
+    entry.geometryRev++;
+    entry._partition = null;
+    entry.modified = true;
+    entry.sculpted = true;
+    entry.stats = viewer._computeStats(entry.model);
+    remaining = {
+      objectId: entry.id,
+      triangles: leftMeshes.reduce((s, m) => s + triCountOf(m.geometry), 0)
+    };
+  }
+  viewer._updateSceneRig(viewer._visibleUnionBox());
+  viewer.invalidate();
+  viewer._container.dispatchEvent(new CustomEvent("objectschange", {
+    detail: { objects: viewer.listObjects(), activeId: viewer._activeObjectId }
+  }));
+  const created = [{
+    objectId: newEntry.id,
+    name: newEntry.name,
+    triangles: selectedTotal,
+    suggestedPivot: suggestedPivot ? vec3(suggestedPivot) : null,
+    bounds: viewer._placementSummary(newEntry).bounds
+  }];
+  const result = { created, remaining, mode };
+  if (mode === "plane") {
+    result.openEdgesAdded = openEdgesAdded;
+    result.note = "Cut faces are HOLLOW (capping would invent wrong UVs). Keep articulation sweeps small (\u227230\xB0) or orient cuts away from the camera. suggestedPivot = the cut region centroid \u2014 set_pivot there, then rotate. Old describe_scene mesh ids are void; reset now restores the SPLIT state, not the pre-split mesh.";
+  } else {
+    result.note = "Old detect_parts partIds and describe_scene mesh ids are void after a split. reset restores the SPLIT state.";
+  }
+  return result;
+}
+function clonePaintedMaterial(stash) {
+  const cloneOne = (m) => {
+    const c = m.clone();
+    c.userData = { ...m.userData };
+    clonePaintLayer(c);
+    return c;
+  };
+  return Array.isArray(stash) ? stash.map(cloneOne) : cloneOne(stash);
+}
+
+// frontend/js/viewer/repair.js
+var REGION_VERTEX_CAP = 5e4;
+var INSPECT_TRIANGLE_BUDGET = 3e5;
+var r33 = (v) => Math.round(v * 1e3) / 1e3;
+var r1 = (v) => Math.round(v * 10) / 10;
+function requireActive2(viewer) {
+  const entry = viewer._activeEntry();
+  if (!entry) throw new Error("No object loaded. load / add_model / add_primitive first.");
+  if (entry.skinned) {
+    throw new Error("Mesh repair on skinned (rigged) models is not supported \u2014 vertex/topology edits corrupt the bind pose.");
+  }
+  if (viewer._timeline && viewer._timeline.playing) {
+    throw new Error("The timeline is PLAYING \u2014 pause_timeline before mesh edits.");
+  }
+  return entry;
+}
+function meshesOf2(entry) {
+  const meshes = [];
+  entry.model.traverse((c) => {
+    if (c.isMesh && c.geometry) meshes.push(c);
+  });
+  return meshes;
+}
+function triCountOf2(geometry) {
+  const index = geometry.getIndex();
+  const pos = geometry.getAttribute("position");
+  return Math.floor(index ? index.count / 3 : pos ? pos.count / 3 : 0);
+}
+function resolveRadius2(viewer, opts, command) {
+  if (opts.radius > 0) return opts.radius;
+  if (opts.radius_rel > 0) {
+    const box = new Box3().setFromObject(viewer._currentModel);
+    const sphereR = box.isEmpty() ? 0 : box.getSize(new Vector3()).length() / 2;
+    if (sphereR > 0) return opts.radius_rel * sphereR;
+  }
+  throw new Error(`${command} requires radius > 0 (world units) or radius_rel > 0.`);
+}
+function weldMap(geometry) {
+  const pos = geometry.getAttribute("position");
+  geometry.computeBoundingBox();
+  const diag = geometry.boundingBox ? geometry.boundingBox.getSize(new Vector3()).length() || 1 : 1;
+  const quant = diag * 1e-6;
+  const byKey = /* @__PURE__ */ new Map();
+  const canonical = new Int32Array(pos.count);
+  const members = /* @__PURE__ */ new Map();
+  for (let i = 0; i < pos.count; i++) {
+    const k = `${Math.round(pos.getX(i) / quant)}_${Math.round(pos.getY(i) / quant)}_${Math.round(pos.getZ(i) / quant)}`;
+    const seen = byKey.get(k);
+    canonical[i] = seen !== void 0 ? seen : (byKey.set(k, i), i);
+    let list = members.get(canonical[i]);
+    if (!list) {
+      list = [];
+      members.set(canonical[i], list);
+    }
+    list.push(i);
+  }
+  return { canonical, members };
+}
+function collapseRegion(posAttr, tris, locked, keepRatio) {
+  const faces = tris.map((t2, i) => ({ v: [t2[0], t2[1], t2[2]], alive: true, id: i }));
+  const vertFaces = /* @__PURE__ */ new Map();
+  const neighbors = /* @__PURE__ */ new Map();
+  const link = (a, b) => {
+    let s = neighbors.get(a);
+    if (!s) {
+      s = /* @__PURE__ */ new Set();
+      neighbors.set(a, s);
+    }
+    s.add(b);
+  };
+  for (const f of faces) {
+    for (let k = 0; k < 3; k++) {
+      const a = f.v[k], b = f.v[(k + 1) % 3];
+      link(a, b);
+      link(b, a);
+      let list = vertFaces.get(a);
+      if (!list) {
+        list = [];
+        vertFaces.set(a, list);
+      }
+      list.push(f);
+    }
+  }
+  const vp = (i, out) => out.fromBufferAttribute(posAttr, i);
+  const _a2 = new Vector3(), _b2 = new Vector3(), _c = new Vector3();
+  const _ab4 = new Vector3(), _cb3 = new Vector3();
+  const faceNormal = (f, out) => {
+    vp(f.v[0], _a2);
+    vp(f.v[1], _b2);
+    vp(f.v[2], _c);
+    _cb3.subVectors(_c, _b2);
+    _ab4.subVectors(_a2, _b2);
+    return out.copy(_cb3.cross(_ab4)).normalize();
+  };
+  const nu = new Vector3(), nf = new Vector3();
+  const edgeCost = (u2, v) => {
+    const len = vp(u2, _a2).distanceTo(vp(v, _b2));
+    let curvature = 0;
+    const uFaces = (vertFaces.get(u2) || []).filter((f) => f.alive);
+    const sideFaces = uFaces.filter((f) => f.v.includes(v));
+    for (const f of uFaces) {
+      let minCurv = 1;
+      faceNormal(f, nf);
+      for (const sf of sideFaces) {
+        const dot = nf.dot(faceNormal(sf, nu));
+        minCurv = Math.min(minCurv, (1 - dot) / 2);
+      }
+      curvature = Math.max(curvature, minCurv);
+    }
+    if (sideFaces.length < 2) curvature = 1;
+    return len * curvature;
+  };
+  const best = /* @__PURE__ */ new Map();
+  const computeVertexCost = (u2) => {
+    if (locked.has(u2)) {
+      best.delete(u2);
+      return;
+    }
+    const ns = neighbors.get(u2);
+    if (!ns || ns.size === 0) {
+      best.set(u2, { v: null, cost: -0.01 });
+      return;
+    }
+    let bv = null, bc = Infinity;
+    for (const v of ns) {
+      const c = edgeCost(u2, v);
+      if (c < bc) {
+        bc = c;
+        bv = v;
+      }
+    }
+    best.set(u2, { v: bv, cost: bc });
+  };
+  const unlocked = [...neighbors.keys()].filter((v) => !locked.has(v));
+  for (const u2 of unlocked) computeVertexCost(u2);
+  const targetRemovals = Math.floor(unlocked.length * (1 - keepRatio));
+  let removed = 0;
+  while (removed < targetRemovals) {
+    let u2 = null, rec = null;
+    for (const [cu, crec] of best) {
+      if (!rec || crec.cost < rec.cost) {
+        u2 = cu;
+        rec = crec;
+      }
+    }
+    if (u2 === null || !Number.isFinite(rec.cost)) break;
+    const v = rec.v;
+    best.delete(u2);
+    if (v === null) {
+      removed++;
+      continue;
+    }
+    const uFaces = (vertFaces.get(u2) || []).filter((f) => f.alive);
+    const affected = /* @__PURE__ */ new Set([v]);
+    for (const f of uFaces) {
+      if (f.v.includes(v)) {
+        f.alive = false;
+      } else {
+        for (let k = 0; k < 3; k++) if (f.v[k] === u2) f.v[k] = v;
+        let list = vertFaces.get(v);
+        if (!list) {
+          list = [];
+          vertFaces.set(v, list);
+        }
+        list.push(f);
+      }
+      for (const w of f.v) affected.add(w);
+    }
+    const uN = neighbors.get(u2) || /* @__PURE__ */ new Set();
+    for (const w of uN) {
+      neighbors.get(w).delete(u2);
+      if (w !== v) {
+        link(v, w);
+        link(w, v);
+      }
+      affected.add(w);
+    }
+    neighbors.delete(u2);
+    vertFaces.delete(u2);
+    removed++;
+    for (const w of affected) {
+      if (!locked.has(w) && neighbors.has(w)) computeVertexCost(w);
+    }
+  }
+  return { tris: faces.filter((f) => f.alive).map((f) => f.v), removed };
+}
+function simplifyRegion(viewer, opts = {}) {
+  const entry = requireActive2(viewer);
+  const radius = resolveRadius2(viewer, opts, "simplify_region");
+  const ratio = opts.ratio;
+  if (!(ratio > 0 && ratio < 1)) {
+    throw new Error("simplify_region requires ratio in (0,1) \u2014 the fraction of region vertices to KEEP (0.25 \u2248 4\xD7 coarser).");
+  }
+  const center = new Vector3(...opts.center || []);
+  if (!opts.center || opts.center.length !== 3) {
+    throw new Error("simplify_region requires center: [x,y,z] (world \u2014 use pick, raycast, inspect_region or get_bounds).");
+  }
+  const meshes = meshesOf2(entry);
+  entry.model.updateMatrixWorld(true);
+  const r22 = radius * radius;
+  let before = 0, after = 0, removedVerts = 0;
+  let lockedRing = 0, lockedSeams = 0, lockedBorders = 0;
+  const seenGeometries = /* @__PURE__ */ new Set();
+  const v = new Vector3();
+  for (const mesh of meshes) {
+    if (seenGeometries.has(mesh.geometry)) continue;
+    seenGeometries.add(mesh.geometry);
+    ensureMutable(mesh.geometry);
+    const geometry = mesh.geometry;
+    const pos = geometry.getAttribute("position");
+    const index = geometry.getIndex();
+    const triCount = triCountOf2(geometry);
+    const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+    const m = mesh.matrixWorld;
+    const inside = new Uint8Array(pos.count);
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(m);
+      if (v.distanceToSquared(center) <= r22) inside[i] = 1;
+    }
+    const selected = [];
+    const rest = [];
+    for (let t2 = 0; t2 < triCount; t2++) {
+      const a = idxOf(t2, 0), b = idxOf(t2, 1), c = idxOf(t2, 2);
+      if (inside[a] && inside[b] && inside[c]) selected.push([a, b, c]);
+      else rest.push([a, b, c]);
+    }
+    if (selected.length < 8) continue;
+    const regionVerts = /* @__PURE__ */ new Set();
+    for (const t2 of selected) for (const vi of t2) regionVerts.add(vi);
+    if (regionVerts.size > REGION_VERTEX_CAP) {
+      throw new Error(`Region covers ${regionVerts.size.toLocaleString()} vertices (> ${REGION_VERTEX_CAP.toLocaleString()} cap) \u2014 reduce the radius, or use \`simplify\` for whole-model decimation.`);
+    }
+    const locked = /* @__PURE__ */ new Set();
+    for (const t2 of rest) {
+      for (const vi of t2) if (regionVerts.has(vi)) {
+        locked.add(vi);
+      }
+    }
+    lockedRing += locked.size;
+    const { canonical, members } = weldMap(geometry);
+    for (const list of members.values()) {
+      if (list.length > 1) {
+        for (const vi of list) {
+          if (regionVerts.has(vi) && !locked.has(vi)) {
+            locked.add(vi);
+            lockedSeams++;
+          }
+        }
+      }
+    }
+    const { edgeCount } = meshTopology(geometry, /* @__PURE__ */ new Map());
+    const openCanon = /* @__PURE__ */ new Set();
+    for (const [key, count] of edgeCount) {
+      if (count !== 1) continue;
+      openCanon.add(Math.floor(key / 16777216));
+      openCanon.add(key % 16777216);
+    }
+    for (const vi of regionVerts) {
+      if (!locked.has(vi) && openCanon.has(canonical[vi])) {
+        locked.add(vi);
+        lockedBorders++;
+      }
+    }
+    before += selected.length;
+    const { tris: survivors, removed } = collapseRegion(pos, selected, locked, ratio);
+    after += survivors.length;
+    removedVerts += removed;
+    const newIndex = [];
+    for (const t2 of rest) newIndex.push(t2[0], t2[1], t2[2]);
+    for (const t2 of survivors) newIndex.push(t2[0], t2[1], t2[2]);
+    const remap = /* @__PURE__ */ new Map();
+    const compact = new Array(newIndex.length);
+    for (let i = 0; i < newIndex.length; i++) {
+      const vi = newIndex[i];
+      let ni = remap.get(vi);
+      if (ni === void 0) {
+        ni = remap.size;
+        remap.set(vi, ni);
+      }
+      compact[i] = ni;
+    }
+    const geo = new BufferGeometry();
+    for (const name of Object.keys(geometry.attributes)) {
+      const attr = geometry.getAttribute(name);
+      const out = new Float32Array(remap.size * attr.itemSize);
+      for (const [vi, ni] of remap) {
+        for (let c = 0; c < attr.itemSize; c++) {
+          out[ni * attr.itemSize + c] = attr.getComponent(vi, c);
+        }
+      }
+      geo.setAttribute(name, new BufferAttribute(out, attr.itemSize));
+    }
+    geo.setIndex(compact);
+    if (geo.getAttribute("normal")) {
+      recomputeInteriorNormals(geo, remap, locked);
+    }
+    geo.computeBoundingBox();
+    geo.computeBoundingSphere();
+    mesh.geometry.dispose();
+    mesh.geometry = geo;
+  }
+  if (before === 0) {
+    throw new Error("Brush region contains no fully-inside triangles \u2014 check center (world coords \u2014 use pick or inspect_region) and radius, or enlarge the radius (straddling triangles don't count).");
+  }
+  const hadEdits = !!entry.originalState;
+  entry.originalState = null;
+  entry.geometryRev++;
+  entry._partition = null;
+  entry.modified = true;
+  entry.sculpted = true;
+  entry.stats = viewer._computeStats(entry.model);
+  viewer._lastStats = entry.stats;
+  viewer.invalidate();
+  let note = "Boundary ring locked \u2014 no cracks; seam welds and open rims (cut edges) locked (hard-edged/seam-dense regions decimate less than requested).";
+  if (hadEdits) {
+    note = "reset baseline moved: earlier sculpt/bake edits are now permanent. " + note;
+  }
+  return {
+    region: { trianglesBefore: before, trianglesAfter: after },
+    object: { triangles: entry.stats.faces },
+    requestedRatio: ratio,
+    achievedRatio: before ? r33(after / before) : 1,
+    locked: { ring: lockedRing, seams: lockedSeams, borders: lockedBorders },
+    verticesRemoved: removedVerts,
+    note
+  };
+}
+function recomputeInteriorNormals(geo, remap, lockedRaw) {
+  const lockedNew = /* @__PURE__ */ new Set();
+  for (const [vi, ni] of remap) if (lockedRaw.has(vi)) lockedNew.add(ni);
+  const pos = geo.getAttribute("position");
+  const nor = geo.getAttribute("normal");
+  const index = geo.getIndex();
+  const acc = new Float32Array(pos.count * 3);
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const cb = new Vector3(), ab = new Vector3();
+  for (let i = 0; i < index.count; i += 3) {
+    const ia = index.getX(i), ib = index.getX(i + 1), ic = index.getX(i + 2);
+    a.fromBufferAttribute(pos, ia);
+    b.fromBufferAttribute(pos, ib);
+    c.fromBufferAttribute(pos, ic);
+    cb.subVectors(c, b);
+    ab.subVectors(a, b);
+    cb.cross(ab);
+    for (const vi of [ia, ib, ic]) {
+      acc[vi * 3] += cb.x;
+      acc[vi * 3 + 1] += cb.y;
+      acc[vi * 3 + 2] += cb.z;
+    }
+  }
+  const n2 = new Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    if (lockedNew.has(i)) continue;
+    n2.set(acc[i * 3], acc[i * 3 + 1], acc[i * 3 + 2]);
+    if (n2.lengthSq() > 1e-12) {
+      n2.normalize();
+      nor.setXYZ(i, n2.x, n2.y, n2.z);
+    }
+  }
+  nor.needsUpdate = true;
+}
+function meshIssueCounts(geometry) {
+  const pos = geometry.getAttribute("position");
+  const index = geometry.getIndex();
+  const triCount = triCountOf2(geometry);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const { canonical } = weldMap(geometry);
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const cb = new Vector3(), ab = new Vector3();
+  geometry.computeBoundingBox();
+  const diag = geometry.boundingBox.getSize(new Vector3()).length() || 1;
+  const minArea = (diag * 1e-7) ** 2;
+  let degenerate = 0;
+  const edges = /* @__PURE__ */ new Map();
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const raw = [idxOf(t2, 0), idxOf(t2, 1), idxOf(t2, 2)];
+    const cs = raw.map((vi) => canonical[vi]);
+    let isDegenerate = cs[0] === cs[1] || cs[1] === cs[2] || cs[0] === cs[2];
+    if (!isDegenerate) {
+      a.fromBufferAttribute(pos, raw[0]);
+      b.fromBufferAttribute(pos, raw[1]);
+      c.fromBufferAttribute(pos, raw[2]);
+      cb.subVectors(c, b);
+      ab.subVectors(a, b);
+      isDegenerate = cb.cross(ab).lengthSq() / 4 < minArea;
+    }
+    if (isDegenerate) degenerate++;
+    for (let k = 0; k < 3; k++) {
+      const e1 = Math.min(cs[k], cs[(k + 1) % 3]);
+      const e2 = Math.max(cs[k], cs[(k + 1) % 3]);
+      if (e1 === e2) continue;
+      const key = e1 * 16777216 + e2;
+      edges.set(key, (edges.get(key) || 0) + 1);
+    }
+  }
+  let openEdges = 0;
+  for (const n2 of edges.values()) if (n2 === 1) openEdges++;
+  return { degenerate, openEdges };
+}
+function signedVolume(geometry) {
+  const pos = geometry.getAttribute("position");
+  const index = geometry.getIndex();
+  const triCount = triCountOf2(geometry);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  let vol = 0;
+  for (let t2 = 0; t2 < triCount; t2++) {
+    a.fromBufferAttribute(pos, idxOf(t2, 0));
+    b.fromBufferAttribute(pos, idxOf(t2, 1));
+    c.fromBufferAttribute(pos, idxOf(t2, 2));
+    vol += a.dot(b.clone().cross(c)) / 6;
+  }
+  return vol;
+}
+function fixMesh(viewer, opts = {}) {
+  const entry = requireActive2(viewer);
+  const requested = opts.operations || ["degenerate", "normals"];
+  const valid = ["degenerate", "normals", "flipped_faces"];
+  for (const op of requested) {
+    if (!valid.includes(op)) {
+      throw new Error(`Unknown operation '${op}'. Use: ${valid.join(", ")} (flipped_faces is opt-in \u2014 per-mesh winding reversal on closed meshes with negative signed volume).`);
+    }
+  }
+  const meshes = meshesOf2(entry);
+  const beforeCounts = meshes.map((m) => meshIssueCounts(m.geometry));
+  const operations = [];
+  let changed = false;
+  if (requested.includes("degenerate")) {
+    let dropped = 0;
+    for (const mesh of meshes) {
+      ensureMutable(mesh.geometry);
+      const geometry = mesh.geometry;
+      const pos = geometry.getAttribute("position");
+      const index = geometry.getIndex();
+      const triCount = triCountOf2(geometry);
+      const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+      const { canonical } = weldMap(geometry);
+      geometry.computeBoundingBox();
+      const diag = geometry.boundingBox.getSize(new Vector3()).length() || 1;
+      const minArea = (diag * 1e-7) ** 2;
+      const a = new Vector3(), b = new Vector3(), c = new Vector3();
+      const cb = new Vector3(), ab = new Vector3();
+      const keep = [];
+      for (let t2 = 0; t2 < triCount; t2++) {
+        const raw = [idxOf(t2, 0), idxOf(t2, 1), idxOf(t2, 2)];
+        const cs = raw.map((vi) => canonical[vi]);
+        let bad = cs[0] === cs[1] || cs[1] === cs[2] || cs[0] === cs[2];
+        if (!bad) {
+          a.fromBufferAttribute(pos, raw[0]);
+          b.fromBufferAttribute(pos, raw[1]);
+          c.fromBufferAttribute(pos, raw[2]);
+          cb.subVectors(c, b);
+          ab.subVectors(a, b);
+          bad = cb.cross(ab).lengthSq() / 4 < minArea;
+        }
+        if (bad) dropped++;
+        else keep.push(raw[0], raw[1], raw[2]);
+      }
+      if (keep.length / 3 !== triCount) {
+        geometry.setIndex(keep);
+        changed = true;
+      }
+    }
+    operations.push({ op: "degenerate", trianglesDropped: dropped });
+  }
+  if (requested.includes("flipped_faces")) {
+    let flippedMeshes = 0;
+    for (const mesh of meshes) {
+      const counts = meshIssueCounts(mesh.geometry);
+      if (counts.openEdges > 0) continue;
+      if (signedVolume(mesh.geometry) < 0) {
+        const geometry = mesh.geometry;
+        const index = geometry.getIndex();
+        if (index) {
+          for (let i = 0; i < index.count; i += 3) {
+            const tmp2 = index.getX(i + 1);
+            index.setX(i + 1, index.getX(i + 2));
+            index.setX(i + 2, tmp2);
+          }
+          index.needsUpdate = true;
+          geometry.computeVertexNormals();
+          flippedMeshes++;
+          changed = true;
+        }
+      }
+    }
+    operations.push({ op: "flipped_faces", meshesFlipped: flippedMeshes });
+  }
+  if (requested.includes("normals")) {
+    for (const mesh of meshes) {
+      mesh.geometry.computeVertexNormals();
+    }
+    operations.push({ op: "normals", meshes: meshes.length });
+    changed = true;
+  }
+  const afterCounts = meshes.map((m) => meshIssueCounts(m.geometry));
+  const sum = (arr, k) => arr.reduce((s, x) => s + x[k], 0);
+  if (changed) {
+    entry.originalState = null;
+    entry.geometryRev++;
+    entry._partition = null;
+    entry.modified = true;
+    entry.sculpted = true;
+    entry.stats = viewer._computeStats(entry.model);
+    viewer._lastStats = entry.stats;
+    viewer.invalidate();
+  }
+  return {
+    operations,
+    issues: {
+      openEdges: { before: sum(beforeCounts, "openEdges"), after: sum(afterCounts, "openEdges") },
+      degenerate: { before: sum(beforeCounts, "degenerate"), after: sum(afterCounts, "degenerate") }
+    }
+  };
+}
+function meshTopology(geometry, cache) {
+  let topo = cache.get(geometry);
+  if (topo) return topo;
+  const { canonical } = weldMap(geometry);
+  const index = geometry.getIndex();
+  const triCount = triCountOf2(geometry);
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const edgeCount = /* @__PURE__ */ new Map();
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const cs = [canonical[idxOf(t2, 0)], canonical[idxOf(t2, 1)], canonical[idxOf(t2, 2)]];
+    for (let k = 0; k < 3; k++) {
+      const e1 = Math.min(cs[k], cs[(k + 1) % 3]);
+      const e2 = Math.max(cs[k], cs[(k + 1) % 3]);
+      if (e1 === e2) continue;
+      const key = e1 * 16777216 + e2;
+      edgeCount.set(key, (edgeCount.get(key) || 0) + 1);
+    }
+  }
+  topo = { canonical, edgeCount };
+  cache.set(geometry, topo);
+  return topo;
+}
+function regionStats(viewer, entry, center, radius, topoCache = /* @__PURE__ */ new Map()) {
+  const meshes = meshesOf2(entry);
+  entry.model.updateMatrixWorld(true);
+  const r22 = radius * radius;
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const centroid = new Vector3();
+  const cb = new Vector3(), ab = new Vector3();
+  let triangles = 0, area2 = 0;
+  const openEdgeKeys = /* @__PURE__ */ new Set();
+  const edgeLens = [];
+  const dihedrals = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const mesh of meshes) {
+    if (seen.has(mesh.geometry)) continue;
+    seen.add(mesh.geometry);
+    const geometry = mesh.geometry;
+    const pos = geometry.getAttribute("position");
+    const index = geometry.getIndex();
+    const triCount = triCountOf2(geometry);
+    const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+    const m = mesh.matrixWorld;
+    const normals = /* @__PURE__ */ new Map();
+    const { canonical, edgeCount } = meshTopology(geometry, topoCache);
+    for (let t2 = 0; t2 < triCount; t2++) {
+      const ia = idxOf(t2, 0), ib = idxOf(t2, 1), ic = idxOf(t2, 2);
+      a.fromBufferAttribute(pos, ia).applyMatrix4(m);
+      b.fromBufferAttribute(pos, ib).applyMatrix4(m);
+      c.fromBufferAttribute(pos, ic).applyMatrix4(m);
+      centroid.copy(a).add(b).add(c).divideScalar(3);
+      if (centroid.distanceToSquared(center) > r22) continue;
+      triangles++;
+      cb.subVectors(c, b);
+      ab.subVectors(a, b);
+      const cross = cb.clone().cross(ab);
+      area2 += cross.length() / 2;
+      edgeLens.push(a.distanceTo(b), b.distanceTo(c), c.distanceTo(a));
+      const n2 = cross.normalize().clone();
+      const cs = [canonical[ia], canonical[ib], canonical[ic]];
+      for (let k = 0; k < 3; k++) {
+        const e1 = Math.min(cs[k], cs[(k + 1) % 3]);
+        const e2 = Math.max(cs[k], cs[(k + 1) % 3]);
+        if (e1 === e2) continue;
+        const key = e1 * 16777216 + e2;
+        if (edgeCount.get(key) === 1) openEdgeKeys.add(key);
+        let list = normals.get(key);
+        if (!list) {
+          list = [];
+          normals.set(key, list);
+        }
+        list.push(n2);
+      }
+    }
+    for (const list of normals.values()) {
+      if (list.length === 2) {
+        const dot = Math.max(-1, Math.min(1, list[0].dot(list[1])));
+        dihedrals.push(Math.acos(dot) * 180 / Math.PI);
+      }
+    }
+  }
+  edgeLens.sort((x, y) => x - y);
+  const pct = (arr, p) => arr.length ? arr[Math.min(arr.length - 1, Math.floor(arr.length * p))] : 0;
+  const dihedralMean = dihedrals.length ? dihedrals.reduce((s, x) => s + x, 0) / dihedrals.length : 0;
+  return {
+    triangles,
+    surfaceArea: r33(area2),
+    triPerUnit2: area2 > 0 ? Math.round(triangles / area2) : 0,
+    edgeLength: { min: r33(pct(edgeLens, 0)), median: r33(pct(edgeLens, 0.5)), p95: r33(pct(edgeLens, 0.95)) },
+    dihedralMeanDeg: r1(dihedralMean),
+    // TRUE welded cracks touching this region (same basis as get_mesh_stats
+    // and fix_mesh) — NOT the region perimeter.
+    openEdges: openEdgeKeys.size
+  };
+}
+function inspectRegion(viewer, opts = {}) {
+  const entry = viewer._activeEntry();
+  if (!entry) throw new Error("No object loaded.");
+  const totalTris = entry.stats ? entry.stats.faces : 0;
+  if (totalTris > INSPECT_TRIANGLE_BUDGET) {
+    return {
+      skipped: true,
+      note: `Object exceeds the ${INSPECT_TRIANGLE_BUDGET.toLocaleString()}-triangle inspection budget.`
+    };
+  }
+  if (opts.grid) {
+    const n2 = Math.max(2, Math.min(5, Math.round(opts.grid)));
+    const box = new Box3().setFromObject(entry.wrapper);
+    if (box.isEmpty()) throw new Error("Object has no measurable geometry.");
+    const size = box.getSize(new Vector3());
+    const cellR = Math.max(size.x, size.y, size.z) / n2 * 0.75;
+    const cells = [];
+    const c = new Vector3();
+    const topoCache = /* @__PURE__ */ new Map();
+    for (let i = 0; i < n2; i++) {
+      for (let j = 0; j < n2; j++) {
+        for (let k = 0; k < n2; k++) {
+          c.set(
+            box.min.x + (i + 0.5) * size.x / n2,
+            box.min.y + (j + 0.5) * size.y / n2,
+            box.min.z + (k + 0.5) * size.z / n2
+          );
+          const stats2 = regionStats(viewer, entry, c, cellR, topoCache);
+          if (stats2.triangles < 8) continue;
+          const flatness = Math.max(0, 1 - stats2.dihedralMeanDeg / 30);
+          cells.push({
+            center: [r33(c.x), r33(c.y), r33(c.z)],
+            radius: r33(cellR),
+            ...stats2,
+            opportunity: r33(flatness * Math.log10(1 + stats2.triPerUnit2))
+          });
+        }
+      }
+    }
+    cells.sort((x, y) => y.opportunity - x.opportunity);
+    const capped = cells.slice(0, 24);
+    return {
+      mode: "grid",
+      grid: n2,
+      cells: capped,
+      omitted: Math.max(0, cells.length - capped.length) || void 0,
+      note: "cells sorted by simplification opportunity (flat \xD7 dense = unjustified density). Feed a cell's center+radius into simplify_region."
+    };
+  }
+  if (!opts.center || opts.center.length !== 3) {
+    throw new Error("inspect_region needs center:[x,y,z] + radius (probe) or grid:2..5 (survey).");
+  }
+  const radius = resolveRadius2(viewer, opts, "inspect_region");
+  const center = new Vector3(...opts.center);
+  const stats = regionStats(viewer, entry, center, radius);
+  if (stats.triangles === 0) {
+    throw new Error("Region contains no triangles \u2014 check center (world coords: use pick, get_bounds, or describe_scene mesh centers) and radius.");
+  }
+  const objArea = entry.stats && entry.stats.faces ? stats.triangles / entry.stats.faces : 0;
+  return { mode: "probe", ...stats, shareOfObject: r33(objArea) };
+}
+function inspectTexture(viewer) {
+  const entry = viewer._activeEntry();
+  if (!entry) throw new Error("No object loaded.");
+  const meshes = meshesOf2(entry);
+  entry.model.updateMatrixWorld(true);
+  const reports = [];
+  const seenMats = /* @__PURE__ */ new Set();
+  for (const mesh of meshes) {
+    const stash = mesh._mvOriginalMaterial || mesh.material;
+    const mats = Array.isArray(stash) ? stash : [stash];
+    const uv = mesh.geometry.getAttribute("uv");
+    for (const mat of mats) {
+      if (!mat || seenMats.has(mat)) continue;
+      seenMats.add(mat);
+      const tex = mat.map;
+      const report = {
+        material: mat.name || "(unnamed)",
+        painted: !!(mat.userData && mat.userData._mvPaint) || void 0
+      };
+      if (tex && tex.image && tex.image.width) {
+        report.map = {
+          width: tex.image.width,
+          height: tex.image.height,
+          colorSpace: tex.colorSpace || "linear"
+        };
+      } else {
+        report.map = null;
+      }
+      if (uv && report.map) {
+        const density = texelDensity(mesh, report.map.width, report.map.height);
+        if (density) Object.assign(report, density);
+      } else if (!uv) {
+        report.note = "mesh has no UVs \u2014 painting/repair unavailable";
+      }
+      reports.push(report);
+    }
+  }
+  return { materials: reports };
+}
+function texelDensity(mesh, W, H) {
+  const geometry = mesh.geometry;
+  const pos = geometry.getAttribute("position");
+  const uv = geometry.getAttribute("uv");
+  const index = geometry.getIndex();
+  const triCount = triCountOf2(geometry);
+  if (triCount === 0 || triCount > INSPECT_TRIANGLE_BUDGET) return null;
+  const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+  const a = new Vector3(), b = new Vector3(), c = new Vector3();
+  const m = mesh.matrixWorld;
+  const items = [];
+  let zeroUv = 0;
+  for (let t2 = 0; t2 < triCount; t2++) {
+    const ia = idxOf(t2, 0), ib = idxOf(t2, 1), ic = idxOf(t2, 2);
+    a.fromBufferAttribute(pos, ia).applyMatrix4(m);
+    b.fromBufferAttribute(pos, ib).applyMatrix4(m);
+    c.fromBufferAttribute(pos, ic).applyMatrix4(m);
+    const areaW = b.clone().sub(a).cross(c.clone().sub(a)).length() / 2;
+    if (areaW < 1e-12) continue;
+    const u0 = uv.getX(ia) * W, v0 = uv.getY(ia) * H;
+    const u1 = uv.getX(ib) * W, v1 = uv.getY(ib) * H;
+    const u2 = uv.getX(ic) * W, v2 = uv.getY(ic) * H;
+    const areaUV = Math.abs((u1 - u0) * (v2 - v0) - (u2 - u0) * (v1 - v0)) / 2;
+    if (areaUV < 1e-9) {
+      zeroUv++;
+      continue;
+    }
+    items.push({
+      density: Math.sqrt(areaUV / areaW),
+      areaW,
+      center: [(a.x + b.x + c.x) / 3, (a.y + b.y + c.y) / 3, (a.z + b.z + c.z) / 3]
+    });
+  }
+  if (!items.length) return { zeroUvArea: zeroUv || void 0 };
+  items.sort((x, y) => x.density - y.density);
+  const totalArea = items.reduce((s, x) => s + x.areaW, 0);
+  const weightedPct = (p) => {
+    let acc = 0;
+    for (const it2 of items) {
+      acc += it2.areaW;
+      if (acc >= totalArea * p) return it2.density;
+    }
+    return items[items.length - 1].density;
+  };
+  const worst = [];
+  for (const it2 of items) {
+    if (worst.length >= 5) break;
+    const ok = worst.every((w) => {
+      const dx = w[0] - it2.center[0], dy = w[1] - it2.center[1], dz = w[2] - it2.center[2];
+      return dx * dx + dy * dy + dz * dz > totalArea / items.length;
+    });
+    if (ok) worst.push(it2.center.map(r33));
+  }
+  return {
+    texelDensity: {
+      p5: r1(weightedPct(0.05)),
+      median: r1(weightedPct(0.5)),
+      p95: r1(weightedPct(0.95))
+    },
+    lowestDensitySpots: worst,
+    zeroUvArea: zeroUv || void 0
+  };
+}
+
+// frontend/js/viewer/control_api.js
+var ViewerControlAPI = class {
+  /**
+   * @param {import("../viewer_3d.js").Viewer3D} viewer
+   * @param {object} [opts]
+   * @param {(event:string, data:any)=>void} [opts.onEvent] - optional global event sink
+   */
+  constructor(viewer, opts = {}) {
+    this._viewer = viewer;
+    this._listeners = /* @__PURE__ */ new Map();
+    if (opts.onEvent) this.on("*", opts.onEvent);
+    this._containerListeners = [];
+    const el = viewer._container;
+    if (el && el.addEventListener) {
+      const bind = (type) => {
+        const handler = (e) => this._emit(type, e.detail);
+        el.addEventListener(type, handler);
+        this._containerListeners.push({ type, handler });
+      };
+      bind("animations");
+      bind("measurement");
+      bind("navmodechange");
+    }
+    this._commands = this._buildRegistry();
+  }
+  // ---- public surface -----------------------------------------------------
+  /** Enumerate every command with its parameter schema (for agent discovery). */
+  listCommands() {
+    return Object.entries(this._commands).map(([action, def]) => ({
+      action,
+      description: def.description,
+      params: def.params || {}
+    }));
+  }
+  /** JSON snapshot of the viewer (model, camera, display, animation). */
+  getState() {
+    return this._viewer.getState();
+  }
+  /** Per-mesh + per-material breakdown of the loaded model. */
+  getSceneInfo() {
+    return this._viewer.getSceneInfo();
+  }
+  /**
+   * Execute one command. Always resolves to a structured result; never throws.
+   * @param {{action:string, params?:object}} command
+   * @returns {Promise<{ok:boolean, result?:any, error?:string}>}
+   */
+  async execute(command) {
+    if (!command || typeof command.action !== "string") {
+      return { ok: false, error: "command.action (string) is required" };
+    }
+    const def = this._commands[command.action];
+    if (!def) {
+      return {
+        ok: false,
+        error: `Unknown action '${command.action}'. Run the 'list_commands' action to discover valid actions and their schemas.`
+      };
+    }
+    if (def.requiresModel && !this._viewer.getState().model.loaded) {
+      return { ok: false, error: `'${command.action}' requires a loaded model. Call 'load' first.` };
+    }
+    const params = command.params || {};
+    const validation = this._validate(def.params || {}, params);
+    if (validation.error) return { ok: false, error: validation.error };
+    try {
+      const result = await def.handler(validation.values);
+      this._emit("executed", { action: command.action, params });
+      if (this._viewer.invalidate) this._viewer.invalidate();
+      return { ok: true, result: result === void 0 ? null : result };
+    } catch (err2) {
+      const message = String(err2 && err2.message ? err2.message : err2);
+      this._emit("error", { action: command.action, error: message });
+      return { ok: false, error: message };
+    }
+  }
+  /** Detach all listeners this API put on the container (call from the host destroy). */
+  destroy() {
+    for (const { type, handler } of this._containerListeners || []) {
+      this._viewer._container.removeEventListener(type, handler);
+    }
+    this._containerListeners = [];
+    this._listeners.clear();
+  }
+  /** Subscribe to an event ('loaded','error','animations','measurement','executed','*'). */
+  on(event, cb) {
+    if (!this._listeners.has(event)) this._listeners.set(event, /* @__PURE__ */ new Set());
+    this._listeners.get(event).add(cb);
+    return () => this._listeners.get(event)?.delete(cb);
+  }
+  _emit(event, data) {
+    for (const cb of this._listeners.get(event) || []) {
+      try {
+        cb(data, event);
+      } catch {
+      }
+    }
+    for (const cb of this._listeners.get("*") || []) {
+      try {
+        cb(data, event);
+      } catch {
+      }
+    }
+  }
+  // ---- input validation ---------------------------------------------------
+  /**
+   * Validate + coerce params against a schema. Schema entry:
+   *   { type: 'number'|'string'|'boolean'|'array', required?, default?, enum?, min?, max? }
+   */
+  _validate(schema, params) {
+    const values = {};
+    for (const key of Object.keys(params)) {
+      if (!(key in schema)) {
+        const valid = Object.keys(schema);
+        return { error: `Unknown param '${key}'. Valid params: ${valid.length ? valid.join(", ") : "(none)"}` };
+      }
+    }
+    for (const [key, spec] of Object.entries(schema)) {
+      let v = params[key];
+      if (v === void 0 || v === null) {
+        if (spec.required) return { error: `Missing required param '${key}'` };
+        if (spec.default !== void 0) v = spec.default;
+        else {
+          values[key] = void 0;
+          continue;
+        }
+      }
+      if (spec.type === "number") {
+        if (spec.aliases && typeof v === "string" && v in spec.aliases) {
+          v = spec.aliases[v];
+        }
+        const n2 = Number(v);
+        if (Number.isNaN(n2)) {
+          const hint = spec.aliases ? ` or one of: ${Object.keys(spec.aliases).join(", ")}` : "";
+          return { error: `Param '${key}' must be a number${hint}` };
+        }
+        if (spec.min !== void 0 && n2 < spec.min) return { error: `Param '${key}' must be >= ${spec.min}` };
+        if (spec.max !== void 0 && n2 > spec.max) return { error: `Param '${key}' must be <= ${spec.max}` };
+        v = n2;
+      } else if (spec.type === "boolean") {
+        if (typeof v === "boolean") {
+        } else if (v === "true" || v === 1 || v === "1") v = true;
+        else if (v === "false" || v === 0 || v === "0") v = false;
+        else return { error: `Param '${key}' must be a boolean (got ${JSON.stringify(v)})` };
+      } else if (spec.type === "array") {
+        if (!Array.isArray(v)) return { error: `Param '${key}' must be an array` };
+      } else if (spec.type === "object") {
+        if (typeof v !== "object" || v === null || Array.isArray(v)) {
+          return { error: `Param '${key}' must be an object` };
+        }
+      } else if (spec.type === "string") {
+        v = String(v);
+      }
+      if (spec.enum && !spec.enum.includes(v)) {
+        return { error: `Param '${key}' must be one of: ${spec.enum.join(", ")}` };
+      }
+      values[key] = v;
+    }
+    return { values };
+  }
+  // ---- command registry ---------------------------------------------------
+  _buildRegistry() {
+    const v = this._viewer;
+    return {
+      // --- observation ---
+      get_state: {
+        description: "Return a JSON snapshot of the viewer (model, camera, display, animation).",
+        handler: () => v.getState()
+      },
+      get_scene_info: {
+        description: "Return per-mesh and per-material details of the loaded model.",
+        handler: () => v.getSceneInfo()
+      },
+      describe_scene: {
+        description: "One-call structured TEXT snapshot of the loaded model, designed so an agent can reason WITHOUT screenshots: natural-language summary, inventory (meshes/materials/textures/triangles \u2014 live counts, correct after transforms), size + bounds + real-world scale hint, capped hierarchy outline, largest meshes, material properties (of the asset, even while a render-mode override is active), detected geometry issues (missing normals/UVs, degenerate faces, watertightness, flipped normals via signed volume, scale sanity), and the current camera/render state. Options: maxItems caps list lengths (default 8); checks:false skips geometry QA; views:true adds the top-3 detail-ranked camera angles (renders ~24 offscreen views \u2014 seconds on software GL). Prefer this over screenshot for understanding WHAT is loaded; use screenshot only to verify aesthetics.",
+        params: {
+          maxItems: { type: "number", min: 1, max: 50 },
+          checks: { type: "boolean", default: true },
+          views: { type: "boolean", default: false }
+        },
+        requiresModel: false,
+        handler: (p) => describeScene(v, { maxItems: p.maxItems, checks: p.checks, views: p.views })
+      },
+      get_bounds: {
+        description: "Return the model's world-space bounding box {min,max,center,size} or null.",
+        handler: () => v.getBounds()
+      },
+      sample_points: {
+        description: "Deterministic, area-weighted surface point samples in world space \u2014 the geometric fingerprint used for shape registration / model comparison. Returns { count, seed, surfaceArea, points:[[x,y,z],...] }. Same model + same seed = same points (reproducible comparisons). count 16..20000 (default 4096).",
+        params: {
+          count: { type: "number", min: 16, max: 2e4 },
+          seed: { type: "number" }
+        },
+        requiresModel: true,
+        handler: (p) => samplePoints(v, { count: p.count, seed: p.seed })
+      },
+      get_mesh_stats: {
+        description: "Numeric surface-quality statistics \u2014 use to COMPARE iterations of the same asset or judge quality beyond connectivity QA (a topologically perfect mesh can still be visual garbage). Returns per-mesh + total: surface area, volume (null for open meshes \u2014 the signed-volume sum is origin-dependent when the surface is not closed), edge-length distribution (min/median/p95/max), sliver %, dihedral roughness (mean/p95 angle between adjacent faces \u2014 a RELATIVE indicator: compare across versions of the same asset; hard-edged models legitimately score high, e.g. a cube is 60\xB0 mean), open/non-manifold/degenerate counts, and issuePoints: representative world-space defect locations to pass to `focus {point}`. Multi-mesh totals carry approx:true on median/mean fields (triangle-weighted combinations; read per-mesh entries when precision matters). Budget: skipped (with skipped:true) above 300k triangles.",
+        requiresModel: true,
+        handler: () => meshStatistics(v)
+      },
+      score_views: {
+        description: "Score candidate camera angles by how much visible surface DETAIL each shows (edge energy), and return them ranked. Use this to find a model's semantic 'front' when it is not axis-aligned (e.g. a face): the most detailed side ranks first. Returns [{azimuth, elevation, score, coverage}]. NOTE: presets front/back/left/right are WORLD-AXIS conventions, not the model's real front \u2014 this command discovers the real one.",
+        params: {
+          azimuths: { type: "array" },
+          elevations: { type: "array" },
+          size: { type: "number", min: 32, max: 512 },
+          fill: { type: "number", min: 0.1, max: 1 }
+        },
+        requiresModel: true,
+        handler: (p) => v.scoreViews({ azimuths: p.azimuths, elevations: p.elevations, size: p.size, fill: p.fill })
+      },
+      find_best_view: {
+        description: "Find the best 'hero'/front angle (highest visible geometric detail, lighting-independent) and move the camera there. Auto-uprights by default (corrects camera roll so a lying-down/mis-oriented model appears the right way up); pass upright:false to skip, apply:false to only compute. Returns {azimuth, elevation, score, coverage, ranked}.",
+        params: {
+          apply: { type: "boolean", default: true },
+          upright: { type: "boolean", default: true },
+          fill: { type: "number", min: 0.1, max: 1 },
+          size: { type: "number", min: 32, max: 512 }
+        },
+        requiresModel: true,
+        handler: (p) => v.findBestView({ apply: p.apply, upright: p.upright, fill: p.fill, size: p.size })
+      },
+      auto_upright: {
+        description: "Correct the camera roll for the CURRENT view so a mis-oriented (e.g. lying-down) subject appears upright, without modifying the model. Uses left-right symmetry of the framed subject.",
+        requiresModel: true,
+        handler: () => v.autoUpright()
+      },
+      focus: {
+        description: "Frame a PART of the model (or a world point): moves the camera to look at it, keeping the current view direction, and rescales clip planes/zoom limits so even tiny parts are visible. Target by `id` (the stable mesh id from describe_scene/get_scene_info \u2014 most reliable, since real-world mesh names are often meaningless), by `name` (mesh or group; exact > case-insensitive > substring; ambiguity returns candidates), or by `point` [x,y,z] (+ optional radius). The part may be occluded by surrounding geometry \u2014 combine with set_clip or set_render_mode wireframe to see through. reset_camera returns to the whole-model view. Note: orbit/set_view/frame re-frame the WHOLE model; re-focus afterwards if needed.",
+        params: {
+          id: { type: "number", min: 0 },
+          name: { type: "string" },
+          point: { type: "array" },
+          radius: { type: "number", min: 0 },
+          fill: { type: "number", min: 0.1, max: 1 }
+        },
+        requiresModel: true,
+        handler: (p) => v.focusOn({ id: p.id, name: p.name, point: p.point, radius: p.radius, fill: p.fill })
+      },
+      list_commands: {
+        description: "List all available commands and their parameters.",
+        handler: () => this.listCommands()
+      },
+      screenshot: {
+        description: "Render the current view and return a PNG data URL. Options: width/height (explicit output resolution; one may be omitted and is derived from aspect), transparent (alpha background, for cutouts), fog (default false \u2014 scene fog is suppressed for cleaner hero shots), hideGround (hide the ground/shadow plane), ssao (default true \u2014 render through the SSAO/tone-mapping composer for hero quality).",
+        params: {
+          width: { type: "number", min: 16, max: 8192 },
+          height: { type: "number", min: 16, max: 8192 },
+          transparent: { type: "boolean", default: false },
+          fog: { type: "boolean", default: false },
+          hideGround: { type: "boolean", default: false },
+          ssao: { type: "boolean", default: true }
+        },
+        handler: (p) => v.captureImage({
+          width: p.width,
+          height: p.height,
+          transparent: p.transparent,
+          fog: p.fog,
+          hideGround: p.hideGround,
+          ssao: p.ssao
+        })
+      },
+      capture_views: {
+        description: "Capture several views in one call (e.g. hero shots). `views` is a list of presets (front/back/left/right/top/bottom/iso) and/or {azimuth,elevation} objects. Returns { <label>: <PNG data URL> }. Hides grid/axes and suppresses fog for a clean shot, restoring them after.",
+        params: {
+          views: { type: "array", default: ["front", "left", "right", "back"] },
+          width: { type: "number", default: 1024, min: 16, max: 8192 },
+          height: { type: "number", default: 1024, min: 16, max: 8192 },
+          transparent: { type: "boolean", default: false },
+          fill: { type: "number", min: 0.1, max: 1 },
+          hideGround: { type: "boolean", default: false }
+        },
+        requiresModel: true,
+        handler: (p) => {
+          const presets = ["front", "back", "left", "right", "top", "bottom", "iso"];
+          for (const view of p.views) {
+            const ok = typeof view === "string" && presets.includes(view) || view && typeof view === "object" && typeof view.azimuth === "number";
+            if (!ok) throw new Error(`Invalid view '${JSON.stringify(view)}' (preset name or {azimuth,elevation})`);
+          }
+          const grid = v.getGridVisible();
+          const axes = v.getAxisVisible();
+          v.setGridVisible(false);
+          v.setAxisVisible(false);
+          const out = {};
+          try {
+            p.views.forEach((view, i) => {
+              let label;
+              if (typeof view === "string") {
+                v.setCameraView(view, { fill: p.fill });
+                label = view;
+              } else {
+                v.orbitTo(view.azimuth, view.elevation ?? 15, { fill: p.fill });
+                label = `az${view.azimuth}_el${view.elevation ?? 15}`;
+              }
+              out[label] = v.captureImage({
+                width: p.width,
+                height: p.height,
+                transparent: p.transparent,
+                hideGround: p.hideGround
+              });
+            });
+          } finally {
+            v.setGridVisible(grid);
+            v.setAxisVisible(axes);
+          }
+          return out;
+        }
+      },
+      turntable: {
+        description: "Capture N views evenly spaced around the model (turntable). Returns { <label>: <PNG data URL> }.",
+        params: {
+          frames: { type: "number", default: 8, min: 1, max: 64 },
+          elevation: { type: "number", default: 15 },
+          width: { type: "number", default: 512, min: 16, max: 8192 },
+          height: { type: "number", default: 512, min: 16, max: 8192 },
+          fill: { type: "number", min: 0.1, max: 1 },
+          transparent: { type: "boolean", default: false },
+          hideGround: { type: "boolean", default: false }
+        },
+        requiresModel: true,
+        handler: (p) => {
+          const grid = v.getGridVisible();
+          const axes = v.getAxisVisible();
+          v.setGridVisible(false);
+          v.setAxisVisible(false);
+          const out = {};
+          try {
+            for (let i = 0; i < p.frames; i++) {
+              const az = Math.round(360 / p.frames * i);
+              v.orbitTo(az, p.elevation, { fill: p.fill });
+              out[`az${az}`] = v.captureImage({
+                width: p.width,
+                height: p.height,
+                transparent: p.transparent,
+                hideGround: p.hideGround
+              });
+            }
+          } finally {
+            v.setGridVisible(grid);
+            v.setAxisVisible(axes);
+          }
+          return out;
+        }
+      },
+      // --- loading ---
+      load: {
+        description: "Load a 3D model from a URL \u2014 REPLACES the entire scene, including a composed multi-object scene (use add_model to compose without clearing). Extension is inferred if omitted. relatedFiles lists companion files (MTL, textures) for multi-file formats \u2014 entries may be relative to the model's URL directory (e.g. ['model.mtl', 'textures/diffuse.png']) or absolute refs the host's resolver understands.",
+        params: {
+          url: { type: "string", required: true },
+          extension: { type: "string" },
+          name: { type: "string" },
+          relatedFiles: { type: "array" },
+          source: { type: "object" }
+        },
+        handler: async (p) => {
+          const ext = p.extension || "." + p.url.split(".").pop().split("?")[0].toLowerCase();
+          const stats = await v.loadModel(p.url, ext, {
+            name: p.name,
+            relatedFiles: p.relatedFiles || [],
+            source: p.source
+          });
+          this._emit("loaded", { name: v.getState().model.name, stats });
+          return { stats, state: v.getState() };
+        }
+      },
+      unload: {
+        description: "Remove EVERY object and reset the viewer to an empty scene. To remove one object of a composed scene, use remove_object.",
+        handler: () => v.unload()
+      },
+      // --- scene composition (backlog 042) ---
+      add_model: {
+        description: "Co-load a model into the CURRENT scene without clearing it (composition). `load` REPLACES the whole scene; add_model ADDS. The new object becomes ACTIVE (single-object commands target it). Optional transform places it immediately: {position:[x,y,z], quaternion:[x,y,z,w] OR rotation:[x,y,z] Euler degrees, scale:[x,y,z] or uniform number}. frame:false keeps the current camera instead of framing the whole scene.",
+        params: {
+          url: { type: "string", required: true },
+          extension: { type: "string" },
+          name: { type: "string" },
+          relatedFiles: { type: "array" },
+          source: { type: "object" },
+          transform: { type: "object" },
+          frame: { type: "boolean", default: true }
+        },
+        handler: async (p) => {
+          const ext = p.extension || "." + p.url.split(".").pop().split("?")[0].toLowerCase();
+          const result = await v.addModel(p.url, ext, {
+            name: p.name,
+            relatedFiles: p.relatedFiles || [],
+            source: p.source,
+            transform: p.transform,
+            frame: p.frame
+          });
+          this._emit("object_added", { objectId: result.objectId, name: v.getState().model.name });
+          return { objectId: result.objectId, stats: result };
+        }
+      },
+      add_primitive: {
+        description: "Add a procedural primitive to the scene as a new object (sculpting stock / scene building block). kind: box|sphere|cylinder|cone|torus|plane|capsule. params (all optional, sensible sculptable defaults; unknown keys rejected): box {width,height,depth,segments} \xB7 sphere {radius,widthSegments,heightSegments} \xB7 cylinder {radius|radiusTop+radiusBottom,height,radialSegments,heightSegments} \xB7 cone {radius,height,radialSegments,heightSegments} \xB7 torus {radius,tube,radialSegments,tubularSegments} \xB7 plane {width,height,widthSegments,heightSegments} \xB7 capsule {radius,length,capSegments,radialSegments}. Higher segments = finer sculpting (cap 256/axis, 250k vertices). Note: cylinder/cone CAPS are triangle fans \u2014 paintable but poor sculpting targets (no interior vertices); sculpt sides or use sphere/capsule. UVs are non-overlapping (paint-safe). color is CSS hex, honored exactly. transform places it immediately. The primitive becomes ACTIVE and persists in .mvscene manifests without any file.",
+        params: {
+          kind: { type: "string", required: true, enum: ["box", "sphere", "cylinder", "cone", "torus", "plane", "capsule"] },
+          params: { type: "object" },
+          color: { type: "string" },
+          name: { type: "string" },
+          transform: { type: "object" },
+          frame: { type: "boolean", default: true }
+        },
+        handler: (p) => {
+          const result = v.addPrimitive(p.kind, {
+            params: p.params,
+            color: p.color,
+            name: p.name,
+            transform: p.transform,
+            frame: p.frame
+          });
+          this._emit("object_added", { objectId: result.objectId, name: p.name || p.kind });
+          return result;
+        }
+      },
+      // --- sculpting & painting (backlog 045) ---
+      sculpt: {
+        description: "Apply ONE sculpting brush stamp to the ACTIVE object, in WORLD coordinates (get them from pick, get_bounds, or describe_scene mesh centers). tool: draw (displace along the surface's average normal, or `direction`), inflate (along each vertex's own normal), smooth (relax bumps), flatten (toward the local plane), pinch (pull toward center), grab (move by `direction`*strength). radius: world units \u2014 or radius_rel (0..1, fraction of the object's bounding-sphere radius; scale-free). strength: world-units displacement for draw/inflate/grab (default radius*0.25); 0..1 blend for smooth/flatten/pinch (default 0.5). falloff: smooth|linear|sharp. Returns {affected, maxDisplacement, newSize} \u2014 quantified feedback, steer WITHOUT a verification render each stamp. A missed brush is an ERROR (fix center/radius). Edits are seam-safe (welded) and instance-aware; `reset` restores the pre-sculpt geometry. Not supported on skinned models.",
+        params: {
+          tool: { type: "string", default: "draw", enum: ["draw", "inflate", "smooth", "flatten", "pinch", "grab"] },
+          center: { type: "array", required: true },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          strength: { type: "number" },
+          direction: { type: "array" },
+          falloff: { type: "string", enum: ["smooth", "linear", "sharp"] }
+        },
+        requiresModel: true,
+        handler: (p) => sculptStamp(v, p)
+      },
+      sculpt_stroke: {
+        description: "Apply the sculpt brush along a stroke in ONE call \u2014 far cheaper than N sculpt calls. Give the stroke as explicit `points` (\u226464 world-space [x,y,z]; overlap at spacing \u2248 radius/2 for a continuous ridge) OR as a parametric `path` with server-side auto-spacing (no external math, no scalloping): {type:'circle', center, axis?=[0,1,0], radius, start_deg?, sweep_deg?=360} for rings/bands/arcs, or {type:'line', from, to}. Same brush params as sculpt.",
+        params: {
+          points: { type: "array" },
+          path: { type: "object" },
+          tool: { type: "string", default: "draw", enum: ["draw", "inflate", "smooth", "flatten", "pinch", "grab"] },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          strength: { type: "number" },
+          direction: { type: "array" },
+          falloff: { type: "string", enum: ["smooth", "linear", "sharp"] }
+        },
+        requiresModel: true,
+        handler: (p) => sculptStroke(v, p)
+      },
+      paint: {
+        description: "Paint ONE brush stamp of color onto the ACTIVE object's texture (creates a real texture layer on first use; the model's existing texture becomes the base when possible). WORLD-space brush like sculpt; radius in world units or radius_rel (0..1 of bounding-sphere radius). color: CSS hex. opacity 0..1 = the MAX alpha of this call (painter semantics: overlapping stamps within one call never exceed it); hardness 0..1 = fraction of the radius at full opacity before falloff scales alpha to 0 at the rim. shape:'square' stamps a crisp axis-aligned quad in the surface's tangent plane (radius = half-side; use hardness 1 for exact edges) \u2014 checkers/panels/labels in ONE stamp. max_normal_angle (degrees): skip faces tilted more than this from the stamped face \u2014 stops paint wrapping around hard edges (e.g. 45 on a box top). Requires UV coordinates (primitives always have them; STL/PLY do not). Returns {painted, meanAlpha} \u2014 meanAlpha is the average applied alpha; < 0.05 means near-invisible paint (raise opacity/hardness) and is flagged in `note`. A missed brush is an ERROR. Paint & sculpt edits are NOT saved by save_scene \u2014 export_model (GLB) persists them. clear_paint undoes all paint.",
+        params: {
+          center: { type: "array", required: true },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          color: { type: "string", required: true },
+          opacity: { type: "number", min: 0, max: 1 },
+          hardness: { type: "number", min: 0, max: 1 },
+          falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+          shape: { type: "string", enum: ["round", "square"] },
+          max_normal_angle: { type: "number", min: 1, max: 180 },
+          texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+          undo_group: { type: "string" }
+        },
+        requiresModel: true,
+        handler: (p) => paintStamp(v, p)
+      },
+      paint_stroke: {
+        description: "Paint a stroke in ONE call. Give it as explicit `points` (\u226464 world-space [x,y,z]; overlap at spacing \u2248 radius/2) OR as a parametric `path` with server-side auto-spacing (smooth bands with zero external math): {type:'circle', center, axis?=[0,1,0], radius, start_deg?, sweep_deg?=360} for rings/bands/arcs (e.g. a hat band: circle around the crown's axis), or {type:'line', from, to}. Same params as paint (incl. shape/max_normal_angle).",
+        params: {
+          points: { type: "array" },
+          path: { type: "object" },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          color: { type: "string", required: true },
+          opacity: { type: "number", min: 0, max: 1 },
+          hardness: { type: "number", min: 0, max: 1 },
+          falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+          shape: { type: "string", enum: ["round", "square"] },
+          max_normal_angle: { type: "number", min: 1, max: 180 },
+          texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+          undo_group: { type: "string" }
+        },
+        requiresModel: true,
+        handler: (p) => paintStroke(v, p)
+      },
+      fill_paint: {
+        description: "Flood the ACTIVE object's whole paint layer with one color (a fresh base coat before detailing).",
+        params: {
+          color: { type: "string", required: true },
+          texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } }
+        },
+        requiresModel: true,
+        handler: (p) => fillPaint(v, p)
+      },
+      clear_paint: {
+        description: "Remove ALL paint layers from the ACTIVE object, restoring its pre-paint textures/colors (the paint analog of `reset`).",
+        requiresModel: true,
+        handler: () => clearPaint(v)
+      },
+      batch: {
+        description: "Execute up to 32 commands sequentially in ONE round-trip (halves latency/tokens for sculpt-stroke sessions). commands: [{action, params}, ...]. Stops at the first failure unless continue_on_error. Returns {results:[{ok,...}], completed}. batch cannot nest.",
+        params: {
+          commands: { type: "array", required: true },
+          continue_on_error: { type: "boolean", default: false }
+        },
+        handler: async (p) => {
+          if (p.commands.length === 0 || p.commands.length > 32) {
+            throw new Error("batch takes 1-32 commands");
+          }
+          const results = [];
+          for (const cmd of p.commands) {
+            if (cmd && cmd.action === "batch") {
+              results.push({ ok: false, error: "batch cannot nest" });
+              if (!p.continue_on_error) break;
+              continue;
+            }
+            const r = await this.execute(cmd);
+            results.push(r);
+            if (!r.ok && !p.continue_on_error) break;
+          }
+          return { results, completed: results.length };
+        }
+      },
+      pick: {
+        description: "Turn SCREENSHOT coordinates into a world-space surface point: raycast from the CURRENT camera through normalized image coords (x right 0..1, y DOWN 0..1 \u2014 top-left origin, exactly as you read pixels off a screenshot). ALWAYS pass the screenshot's width/height \u2014 screenshots can have a different aspect than the live canvas, and picking with the wrong aspect lands off-target near the edges. Returns {point, normal, objectId} to feed into sculpt/paint. Only valid while the camera is unchanged since that screenshot \u2014 re-pick after any camera move. The agent hand-eye loop: screenshot \u2192 spot the feature at (x,y) \u2192 pick \u2192 sculpt/paint at the returned point.",
+        params: {
+          x: { type: "number", required: true, min: 0, max: 1 },
+          y: { type: "number", required: true, min: 0, max: 1 },
+          width: { type: "number", min: 1 },
+          height: { type: "number", min: 1 }
+        },
+        requiresModel: true,
+        handler: (p) => pick(v, p.x, p.y, p.width, p.height)
+      },
+      raycast: {
+        description: "Raycast from an explicit world-space origin along a direction; returns the first visible surface hit {point, normal, objectId, distance}. Camera-independent alternative to pick.",
+        params: {
+          origin: { type: "array", required: true },
+          direction: { type: "array", required: true }
+        },
+        requiresModel: true,
+        handler: (p) => raycast(v, p.origin, p.direction)
+      },
+      list_objects: {
+        description: "List every object in the scene: id, name, active flag, visibility, opacity, per-object placement transform, source, plus delta flags \u2014 painted (has paint layers), sculpted (geometry edited by sculpt/bakes), modified (the union: any unexported work) \u2014 a precise audit trail without a screenshot. Object ids are the handles for all set_object_*/remove_object commands.",
+        handler: () => ({ objects: v.listObjects(), activeObjectId: v._activeObjectId })
+      },
+      set_active_object: {
+        description: "Make an object ACTIVE: all single-object commands (describe_scene, get_mesh_stats, transforms, focus, animation) target the active object. The scene keeps rendering all visible objects. Returns just {activeObjectId} \u2014 use list_objects for the full roster.",
+        params: { id: { type: "number", required: true } },
+        requiresModel: true,
+        handler: (p) => {
+          v.setActiveObject(p.id);
+          return { activeObjectId: p.id };
+        }
+      },
+      remove_object: {
+        description: "Remove ONE object from the scene (disposes its GPU resources). If it was active, the most recently added remaining object becomes active. Returns just {removed} \u2014 use list_objects for the roster.",
+        params: { id: { type: "number", required: true } },
+        requiresModel: true,
+        handler: (p) => {
+          v.removeObject(p.id);
+          return { removed: p.id };
+        }
+      },
+      // --- articulation (backlog 046) ---
+      detect_parts: {
+        description: "Find candidate articulation parts of the ACTIVE object. Strategy: the asset's own mesh partition first, then material groups, then welded connected components. HONESTY: image-to-3D outputs are usually ONE fused component \u2014 finding nothing (or only SOME parts, e.g. two of four wheels) is NORMAL; verify candidates with focus + screenshot before splitting. Returns {parts:[{partId, kind, triangles, center, size, suggestedPivot}], partitionId} \u2014 pass partitionId to split_object (parts go stale when geometry changes). When parts.length <= 1, articulation needs split_object with a plane cut.",
+        requiresModel: true,
+        handler: () => detectParts(v)
+      },
+      split_object: {
+        description: "Extract part(s) of the ACTIVE object into a NEW scene object \u2014 the articulation knife. Selection: parts:[partId,...] + partitionId (from detect_parts) OR a plane cut: {axis:'x'|'y'|'z', at:<world coordinate>, side:'+'|'-'} (side picks WHICH half is extracted, default '+' \u2014 cutting a LEFT wing needs side:'-') / {plane:{point,normal}} (oblique; the +normal side is extracted). Plane cuts classify whole triangles; CUT FACES ARE HOLLOW (capping would invent wrong UVs) \u2014 keep articulation sweeps \u227230\xB0 or orient cuts away from camera. Returns {created:[{objectId, suggestedPivot, ...}], remaining, openEdgesAdded} \u2014 suggestedPivot is the cut centroid: set_pivot there, set_parent, then rotate. The NEW part becomes active; keep_active:true keeps the SOURCE active instead (split\u2192split sequences in one batch). Painted materials are deep-copied (budget charged). Refuses skinned/animated/instanced objects. After a split: old mesh ids + partIds are void; reset restores the SPLIT state.",
+        params: {
+          parts: { type: "array" },
+          partitionId: { type: "number" },
+          plane: { type: "object" },
+          axis: { type: "string", enum: ["x", "y", "z"] },
+          at: { type: "number" },
+          side: { type: "string", enum: ["+", "-"] },
+          name: { type: "string" },
+          keep_active: { type: "boolean", default: false }
+        },
+        requiresModel: true,
+        handler: (p) => splitObject(v, p)
+      },
+      set_parent: {
+        description: "Build an articulation hierarchy: parent one object under another (or null to unparent). keepWorld (default true) preserves the world pose. After parenting, set/get_object_transform are PARENT-relative (unchanged for unparented objects); get_object_transform returns BOTH local and world. Rotating the parent moves the whole subtree \u2014 chain base->shoulder->forearm->gripper for a robot arm. Cycles and non-uniformly-scaled ancestors are refused with the reason.",
+        params: {
+          id: { type: "number", required: true },
+          parent_id: { type: "number" },
+          keep_world: { type: "boolean", default: true }
+        },
+        requiresModel: true,
+        handler: (p) => v.setParent(p.id, p.parent_id !== void 0 ? p.parent_id : null, p.keep_world)
+      },
+      set_pivot: {
+        description: "Set an object's rotation ORIGIN (world point \u2014 from split_object's suggestedPivot, pick, or raycast). Never moves the object; afterwards `rotation` in set_object_transform AND keyframes swings about this pivot (wing root, elbow, neck base). Pivot is authored data: persisted in manifests, not cleared by reset.",
+        params: {
+          id: { type: "number", required: true },
+          point: { type: "array", required: true }
+        },
+        requiresModel: true,
+        handler: (p) => v.setPivot(p.id, p.point)
+      },
+      // --- mesh/texture inspection + repair (backlog 046) ---
+      inspect_region: {
+        description: "Measure mesh density WHERE IT MATTERS \u2014 the observation for adaptive simplification. Probe mode {center, radius|radius_rel}: {triangles, surfaceArea, triPerUnit2, edgeLength{min,median,p95}, dihedralMeanDeg, openEdges}. Grid mode {grid:2..5}: N\xB3 cells over the object, sorted by simplification OPPORTUNITY (flat \xD7 dense = detail unjustified by curvature), each with center+radius ready to feed simplify_region. Decision rule: high triPerUnit2 + low dihedralMeanDeg = over-dense for what it represents.",
+        params: {
+          center: { type: "array" },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          grid: { type: "number", min: 2, max: 5 }
+        },
+        requiresModel: true,
+        handler: (p) => inspectRegion(v, p)
+      },
+      simplify_region: {
+        description: "Decimate ONLY a brush region of the ACTIVE object \u2014 adaptive resolution by agent judgment (dense where detail matters, coarse where it doesn't). ratio = fraction of region vertices to KEEP (0.25 \u2248 4\xD7 coarser). The region boundary ring is LOCKED (no cracks) and UV-seam welds are locked (no seam tears) \u2014 hard-edged/seam-dense regions decimate less than requested; read achievedRatio. Returns quantified before/after so no verification render is needed. Region cap 50k vertices. NOTE: geometry is REPLACED \u2014 reset baseline moves (earlier sculpt edits become permanent).",
+        params: {
+          center: { type: "array", required: true },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          ratio: { type: "number", required: true, min: 0.05, max: 0.9 }
+        },
+        requiresModel: true,
+        handler: (p) => simplifyRegion(v, p)
+      },
+      fix_mesh: {
+        description: "Targeted repair passes on the ACTIVE object. operations (default ['degenerate','normals']): degenerate = drop zero-area/collapsed triangles; normals = recompute vertex normals; flipped_faces = OPT-IN per-MESH winding reversal (only decidable on closed meshes with negative signed volume \u2014 per-face flip detection is unreliable and not offered). Returns per-op counts + issue deltas {openEdges, degenerate} so no re-describe is needed.",
+        params: { operations: { type: "array" } },
+        requiresModel: true,
+        handler: (p) => fixMesh(v, p)
+      },
+      inspect_texture: {
+        description: "Per-material texture audit of the ACTIVE object: resolution + colorSpace, painted flag, texel DENSITY (texels per world unit, area-weighted p5/median/p95) and the lowest-density world spots (feed to focus/paint \u2014 'too low-res HERE'). Stamp fidelity rule: a paint stamp holds detail when radius \xD7 median density >> 8 texels. zeroUvArea counts triangles with broken/projected UVs.",
+        requiresModel: true,
+        handler: () => inspectTexture(v)
+      },
+      blur_paint: {
+        description: "Soften/defect-smooth the texture inside a world-space brush (Gaussian, masked to the brush footprint \u2014 atlas neighbors never bleed in). strength 0..1 controls blend and kernel size. Requires a READABLE texture (KTX2/GPU-only refuse with the reason). Creates a paint layer from the existing texture on first use.",
+        params: {
+          center: { type: "array", required: true },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          strength: { type: "number", min: 0, max: 1 },
+          texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+          undo_group: { type: "string" }
+        },
+        requiresModel: true,
+        handler: (p) => blurPaint(v, p)
+      },
+      clone_paint: {
+        description: "Heal brush: copy texture from one surface region onto another via WORLD-space correspondence (works across UV islands \u2014 pick a clean `from` area and the defect `to` area on the SAME object). Source and destination must face similar directions (\u226445\xB0, else a teaching error); for LEFT\u2194RIGHT donors (a clean right eye healing a corrupted left) use mirror_paint instead. Returns {cloned, meanAlpha}. The repair workflow: close-up screenshot \u2192 pick the defect \u2192 pick a clean donor area \u2192 clone_paint \u2192 blur_paint the boundary.",
+        params: {
+          from: { type: "array", required: true },
+          to: { type: "array", required: true },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          strength: { type: "number", min: 0, max: 1 },
+          hardness: { type: "number", min: 0, max: 1 },
+          falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+          texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+          undo_group: { type: "string" }
+        },
+        requiresModel: true,
+        handler: (p) => clonePaint(v, p)
+      },
+      undo_paint: {
+        description: "Undo the LAST texture-brush command (paint/paint_stroke/blur_paint/clone_paint/mirror_paint): restores the exact canvas texels it overwrote. ONE slot \u2014 consumed by undo, replaced by each new brush call; not a history. fill_paint/clear_paint are not undoable this way (clear_paint removes layers entirely). Returns {undone, restoredPatches}.",
+        requiresModel: true,
+        handler: () => undoPaint(v)
+      },
+      detect_symmetry: {
+        description: "Find the ACTIVE object's dominant mirror plane (bilateral symmetry): scores the 3 local axis planes + PCA axes through the surface's area centroid by reflecting ~1k deterministic surface samples and measuring distance back to the surface (median + p90, relative to the bbox diagonal) plus normal agreement. Returns the winning plane, per-candidate numbers, and a verdict (strong/moderate/weak); the plane is cached for mirror_paint and invalidated by geometry edits. NOTE: geometric symmetry does not guarantee TEXTURE symmetry \u2014 verify heals with a render.",
+        params: {
+          samples: { type: "number", min: 128, max: 4096 },
+          seed: { type: "number" }
+        },
+        requiresModel: true,
+        handler: (p) => detectSymmetry(v, p)
+      },
+      mirror_paint: {
+        description: `Heal a texture region from its MIRROR counterpart across the object's symmetry plane (the donor clone_paint's \u226445\xB0 same-orientation cone correctly refuses): each destination texel samples the surface at its reflected position \u2014 content arrives naturally mirrored (a clean right eye heals the left eye anatomically). Auto-runs detect_symmetry when no fresh plane is cached; refuses on a weak verdict unless plane:"x"|"y"|"z" (+ optional plane_origin, local coords) overrides \u2014 explicit overrides are SCORED and warned when weak or disagreeing with the detected winner. Heals within ONE mesh's texture; oversized brushes error at a work budget (heal in passes). Returns {healed, meanAlpha, skipped:{noSource,normalReject}, selfSourceFraction} \u2014 selfSourceFraction is the share of texels whose mirror source lands back INSIDE the brush (self-copy; >0.4 notes that the brush straddles the plane and little will visibly change). undo_paint reverts the last call. Workflow: pick the defect \u2192 mirror_paint {center, radius_rel} \u2192 screenshot to verify; blur_paint the boundary if needed.`,
+        params: {
+          center: { type: "array", required: true },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          strength: { type: "number", min: 0, max: 1 },
+          hardness: { type: "number", min: 0, max: 1 },
+          falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+          plane: { type: "string", enum: ["x", "y", "z"] },
+          plane_origin: { type: "array" },
+          texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+          undo_group: { type: "string" }
+        },
+        requiresModel: true,
+        handler: (p) => mirrorPaint(v, p)
+      },
+      render_texture: {
+        description: "SEE the ACTIVE object's texture in TEXTURE SPACE: the texture image with the UV wireframe overlaid (green \u2014 where the mesh actually samples), optional crosshair markers at given UVs, an orange OUTLINE of the UV island containing outline_island_of, and an optional zoom crop (crop_center + crop_size in UV units \u2014 the measurement view for tiny charts). THE diagnostic for texture-to-mesh misalignment: pick a 3D feature (pick returns .uv), then render with markers + outline_island_of at that uv. Returns a PNG data URL (over MCP use the get_texture tool \u2014 this exceeds viewer_execute's truncation cap).",
+        params: {
+          size: { type: "number", min: 128, max: 2048 },
+          wireframe: { type: "boolean", default: true },
+          marker: { type: "array" },
+          markers: { type: "array" },
+          marker_size: { type: "number", min: 4, max: 60 },
+          labels: { type: "boolean", default: true },
+          outline_island_of: { type: "array" },
+          crop_center: { type: "array" },
+          crop_size: { type: "number", min: 0.02, max: 1 }
+        },
+        requiresModel: true,
+        handler: (p) => renderTexture(v, p)
+      },
+      transform_uv: {
+        description: "REPAIR texture-to-mesh misalignment by transforming UV coordinates: uv' = pivot + (uv \u2212 pivot)\xB7scale + offset. island_of: [u,v] scopes the transform to ONE UV chart (the island containing that uv) \u2014 fragmented atlases (generated meshes) have PER-CHART warps no global affine can fix: move only the offending chart (eyes chart +v) without dragging every other chart into its neighbors (the bleed trade-off). ALWAYS dry-run with preview_uv_transform first (bleed/out-of-bounds fractions). Workflow: pick the 3D feature (.uv) \u2192 get_texture {markers, outline_island_of} \u2192 preview_uv_transform \u2192 transform_uv \u2192 verify. UV edits persist and EXPORT; reset does not undo (reload restores).",
+        params: {
+          offset: { type: "array" },
+          scale: { type: "array" },
+          pivot: { type: "array" },
+          island_of: { type: "array" }
+        },
+        requiresModel: true,
+        handler: (p) => transformUV(v, p)
+      },
+      get_uv_islands: {
+        description: "UV island (chart) statistics of the ACTIVE object \u2014 run BEFORE planning any island-scoped UV repair: {islandCount, largest: [{island, vertices, uvBbox}], at: [{uv, island, vertices}]} for given uvs. A FRAGMENTED atlas (hundreds+ of non-semantic islands \u2014 photogrammetry/generated meshes) means feature\u2260island: island-scoped transform_uv will trade alignment for seam blotches, and the note says to use project_paint instead. `at` answers 'which chart does this pick's uv live in' (two features sharing one island = UV surgery cannot separate them).",
+        params: {
+          max: { type: "number", min: 1, max: 32 },
+          at: { type: "array" }
+        },
+        requiresModel: true,
+        handler: (p) => getUVIslands(v, p)
+      },
+      project_paint: {
+        description: "Texture repair through SCREEN space \u2014 THE fix for misalignment BAKED INTO the texture on fragmented atlases (where texel\u2194feature correspondence exists on the surface but not in UV space). Renders the CURRENT view, then every texel in the world-space brush samples the render at (its screen position + screen_offset) \u2014 content slides across the SURFACE regardless of UV islands: screen_offset [0, +20] moves what you see 20px DOWN the surface (e.g. an iris painted too high). Offsets: screen_offset [dx,dy] in projection pixels (camera-dependent) or surface_offset [right,down] in WORLD units (camera-independent \u2014 same magnitude from any framing; preferred). Workflow: face the feature head-on (preset 'neutral' minimizes baked shading) \u2192 pick the feature center \u2192 project_paint {center, radius, surface_offset} \u2192 fresh screenshot to verify. Occlusion ignored \u2014 use on convex camera-facing regions. Returns {painted, meanAlpha}.",
+        params: {
+          center: { type: "array", required: true },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          screen_offset: { type: "array" },
+          surface_offset: { type: "array" },
+          strength: { type: "number", min: 0, max: 1 },
+          hardness: { type: "number", min: 0, max: 1 },
+          falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+          texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } }
+        },
+        requiresModel: true,
+        handler: (p) => projectPaint(v, p)
+      },
+      preview_uv_transform: {
+        description: "DRY-RUN a transform_uv: for the would-be offset/scale (optionally scoped by island_of), report {clean, bleedFraction, outOfBoundsFraction, verdict} \u2014 the fraction of transformed samples that would land on texels owned by OTHER UV islands (visible contamination) or leave [0,1]\xB2. Replaces probe-render-revert loops: make the alignment-vs-bleed trade-off quantitative BEFORE mutating.",
+        params: {
+          offset: { type: "array" },
+          scale: { type: "array" },
+          pivot: { type: "array" },
+          island_of: { type: "array" }
+        },
+        requiresModel: true,
+        handler: (p) => previewUVTransform(v, p)
+      },
+      explode_view: {
+        description: "EXPLODED VIEW for articulation proofs: offset every object outward from the scene centroid so separate parts read as separate parts (factor 1 \u2248 clearly separated; 0.3 subtle). Returns per-object WORLD displacements and minGapWorld \u2014 the minimum pairwise AABB gap (negative = pairs still overlap, listed in `overlapping`: raise the factor BEFORE spending a screenshot). explode_view {factor: 0} RESTORES exact placements \u2014 always restore before save_scene/export. The proof loop: explode \u2192 check minGapWorld > 0 \u2192 screenshot \u2192 restore.",
+        params: { factor: { type: "number", required: true, min: 0, max: 5 } },
+        requiresModel: true,
+        handler: (p) => v.explodeView(p.factor)
+      },
+      resize_texture: {
+        description: "Re-allocate the ACTIVE object's PAINT layers at a new resolution (64..4096 or tiers low/medium/high/xhigh). filter:'smooth' (default) for quality downscale; 'nearest' preserves crisp square-stamp edges when upscaling. Only paint layers \u2014 authored textures are downsampled at export (export_glb texture_size) instead, non-destructively. Returns budget state.",
+        params: {
+          size: { type: "number", required: true, min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+          filter: { type: "string", enum: ["smooth", "nearest"] }
+        },
+        requiresModel: true,
+        handler: (p) => resizeTexture(v, p)
+      },
+      // --- timeline / keyframe animation (backlog 046) ---
+      set_keyframe: {
+        description: "Key an object's pose at `time` (seconds). Give explicit channels (position [x,y,z], rotation [x,y,z] Euler\xB0 or quaternion, scale) OR capture:true to key the object's CURRENT pose \u2014 the natural loop: pose with set_object_transform/look_at, then capture. With capture, `channels` narrows what gets keyed (e.g. ['rotation'] for a joint \u2014 avoids constant position/scale tracks bloating the export). Values are LOCAL (parent-relative) and rotation swings about the object's pivot. easing (out of this key): linear|step|ease_in|ease_out|ease_in_out. TEACHING: rotation interpolates the SHORT arc \u2014 a note fires when a segment exceeds 120\xB0 (use midpoint keys for full spins: 0/180/360). Setting a key pauses playback.",
+        params: {
+          id: { type: "number", required: true },
+          time: { type: "number", required: true, min: 0 },
+          position: { type: "array" },
+          rotation: { type: "array" },
+          quaternion: { type: "array" },
+          scale: { type: "number" },
+          easing: { type: "string", enum: ["linear", "step", "ease_in", "ease_out", "ease_in_out"] },
+          capture: { type: "boolean", default: false },
+          channels: { type: "array" }
+        },
+        requiresModel: true,
+        handler: (p) => setKeyframe(v, p)
+      },
+      delete_keyframe: {
+        description: "Delete keyframes of an object: at an exact `time`, a whole `channel` (position|rotation|scale), or ALL its keys (omit both).",
+        params: {
+          id: { type: "number", required: true },
+          time: { type: "number", min: 0 },
+          channel: { type: "string", enum: ["position", "rotation", "scale"] }
+        },
+        requiresModel: true,
+        handler: (p) => deleteKeyframe(v, p)
+      },
+      get_timeline: {
+        description: "Compact dump of the scene timeline: duration, playhead, per-object tracks with keys (rotations shown as derived Euler degrees).",
+        handler: () => getTimeline(v)
+      },
+      clear_timeline: {
+        description: "Remove tracks (one object via id, or ALL) and restore each object's pre-animation base placement \u2014 transient poses never leak into manifests/exports.",
+        params: { id: { type: "number" } },
+        handler: (p) => clearTimeline(v, p)
+      },
+      set_timeline: {
+        description: "Set the timeline duration (seconds). Without it, duration = the latest key time.",
+        params: { duration: { type: "number", min: 0.01 } },
+        handler: (p) => setTimelineDuration(v, p)
+      },
+      play_timeline: {
+        description: "Play the scene timeline (loop defaults true). The light/shadow rig is sized ONCE to the swept animation volume. Sculpt/paint/pick refuse while playing (they would bake a transient pose) \u2014 pause first.",
+        params: { loop: { type: "boolean" } },
+        requiresModel: true,
+        handler: (p) => playTimeline(v, p)
+      },
+      pause_timeline: {
+        description: "Pause timeline playback at the current playhead.",
+        handler: () => pauseTimeline(v)
+      },
+      seek_timeline: {
+        description: "Jump the playhead to `time` (seconds) and apply that exact pose \u2014 DETERMINISTIC: seek \u2192 screenshot always captures precisely this frame. The agent motion-verification loop: seek t, small screenshot, repeat (or use the MCP screenshot `times` contact sheet in one call).",
+        params: { time: { type: "number", required: true, min: 0 } },
+        requiresModel: true,
+        handler: (p) => seekTimeline(v, p)
+      },
+      clone_object: {
+        description: "Duplicate an object as a NEW scene object \u2014 the only duplication path that keeps sculpt/paint deltas (re-running add_primitive loses them). Geometry is deep-copied (sculpting the clone never displaces the original) and paint layers are cloned canvases (painting one never repaints the other; the paint texel budget is charged for the copy). transform (same shape as add_model) places the clone; without it the clone sits exactly on the original. Not supported for skinned models.",
+        params: {
+          id: { type: "number", required: true },
+          name: { type: "string" },
+          transform: { type: "object" }
+        },
+        requiresModel: true,
+        handler: (p) => v.cloneObject(p.id, { name: p.name, transform: p.transform })
+      },
+      ground_object: {
+        description: "Drop ONE object so it rests on the scene floor (world Y=0) \u2014 a PLACEMENT move (wrapper), never a vertex bake: works on skinned models, works after rotation, undoable via set_object_transform. Contrast: `ground` BAKES the active object's vertices in its local frame \u2014 use ground_object for scene composition. Returns {position, bounds}.",
+        params: { id: { type: "number", required: true } },
+        requiresModel: true,
+        handler: (p) => v.groundObject(p.id)
+      },
+      place_object: {
+        description: "Move object `id` so its bounding box rests against object `relative_to`'s box face \u2014 numbers-first relative placement with no hand arithmetic. side: WORLD-axis face of the target to attach to (+y = on top of, -y = below, +x/-x/+z/-z = beside; NEVER 'left/right' \u2014 world axes are unambiguous). gap: extra spacing along that axis. align: how the two cross axes line up (center|min|max). offset [x,y,z]: applied last \u2014 the escape hatch for deliberate overlaps (e.g. seating a sphere INTO snow). Returns {position, bounds}.",
+        params: {
+          id: { type: "number", required: true },
+          relative_to: { type: "number", required: true },
+          side: { type: "string", default: "+y", enum: ["+x", "-x", "+y", "-y", "+z", "-z"] },
+          gap: { type: "number", default: 0 },
+          align: { type: "string", default: "center", enum: ["center", "min", "max"] },
+          offset: { type: "array" }
+        },
+        requiresModel: true,
+        handler: (p) => v.placeObject(p.id, {
+          relativeTo: p.relative_to,
+          side: p.side,
+          gap: p.gap,
+          align: p.align,
+          offset: p.offset
+        })
+      },
+      look_at: {
+        description: "Rotate an object so a chosen LOCAL axis points at a world target or another object's center \u2014 aiming without direction-vector trig. Exactly ONE of target:[x,y,z] or target_id. axis = which local axis aims (default [0,0,1] = +Z 'forward'; cone/cylinder/capsule primitives are +Y-axial \u2014 pass axis:[0,1,0] to aim the tip). REPLACES the object's rotation. Returns {quaternion, rotation} (Euler degrees) \u2014 reuse the rotation for keyframes.",
+        params: {
+          id: { type: "number", required: true },
+          target: { type: "array" },
+          target_id: { type: "number" },
+          axis: { type: "array" }
+        },
+        requiresModel: true,
+        handler: (p) => v.lookAtObject(p.id, {
+          target: p.target,
+          targetId: p.target_id,
+          axis: p.axis || [0, 0, 1]
+        })
+      },
+      set_object_visible: {
+        description: "Show/hide one object (it stays in the scene and in manifests).",
+        params: {
+          id: { type: "number", required: true },
+          visible: { type: "boolean", required: true }
+        },
+        requiresModel: true,
+        handler: (p) => {
+          v.setObjectVisible(p.id, p.visible);
+          return true;
+        }
+      },
+      set_object_opacity: {
+        description: "Per-object opacity (0..1; 1 = opaque). Viewer display state only \u2014 ghosting for overlays/comparisons; exports keep the authored materials.",
+        params: {
+          id: { type: "number", required: true },
+          opacity: { type: "number", required: true, min: 0, max: 1 }
+        },
+        requiresModel: true,
+        handler: (p) => {
+          v.setObjectOpacity(p.id, p.opacity);
+          return true;
+        }
+      },
+      set_object_transform: {
+        description: "Place an object in the scene: set its LOGICAL transform (NEVER baked into vertices \u2014 placement lives in the scene/manifest, not the asset). position [x,y,z]; quaternion [x,y,z,w] OR rotation [x,y,z] Euler degrees (about the object's PIVOT when one is set); scale [x,y,z] or uniform number. Omitted parts are unchanged. PARENT-relative once parented (= world when unparented). Returns the resulting transform. NOTE: on a keyframed object this pose is overwritten at the next seek/play \u2014 use set_keyframe.",
+        params: {
+          id: { type: "number", required: true },
+          position: { type: "array" },
+          quaternion: { type: "array" },
+          rotation: { type: "array" },
+          scale: { type: "number" },
+          scale_xyz: { type: "array" }
+        },
+        requiresModel: true,
+        handler: (p) => {
+          const result = v.setObjectTransform(p.id, {
+            position: p.position,
+            quaternion: p.quaternion,
+            rotation: p.rotation,
+            scale: p.scale_xyz !== void 0 ? p.scale_xyz : p.scale
+          });
+          if (v._timeline && v._timeline.tracks.has(p.id)) {
+            result.note = "object has keyframed channels \u2014 this change is overwritten at the next seek/play; use set_keyframe (capture:true) to keep it.";
+          }
+          return result;
+        }
+      },
+      get_object_transform: {
+        description: "Read an object's placement: LOCAL {position, quaternion, scale} (parent-relative \u2014 what set_object_transform/keyframes write) plus world:{position, quaternion} (what renders show), pivot and parentId when set.",
+        params: { id: { type: "number", required: true } },
+        requiresModel: true,
+        handler: (p) => v.getObjectTransform(p.id)
+      },
+      reset_object_transform: {
+        description: "Reset an object's placement to identity (undo scene positioning; the asset's geometry is untouched).",
+        params: { id: { type: "number", required: true } },
+        requiresModel: true,
+        handler: (p) => v.resetObjectTransform(p.id)
+      },
+      frame_all: {
+        description: "Frame the WHOLE composed scene (union of all visible objects). Camera presets/orbit/frame target the ACTIVE object; use this before scene-wide screenshots.",
+        requiresModel: true,
+        handler: () => v.frameAll()
+      },
+      get_scene_manifest: {
+        description: "Serializable scene manifest (version 1): per-object source + placement transform + visibility/opacity, plus scene lighting/environment/background. Objects with volatile sources (drag-drops) are excluded and listed in skippedVolatile. Save it as a .mvscene file; rebuild with load + add_model or the app/MCP scene loaders.",
+        requiresModel: true,
+        handler: () => v.getSceneManifest()
+      },
+      // --- camera ---
+      get_camera: {
+        description: "Return camera position, target, fov, mode, and available presets.",
+        handler: () => v.getState().camera
+      },
+      set_camera: {
+        description: "Set the camera to an explicit position and look-at target (world coords), optionally with a field of view (degrees). Mirrors get_camera, so a pose can be captured in one session and reproduced in another.",
+        params: {
+          position: { type: "array", required: true },
+          target: { type: "array" },
+          fov: { type: "number", min: 1, max: 179 }
+        },
+        requiresModel: false,
+        handler: (p) => {
+          if (p.position.length !== 3) throw new Error("position must be [x,y,z]");
+          if (p.target && p.target.length !== 3) throw new Error("target must be [x,y,z]");
+          return v.setCamera(p.position, p.target, p.fov);
+        }
+      },
+      set_view: {
+        description: "Point the camera at a preset around the model. `fill` (0-1, higher = tighter framing) controls how much of the frame the model occupies. scope:'scene' frames the WHOLE visible scene instead of the active object (multi-object tableaus).",
+        params: {
+          preset: { type: "string", required: true, enum: ["front", "back", "left", "right", "top", "bottom", "iso"] },
+          fill: { type: "number", min: 0.1, max: 1 },
+          scope: { type: "string", enum: ["object", "scene"] }
+        },
+        requiresModel: true,
+        handler: (p) => v.setCameraView(p.preset, { fill: p.fill, scope: p.scope })
+      },
+      orbit: {
+        description: "Orbit the camera to spherical angles around the model and frame it. azimuth: degrees around Y (0 = front); elevation: degrees above horizon. scope:'scene' orbits/frames the WHOLE visible scene instead of the active object \u2014 use it to compose multi-object shots from any angle (frame_all only keeps the current direction).",
+        params: {
+          azimuth: { type: "number", required: true },
+          elevation: { type: "number", default: 15 },
+          fill: { type: "number", min: 0.1, max: 1 },
+          scope: { type: "string", enum: ["object", "scene"] }
+        },
+        requiresModel: true,
+        handler: (p) => v.orbitTo(p.azimuth, p.elevation, { fill: p.fill, scope: p.scope })
+      },
+      frame: {
+        description: "Frame the model. Keeps the current view direction by default (keep_direction:false for an iso fit). `fill` (0-1) sets tightness.",
+        params: {
+          fill: { type: "number", min: 0.1, max: 1 },
+          keep_direction: { type: "boolean", default: true }
+        },
+        requiresModel: true,
+        handler: (p) => v.frameView({ fill: p.fill, keepDirection: p.keep_direction })
+      },
+      get_lighting: {
+        description: "Return the current studio lighting: key light azimuth/elevation (deg), key/fill/ambient intensities, and exposure.",
+        handler: () => v.getLightSettings()
+      },
+      set_lighting: {
+        description: "Adjust the studio lighting (brightness). All params optional. azimuth/elevation in degrees; key_intensity/fill_intensity/ambient are light multipliers; exposure is the tone-mapping exposure (overall brightness). Also in getState().lighting.",
+        params: {
+          azimuth: { type: "number", min: 0, max: 360 },
+          elevation: { type: "number", min: 0, max: 90 },
+          key_intensity: { type: "number", min: 0, max: 10 },
+          fill_intensity: { type: "number", min: 0, max: 10 },
+          ambient: { type: "number", min: 0, max: 10 },
+          exposure: { type: "number", min: 0.1, max: 8 }
+        },
+        handler: (p) => v.setLighting({
+          azimuth: p.azimuth,
+          elevation: p.elevation,
+          key_intensity: p.key_intensity,
+          fill_intensity: p.fill_intensity,
+          ambient: p.ambient,
+          exposure: p.exposure
+        })
+      },
+      reset_camera: {
+        description: "Reset the camera to the initial framed view (orbit mode).",
+        handler: () => {
+          v.resetView();
+          return true;
+        }
+      },
+      set_nav_mode: {
+        description: "Set navigation mode: 'orbit' or 'fpv'.",
+        params: { mode: { type: "string", required: true, enum: ["orbit", "fpv"] } },
+        handler: (p) => {
+          v.setNavMode(p.mode);
+          return true;
+        }
+      },
+      // --- display ---
+      set_wireframe: {
+        description: "Show/hide wireframe overlay.",
+        params: { enabled: { type: "boolean", required: true } },
+        handler: (p) => {
+          v.setWireframe(p.enabled);
+          return true;
+        }
+      },
+      set_grid: {
+        description: "Show/hide the floor grid.",
+        params: { visible: { type: "boolean", required: true } },
+        handler: (p) => {
+          v.setGridVisible(p.visible);
+          return true;
+        }
+      },
+      set_axes: {
+        description: "Show/hide the XYZ axes helper.",
+        params: { visible: { type: "boolean", required: true } },
+        handler: (p) => {
+          v.setAxisVisible(p.visible);
+          return true;
+        }
+      },
+      set_normals: {
+        description: "Show/hide vertex-normals visualization (little lines per vertex).",
+        params: { visible: { type: "boolean", required: true } },
+        handler: (p) => {
+          v.setNormalsVisible(p.visible);
+          return true;
+        }
+      },
+      set_render_mode: {
+        description: "How the model is drawn: 'textured' (mesh + texture, the lit PBR surface \u2014 default), 'solid' (the mesh only, uniform matte, no texture), or 'wireframe' (edges/topology only). Also accepts 'normals' (per-face normal colors) for geometry inspection. Aliases: 'shaded'=textured, 'clay'=solid.",
+        params: { mode: { type: "string", required: true, enum: ["textured", "solid", "wireframe", "normals", "shaded", "clay"] } },
+        requiresModel: true,
+        handler: (p) => v.setRenderMode(p.mode)
+      },
+      set_clip: {
+        description: "Cutting plane \u2014 hide part of the mesh on one side of a plane, e.g. to see only the front geometry and cut away what's behind, or make a cross-section. axis 'camera' cuts relative to the current view (near side kept); 'x'/'y'/'z' cut along model axes. position 0..1 across the model; flip keeps the other side. Set enabled:false to clear.",
+        params: {
+          enabled: { type: "boolean", required: true },
+          axis: { type: "string", enum: ["x", "y", "z", "camera"], default: "camera" },
+          position: { type: "number", min: 0, max: 1, default: 0.5 },
+          flip: { type: "boolean", default: false }
+        },
+        requiresModel: true,
+        handler: (p) => v.setClip({ enabled: p.enabled, axis: p.axis, position: p.position, flip: p.flip })
+      },
+      set_fog: {
+        description: "Enable/disable exponential scene fog and set its density (fog is off in hero captures by default).",
+        params: {
+          enabled: { type: "boolean", required: true },
+          density: { type: "number", min: 0, max: 1 }
+        },
+        handler: (p) => v.setFog({ enabled: p.enabled, density: p.density })
+      },
+      set_environment: {
+        description: "Control image-based lighting (IBL): environment reflections on PBR materials. enabled on/off; intensity multiplier; asBackground shows the environment as the scene background. On by default for realistic metal/rough shading.",
+        params: {
+          enabled: { type: "boolean" },
+          intensity: { type: "number", min: 0, max: 5 },
+          asBackground: { type: "boolean" }
+        },
+        handler: (p) => v.setEnvironment({ enabled: p.enabled, intensity: p.intensity, asBackground: p.asBackground })
+      },
+      get_environment: {
+        description: "Return the current IBL/environment settings { enabled, intensity, asBackground }.",
+        handler: () => v.getEnvironment()
+      },
+      set_background: {
+        description: "Set the background color (CSS hex, e.g. #202030).",
+        params: { color: { type: "string", required: true } },
+        handler: (p) => {
+          v.setBackground(p.color);
+          return true;
+        }
+      },
+      set_scale: {
+        description: "Set the uniform model scale.",
+        params: { scale: { type: "number", required: true, min: 1e-3, max: 1e3 } },
+        requiresModel: true,
+        handler: (p) => {
+          v.setModelScale(p.scale);
+          return true;
+        }
+      },
+      // --- transforms ---
+      center: { description: "Center the model's centroid at the origin.", requiresModel: true, handler: () => {
+        v.recenterModel();
+        return true;
+      } },
+      ground: { description: "Drop the model so its lowest point sits on Y=0.", requiresModel: true, handler: () => {
+        v.groundModel();
+        return true;
+      } },
+      auto_orient: { description: "Auto-orient the model via PCA (smallest axis \u2192 up).", requiresModel: true, handler: () => {
+        v.autoOrientModel();
+        return true;
+      } },
+      rotate: {
+        description: "Rotate the model by an angle (degrees) around an axis.",
+        params: {
+          axis: { type: "string", required: true, enum: ["x", "y", "z"] },
+          degrees: { type: "number", required: true }
+        },
+        requiresModel: true,
+        handler: (p) => {
+          v.rotateModel(p.axis, p.degrees);
+          return true;
+        }
+      },
+      simplify: {
+        description: "Simplify the mesh to a fraction of its vertices (0-1). Returns {before, after} vertex counts.",
+        params: { ratio: { type: "number", required: true, min: 0.01, max: 1 } },
+        requiresModel: true,
+        handler: async (p) => {
+          const r = await v.simplifyModel(p.ratio);
+          return r;
+        }
+      },
+      recompute_normals: { description: "Merge vertices and recompute smooth normals.", requiresModel: true, handler: () => {
+        v.recomputeNormals();
+        return true;
+      } },
+      reset: { description: "Undo all transforms (restore original geometry).", requiresModel: true, handler: () => {
+        v.resetModel();
+        return true;
+      } },
+      // --- animation ---
+      play_animation: {
+        description: "Play the animation clip at the given index.",
+        params: { index: { type: "number", default: 0, min: 0 } },
+        requiresModel: true,
+        handler: (p) => {
+          if (!v.hasAnimations()) throw new Error("Model has no animation clips");
+          v.playAnimation(p.index);
+          return true;
+        }
+      },
+      pause_animation: { description: "Pause the active animation.", requiresModel: true, handler: () => {
+        v.setAnimationPlaying(false);
+        return true;
+      } },
+      set_animation_time: {
+        description: "Seek the active animation to a time (seconds).",
+        params: { seconds: { type: "number", required: true, min: 0 } },
+        requiresModel: true,
+        handler: (p) => {
+          if (!v.hasAnimations()) throw new Error("Model has no animation clips");
+          v.setAnimationTime(p.seconds);
+          return true;
+        }
+      },
+      set_animation_speed: {
+        description: "Set animation playback speed multiplier.",
+        params: { multiplier: { type: "number", required: true, min: 0 } },
+        requiresModel: true,
+        handler: (p) => {
+          v.setAnimationSpeed(p.multiplier);
+          return true;
+        }
+      },
+      // --- measurement ---
+      measure: {
+        description: "Measure the distance between two world-space points; draws the line.",
+        params: {
+          a: { type: "array", required: true },
+          b: { type: "array", required: true }
+        },
+        requiresModel: true,
+        handler: (p) => {
+          if (p.a.length !== 3 || p.b.length !== 3) throw new Error("a and b must be [x,y,z]");
+          return { distance: v.measureBetween(p.a, p.b) };
+        }
+      },
+      set_measure_mode: {
+        description: "Enable/disable interactive click-to-measure mode. Disabling also clears any measurement overlay.",
+        params: { enabled: { type: "boolean", required: true } },
+        handler: (p) => {
+          const cur = !!v._measureMode;
+          if (cur !== p.enabled) v.toggleMeasureMode();
+          if (!p.enabled) v._clearMeasurement();
+          return v._measureMode;
+        }
+      },
+      clear_measurement: {
+        description: "Remove the measurement markers/line/label from the scene (e.g. before a clean screenshot).",
+        handler: () => {
+          v._clearMeasurement();
+          return true;
+        }
+      },
+      // --- export ---
+      export_obj: { description: "Export the model as OBJ text.", requiresModel: true, handler: () => v.exportAsOBJ() },
+      export_glb: {
+        description: "Export the visible scene as a GLB (binary glTF); returns a base64 data URL. Bakes sculpted geometry AND painted textures. When the timeline has tracks (or animation:true), exports glTF ANIMATIONS too (30 fps resampled; pivots composed \u2014 an off-origin rotation legitimately exports an arced position track; hierarchy preserved). texture_size (number or low/medium/high/xhigh) caps texture resolution on write \u2014 the non-destructive LoD path for authored textures. Over MCP use the export_model tool (this data URL exceeds viewer_execute's truncation cap).",
+        params: {
+          animation: { type: "boolean" },
+          texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } }
+        },
+        requiresModel: true,
+        handler: async (p) => {
+          const buf = await v.exportAsGLB({
+            animation: p.animation,
+            maxTextureSize: p.texture_size
+          });
+          if (!buf) return null;
+          const bytes = new Uint8Array(buf);
+          let bin = "";
+          for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+          return "data:model/gltf-binary;base64," + btoa(bin);
+        }
+      }
+    };
+  }
+};
+
 // frontend/js/export_panel.js
 var ExportPanel = class {
   /**
@@ -49225,3715 +58777,6 @@ var Thumbnailer = class _Thumbnailer {
     });
   }
 };
-
-// frontend/js/viewer/sample_points.js
-var MAX_POINTS = 2e4;
-function mulberry32(seed) {
-  let a = seed >>> 0;
-  return function() {
-    a |= 0;
-    a = a + 1831565813 | 0;
-    let t2 = Math.imul(a ^ a >>> 15, 1 | a);
-    t2 = t2 + Math.imul(t2 ^ t2 >>> 7, 61 | t2) ^ t2;
-    return ((t2 ^ t2 >>> 14) >>> 0) / 4294967296;
-  };
-}
-function samplePoints(viewer, opts = {}) {
-  if (!viewer._currentModel) return { error: "No model loaded" };
-  const count = Math.max(16, Math.min(MAX_POINTS, opts.count || 4096));
-  const rand = mulberry32(opts.seed !== void 0 ? opts.seed : 42);
-  const model = viewer._currentModel;
-  model.updateMatrixWorld(true);
-  const tris = [];
-  const cumArea = [];
-  let total = 0;
-  const a = new Vector3(), b = new Vector3(), c = new Vector3();
-  model.traverse((child) => {
-    if (!child.isMesh || !child.geometry) return;
-    const pos = child.geometry.getAttribute("position");
-    if (!pos) return;
-    const idx = child.geometry.getIndex();
-    const triCount = Math.floor((idx ? idx.count : pos.count) / 3);
-    const mw = child.matrixWorld;
-    const vi = (t2, k) => idx ? idx.getX(t2 * 3 + k) : t2 * 3 + k;
-    for (let t2 = 0; t2 < triCount; t2++) {
-      a.fromBufferAttribute(pos, vi(t2, 0)).applyMatrix4(mw);
-      b.fromBufferAttribute(pos, vi(t2, 1)).applyMatrix4(mw);
-      c.fromBufferAttribute(pos, vi(t2, 2)).applyMatrix4(mw);
-      const area2 = triArea(a, b, c);
-      if (!(area2 > 0) || !Number.isFinite(area2)) continue;
-      total += area2;
-      tris.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
-      cumArea.push(total);
-    }
-  });
-  if (cumArea.length === 0) return { error: "Model has no sampleable surface" };
-  const bbox = new Box3().setFromObject(model);
-  const span = bbox.getSize(new Vector3()).length() || 1;
-  const roundP = Math.max(3, Math.min(9, Math.ceil(-Math.log10(span * 1e-6))));
-  const rnd = (v) => Number(v.toFixed(roundP));
-  const points = new Array(count);
-  for (let i = 0; i < count; i++) {
-    const r = rand() * total;
-    let lo = 0, hi = cumArea.length - 1;
-    while (lo < hi) {
-      const mid = lo + hi >> 1;
-      if (cumArea[mid] < r) lo = mid + 1;
-      else hi = mid;
-    }
-    const o = lo * 9;
-    const su = Math.sqrt(rand());
-    const v = rand();
-    const w0 = 1 - su, w1 = su * (1 - v), w2 = su * v;
-    points[i] = [
-      rnd(w0 * tris[o] + w1 * tris[o + 3] + w2 * tris[o + 6]),
-      rnd(w0 * tris[o + 1] + w1 * tris[o + 4] + w2 * tris[o + 7]),
-      rnd(w0 * tris[o + 2] + w1 * tris[o + 5] + w2 * tris[o + 8])
-    ];
-  }
-  return {
-    count,
-    seed: opts.seed !== void 0 ? opts.seed : 42,
-    surfaceArea: Number(total.toPrecision(5)),
-    points
-  };
-}
-var _ab3 = new Vector3();
-var _ac = new Vector3();
-var _cr = new Vector3();
-function triArea(a, b, c) {
-  _ab3.subVectors(b, a);
-  _ac.subVectors(c, a);
-  return _cr.crossVectors(_ab3, _ac).length() / 2;
-}
-
-// node_modules/three-mesh-bvh/src/core/Constants.js
-var CENTER = 0;
-var AVERAGE = 1;
-var SAH = 2;
-var CONTAINED = 2;
-var TRIANGLE_INTERSECT_COST = 1.25;
-var TRAVERSAL_COST = 1;
-var BYTES_PER_NODE = 6 * 4 + 4 + 4;
-var IS_LEAFNODE_FLAG = 65535;
-var FLOAT32_EPSILON = Math.pow(2, -24);
-var SKIP_GENERATION = Symbol("SKIP_GENERATION");
-
-// node_modules/three-mesh-bvh/src/core/build/geometryUtils.js
-function getVertexCount(geo) {
-  return geo.index ? geo.index.count : geo.attributes.position.count;
-}
-function getTriCount(geo) {
-  return getVertexCount(geo) / 3;
-}
-function getIndexArray(vertexCount, BufferConstructor = ArrayBuffer) {
-  if (vertexCount > 65535) {
-    return new Uint32Array(new BufferConstructor(4 * vertexCount));
-  } else {
-    return new Uint16Array(new BufferConstructor(2 * vertexCount));
-  }
-}
-function ensureIndex(geo, options) {
-  if (!geo.index) {
-    const vertexCount = geo.attributes.position.count;
-    const BufferConstructor = options.useSharedArrayBuffer ? SharedArrayBuffer : ArrayBuffer;
-    const index = getIndexArray(vertexCount, BufferConstructor);
-    geo.setIndex(new BufferAttribute(index, 1));
-    for (let i = 0; i < vertexCount; i++) {
-      index[i] = i;
-    }
-  }
-}
-function getFullGeometryRange(geo, range) {
-  const triCount = getTriCount(geo);
-  const drawRange = range ? range : geo.drawRange;
-  const start = drawRange.start / 3;
-  const end = (drawRange.start + drawRange.count) / 3;
-  const offset = Math.max(0, start);
-  const count = Math.min(triCount, end) - offset;
-  return [{
-    offset: Math.floor(offset),
-    count: Math.floor(count)
-  }];
-}
-function getRootIndexRanges(geo, range) {
-  if (!geo.groups || !geo.groups.length) {
-    return getFullGeometryRange(geo, range);
-  }
-  const ranges = [];
-  const rangeBoundaries = /* @__PURE__ */ new Set();
-  const drawRange = range ? range : geo.drawRange;
-  const drawRangeStart = drawRange.start / 3;
-  const drawRangeEnd = (drawRange.start + drawRange.count) / 3;
-  for (const group of geo.groups) {
-    const groupStart = group.start / 3;
-    const groupEnd = (group.start + group.count) / 3;
-    rangeBoundaries.add(Math.max(drawRangeStart, groupStart));
-    rangeBoundaries.add(Math.min(drawRangeEnd, groupEnd));
-  }
-  const sortedBoundaries = Array.from(rangeBoundaries.values()).sort((a, b) => a - b);
-  for (let i = 0; i < sortedBoundaries.length - 1; i++) {
-    const start = sortedBoundaries[i];
-    const end = sortedBoundaries[i + 1];
-    ranges.push({
-      offset: Math.floor(start),
-      count: Math.floor(end - start)
-    });
-  }
-  return ranges;
-}
-function hasGroupGaps(geometry, range) {
-  const vertexCount = getTriCount(geometry);
-  const groups = getRootIndexRanges(geometry, range).sort((a, b) => a.offset - b.offset);
-  const finalGroup = groups[groups.length - 1];
-  finalGroup.count = Math.min(vertexCount - finalGroup.offset, finalGroup.count);
-  let total = 0;
-  groups.forEach(({ count }) => total += count);
-  return vertexCount !== total;
-}
-
-// node_modules/three-mesh-bvh/src/core/build/computeBoundsUtils.js
-function getBounds(triangleBounds, offset, count, target, centroidTarget) {
-  let minx = Infinity;
-  let miny = Infinity;
-  let minz = Infinity;
-  let maxx = -Infinity;
-  let maxy = -Infinity;
-  let maxz = -Infinity;
-  let cminx = Infinity;
-  let cminy = Infinity;
-  let cminz = Infinity;
-  let cmaxx = -Infinity;
-  let cmaxy = -Infinity;
-  let cmaxz = -Infinity;
-  for (let i = offset * 6, end = (offset + count) * 6; i < end; i += 6) {
-    const cx = triangleBounds[i + 0];
-    const hx = triangleBounds[i + 1];
-    const lx = cx - hx;
-    const rx = cx + hx;
-    if (lx < minx) minx = lx;
-    if (rx > maxx) maxx = rx;
-    if (cx < cminx) cminx = cx;
-    if (cx > cmaxx) cmaxx = cx;
-    const cy = triangleBounds[i + 2];
-    const hy = triangleBounds[i + 3];
-    const ly = cy - hy;
-    const ry = cy + hy;
-    if (ly < miny) miny = ly;
-    if (ry > maxy) maxy = ry;
-    if (cy < cminy) cminy = cy;
-    if (cy > cmaxy) cmaxy = cy;
-    const cz = triangleBounds[i + 4];
-    const hz = triangleBounds[i + 5];
-    const lz = cz - hz;
-    const rz = cz + hz;
-    if (lz < minz) minz = lz;
-    if (rz > maxz) maxz = rz;
-    if (cz < cminz) cminz = cz;
-    if (cz > cmaxz) cmaxz = cz;
-  }
-  target[0] = minx;
-  target[1] = miny;
-  target[2] = minz;
-  target[3] = maxx;
-  target[4] = maxy;
-  target[5] = maxz;
-  centroidTarget[0] = cminx;
-  centroidTarget[1] = cminy;
-  centroidTarget[2] = cminz;
-  centroidTarget[3] = cmaxx;
-  centroidTarget[4] = cmaxy;
-  centroidTarget[5] = cmaxz;
-}
-function computeTriangleBounds(geo, target = null, offset = null, count = null) {
-  const posAttr = geo.attributes.position;
-  const index = geo.index ? geo.index.array : null;
-  const triCount = getTriCount(geo);
-  const normalized = posAttr.normalized;
-  let triangleBounds;
-  if (target === null) {
-    triangleBounds = new Float32Array(triCount * 6 * 4);
-    offset = 0;
-    count = triCount;
-  } else {
-    triangleBounds = target;
-    offset = offset || 0;
-    count = count || triCount;
-  }
-  const posArr = posAttr.array;
-  const bufferOffset = posAttr.offset || 0;
-  let stride = 3;
-  if (posAttr.isInterleavedBufferAttribute) {
-    stride = posAttr.data.stride;
-  }
-  const getters = ["getX", "getY", "getZ"];
-  for (let tri = offset; tri < offset + count; tri++) {
-    const tri3 = tri * 3;
-    const tri6 = tri * 6;
-    let ai = tri3 + 0;
-    let bi = tri3 + 1;
-    let ci = tri3 + 2;
-    if (index) {
-      ai = index[ai];
-      bi = index[bi];
-      ci = index[ci];
-    }
-    if (!normalized) {
-      ai = ai * stride + bufferOffset;
-      bi = bi * stride + bufferOffset;
-      ci = ci * stride + bufferOffset;
-    }
-    for (let el = 0; el < 3; el++) {
-      let a, b, c;
-      if (normalized) {
-        a = posAttr[getters[el]](ai);
-        b = posAttr[getters[el]](bi);
-        c = posAttr[getters[el]](ci);
-      } else {
-        a = posArr[ai + el];
-        b = posArr[bi + el];
-        c = posArr[ci + el];
-      }
-      let min = a;
-      if (b < min) min = b;
-      if (c < min) min = c;
-      let max2 = a;
-      if (b > max2) max2 = b;
-      if (c > max2) max2 = c;
-      const halfExtents = (max2 - min) / 2;
-      const el2 = el * 2;
-      triangleBounds[tri6 + el2 + 0] = min + halfExtents;
-      triangleBounds[tri6 + el2 + 1] = halfExtents + (Math.abs(min) + halfExtents) * FLOAT32_EPSILON;
-    }
-  }
-  return triangleBounds;
-}
-
-// node_modules/three-mesh-bvh/src/utils/ArrayBoxUtilities.js
-function arrayToBox(nodeIndex32, array, target) {
-  target.min.x = array[nodeIndex32];
-  target.min.y = array[nodeIndex32 + 1];
-  target.min.z = array[nodeIndex32 + 2];
-  target.max.x = array[nodeIndex32 + 3];
-  target.max.y = array[nodeIndex32 + 4];
-  target.max.z = array[nodeIndex32 + 5];
-  return target;
-}
-function getLongestEdgeIndex(bounds) {
-  let splitDimIdx = -1;
-  let splitDist = -Infinity;
-  for (let i = 0; i < 3; i++) {
-    const dist = bounds[i + 3] - bounds[i];
-    if (dist > splitDist) {
-      splitDist = dist;
-      splitDimIdx = i;
-    }
-  }
-  return splitDimIdx;
-}
-function copyBounds(source, target) {
-  target.set(source);
-}
-function unionBounds(a, b, target) {
-  let aVal, bVal;
-  for (let d = 0; d < 3; d++) {
-    const d3 = d + 3;
-    aVal = a[d];
-    bVal = b[d];
-    target[d] = aVal < bVal ? aVal : bVal;
-    aVal = a[d3];
-    bVal = b[d3];
-    target[d3] = aVal > bVal ? aVal : bVal;
-  }
-}
-function expandByTriangleBounds(startIndex, triangleBounds, bounds) {
-  for (let d = 0; d < 3; d++) {
-    const tCenter = triangleBounds[startIndex + 2 * d];
-    const tHalf = triangleBounds[startIndex + 2 * d + 1];
-    const tMin = tCenter - tHalf;
-    const tMax = tCenter + tHalf;
-    if (tMin < bounds[d]) {
-      bounds[d] = tMin;
-    }
-    if (tMax > bounds[d + 3]) {
-      bounds[d + 3] = tMax;
-    }
-  }
-}
-function computeSurfaceArea(bounds) {
-  const d0 = bounds[3] - bounds[0];
-  const d1 = bounds[4] - bounds[1];
-  const d2 = bounds[5] - bounds[2];
-  return 2 * (d0 * d1 + d1 * d2 + d2 * d0);
-}
-
-// node_modules/three-mesh-bvh/src/core/build/splitUtils.js
-var BIN_COUNT = 32;
-var binsSort = (a, b) => a.candidate - b.candidate;
-var sahBins = new Array(BIN_COUNT).fill().map(() => {
-  return {
-    count: 0,
-    bounds: new Float32Array(6),
-    rightCacheBounds: new Float32Array(6),
-    leftCacheBounds: new Float32Array(6),
-    candidate: 0
-  };
-});
-var leftBounds = new Float32Array(6);
-function getOptimalSplit(nodeBoundingData, centroidBoundingData, triangleBounds, offset, count, strategy) {
-  let axis = -1;
-  let pos = 0;
-  if (strategy === CENTER) {
-    axis = getLongestEdgeIndex(centroidBoundingData);
-    if (axis !== -1) {
-      pos = (centroidBoundingData[axis] + centroidBoundingData[axis + 3]) / 2;
-    }
-  } else if (strategy === AVERAGE) {
-    axis = getLongestEdgeIndex(nodeBoundingData);
-    if (axis !== -1) {
-      pos = getAverage(triangleBounds, offset, count, axis);
-    }
-  } else if (strategy === SAH) {
-    const rootSurfaceArea = computeSurfaceArea(nodeBoundingData);
-    let bestCost = TRIANGLE_INTERSECT_COST * count;
-    const cStart = offset * 6;
-    const cEnd = (offset + count) * 6;
-    for (let a = 0; a < 3; a++) {
-      const axisLeft = centroidBoundingData[a];
-      const axisRight = centroidBoundingData[a + 3];
-      const axisLength = axisRight - axisLeft;
-      const binWidth = axisLength / BIN_COUNT;
-      if (count < BIN_COUNT / 4) {
-        const truncatedBins = [...sahBins];
-        truncatedBins.length = count;
-        let b = 0;
-        for (let c = cStart; c < cEnd; c += 6, b++) {
-          const bin = truncatedBins[b];
-          bin.candidate = triangleBounds[c + 2 * a];
-          bin.count = 0;
-          const {
-            bounds,
-            leftCacheBounds,
-            rightCacheBounds
-          } = bin;
-          for (let d = 0; d < 3; d++) {
-            rightCacheBounds[d] = Infinity;
-            rightCacheBounds[d + 3] = -Infinity;
-            leftCacheBounds[d] = Infinity;
-            leftCacheBounds[d + 3] = -Infinity;
-            bounds[d] = Infinity;
-            bounds[d + 3] = -Infinity;
-          }
-          expandByTriangleBounds(c, triangleBounds, bounds);
-        }
-        truncatedBins.sort(binsSort);
-        let splitCount = count;
-        for (let bi = 0; bi < splitCount; bi++) {
-          const bin = truncatedBins[bi];
-          while (bi + 1 < splitCount && truncatedBins[bi + 1].candidate === bin.candidate) {
-            truncatedBins.splice(bi + 1, 1);
-            splitCount--;
-          }
-        }
-        for (let c = cStart; c < cEnd; c += 6) {
-          const center = triangleBounds[c + 2 * a];
-          for (let bi = 0; bi < splitCount; bi++) {
-            const bin = truncatedBins[bi];
-            if (center >= bin.candidate) {
-              expandByTriangleBounds(c, triangleBounds, bin.rightCacheBounds);
-            } else {
-              expandByTriangleBounds(c, triangleBounds, bin.leftCacheBounds);
-              bin.count++;
-            }
-          }
-        }
-        for (let bi = 0; bi < splitCount; bi++) {
-          const bin = truncatedBins[bi];
-          const leftCount = bin.count;
-          const rightCount = count - bin.count;
-          const leftBounds2 = bin.leftCacheBounds;
-          const rightBounds = bin.rightCacheBounds;
-          let leftProb = 0;
-          if (leftCount !== 0) {
-            leftProb = computeSurfaceArea(leftBounds2) / rootSurfaceArea;
-          }
-          let rightProb = 0;
-          if (rightCount !== 0) {
-            rightProb = computeSurfaceArea(rightBounds) / rootSurfaceArea;
-          }
-          const cost = TRAVERSAL_COST + TRIANGLE_INTERSECT_COST * (leftProb * leftCount + rightProb * rightCount);
-          if (cost < bestCost) {
-            axis = a;
-            bestCost = cost;
-            pos = bin.candidate;
-          }
-        }
-      } else {
-        for (let i = 0; i < BIN_COUNT; i++) {
-          const bin = sahBins[i];
-          bin.count = 0;
-          bin.candidate = axisLeft + binWidth + i * binWidth;
-          const bounds = bin.bounds;
-          for (let d = 0; d < 3; d++) {
-            bounds[d] = Infinity;
-            bounds[d + 3] = -Infinity;
-          }
-        }
-        for (let c = cStart; c < cEnd; c += 6) {
-          const triCenter = triangleBounds[c + 2 * a];
-          const relativeCenter = triCenter - axisLeft;
-          let binIndex = ~~(relativeCenter / binWidth);
-          if (binIndex >= BIN_COUNT) binIndex = BIN_COUNT - 1;
-          const bin = sahBins[binIndex];
-          bin.count++;
-          expandByTriangleBounds(c, triangleBounds, bin.bounds);
-        }
-        const lastBin = sahBins[BIN_COUNT - 1];
-        copyBounds(lastBin.bounds, lastBin.rightCacheBounds);
-        for (let i = BIN_COUNT - 2; i >= 0; i--) {
-          const bin = sahBins[i];
-          const nextBin = sahBins[i + 1];
-          unionBounds(bin.bounds, nextBin.rightCacheBounds, bin.rightCacheBounds);
-        }
-        let leftCount = 0;
-        for (let i = 0; i < BIN_COUNT - 1; i++) {
-          const bin = sahBins[i];
-          const binCount = bin.count;
-          const bounds = bin.bounds;
-          const nextBin = sahBins[i + 1];
-          const rightBounds = nextBin.rightCacheBounds;
-          if (binCount !== 0) {
-            if (leftCount === 0) {
-              copyBounds(bounds, leftBounds);
-            } else {
-              unionBounds(bounds, leftBounds, leftBounds);
-            }
-          }
-          leftCount += binCount;
-          let leftProb = 0;
-          let rightProb = 0;
-          if (leftCount !== 0) {
-            leftProb = computeSurfaceArea(leftBounds) / rootSurfaceArea;
-          }
-          const rightCount = count - leftCount;
-          if (rightCount !== 0) {
-            rightProb = computeSurfaceArea(rightBounds) / rootSurfaceArea;
-          }
-          const cost = TRAVERSAL_COST + TRIANGLE_INTERSECT_COST * (leftProb * leftCount + rightProb * rightCount);
-          if (cost < bestCost) {
-            axis = a;
-            bestCost = cost;
-            pos = bin.candidate;
-          }
-        }
-      }
-    }
-  } else {
-    console.warn(`MeshBVH: Invalid build strategy value ${strategy} used.`);
-  }
-  return { axis, pos };
-}
-function getAverage(triangleBounds, offset, count, axis) {
-  let avg = 0;
-  for (let i = offset, end = offset + count; i < end; i++) {
-    avg += triangleBounds[i * 6 + axis * 2];
-  }
-  return avg / count;
-}
-
-// node_modules/three-mesh-bvh/src/core/MeshBVHNode.js
-var MeshBVHNode = class {
-  constructor() {
-    this.boundingData = new Float32Array(6);
-  }
-};
-
-// node_modules/three-mesh-bvh/src/core/build/sortUtils.generated.js
-function partition(indirectBuffer, index, triangleBounds, offset, count, split) {
-  let left = offset;
-  let right = offset + count - 1;
-  const pos = split.pos;
-  const axisOffset = split.axis * 2;
-  while (true) {
-    while (left <= right && triangleBounds[left * 6 + axisOffset] < pos) {
-      left++;
-    }
-    while (left <= right && triangleBounds[right * 6 + axisOffset] >= pos) {
-      right--;
-    }
-    if (left < right) {
-      for (let i = 0; i < 3; i++) {
-        let t0 = index[left * 3 + i];
-        index[left * 3 + i] = index[right * 3 + i];
-        index[right * 3 + i] = t0;
-      }
-      for (let i = 0; i < 6; i++) {
-        let tb = triangleBounds[left * 6 + i];
-        triangleBounds[left * 6 + i] = triangleBounds[right * 6 + i];
-        triangleBounds[right * 6 + i] = tb;
-      }
-      left++;
-      right--;
-    } else {
-      return left;
-    }
-  }
-}
-
-// node_modules/three-mesh-bvh/src/core/build/sortUtils_indirect.generated.js
-function partition_indirect(indirectBuffer, index, triangleBounds, offset, count, split) {
-  let left = offset;
-  let right = offset + count - 1;
-  const pos = split.pos;
-  const axisOffset = split.axis * 2;
-  while (true) {
-    while (left <= right && triangleBounds[left * 6 + axisOffset] < pos) {
-      left++;
-    }
-    while (left <= right && triangleBounds[right * 6 + axisOffset] >= pos) {
-      right--;
-    }
-    if (left < right) {
-      let t2 = indirectBuffer[left];
-      indirectBuffer[left] = indirectBuffer[right];
-      indirectBuffer[right] = t2;
-      for (let i = 0; i < 6; i++) {
-        let tb = triangleBounds[left * 6 + i];
-        triangleBounds[left * 6 + i] = triangleBounds[right * 6 + i];
-        triangleBounds[right * 6 + i] = tb;
-      }
-      left++;
-      right--;
-    } else {
-      return left;
-    }
-  }
-}
-
-// node_modules/three-mesh-bvh/src/core/utils/nodeBufferUtils.js
-function IS_LEAF(n16, uint16Array2) {
-  return uint16Array2[n16 + 15] === 65535;
-}
-function OFFSET(n32, uint32Array2) {
-  return uint32Array2[n32 + 6];
-}
-function COUNT(n16, uint16Array2) {
-  return uint16Array2[n16 + 14];
-}
-function LEFT_NODE(n32) {
-  return n32 + 8;
-}
-function RIGHT_NODE(n32, uint32Array2) {
-  return uint32Array2[n32 + 6];
-}
-function SPLIT_AXIS(n32, uint32Array2) {
-  return uint32Array2[n32 + 7];
-}
-function BOUNDING_DATA_INDEX(n32) {
-  return n32;
-}
-
-// node_modules/three-mesh-bvh/src/core/build/buildUtils.js
-var float32Array;
-var uint32Array;
-var uint16Array;
-var uint8Array;
-var MAX_POINTER = Math.pow(2, 32);
-function countNodes(node) {
-  if ("count" in node) {
-    return 1;
-  } else {
-    return 1 + countNodes(node.left) + countNodes(node.right);
-  }
-}
-function populateBuffer(byteOffset, node, buffer) {
-  float32Array = new Float32Array(buffer);
-  uint32Array = new Uint32Array(buffer);
-  uint16Array = new Uint16Array(buffer);
-  uint8Array = new Uint8Array(buffer);
-  return _populateBuffer(byteOffset, node);
-}
-function _populateBuffer(byteOffset, node) {
-  const stride4Offset = byteOffset / 4;
-  const stride2Offset = byteOffset / 2;
-  const isLeaf = "count" in node;
-  const boundingData = node.boundingData;
-  for (let i = 0; i < 6; i++) {
-    float32Array[stride4Offset + i] = boundingData[i];
-  }
-  if (isLeaf) {
-    if (node.buffer) {
-      const buffer = node.buffer;
-      uint8Array.set(new Uint8Array(buffer), byteOffset);
-      for (let offset = byteOffset, l = byteOffset + buffer.byteLength; offset < l; offset += BYTES_PER_NODE) {
-        const offset2 = offset / 2;
-        if (!IS_LEAF(offset2, uint16Array)) {
-          uint32Array[offset / 4 + 6] += stride4Offset;
-        }
-      }
-      return byteOffset + buffer.byteLength;
-    } else {
-      const offset = node.offset;
-      const count = node.count;
-      uint32Array[stride4Offset + 6] = offset;
-      uint16Array[stride2Offset + 14] = count;
-      uint16Array[stride2Offset + 15] = IS_LEAFNODE_FLAG;
-      return byteOffset + BYTES_PER_NODE;
-    }
-  } else {
-    const left = node.left;
-    const right = node.right;
-    const splitAxis = node.splitAxis;
-    let nextUnusedPointer;
-    nextUnusedPointer = _populateBuffer(byteOffset + BYTES_PER_NODE, left);
-    if (nextUnusedPointer / 4 > MAX_POINTER) {
-      throw new Error("MeshBVH: Cannot store child pointer greater than 32 bits.");
-    }
-    uint32Array[stride4Offset + 6] = nextUnusedPointer / 4;
-    nextUnusedPointer = _populateBuffer(nextUnusedPointer, right);
-    uint32Array[stride4Offset + 7] = splitAxis;
-    return nextUnusedPointer;
-  }
-}
-
-// node_modules/three-mesh-bvh/src/core/build/buildTree.js
-function generateIndirectBuffer(geometry, useSharedArrayBuffer) {
-  const triCount = (geometry.index ? geometry.index.count : geometry.attributes.position.count) / 3;
-  const useUint32 = triCount > 2 ** 16;
-  const byteCount = useUint32 ? 4 : 2;
-  const buffer = useSharedArrayBuffer ? new SharedArrayBuffer(triCount * byteCount) : new ArrayBuffer(triCount * byteCount);
-  const indirectBuffer = useUint32 ? new Uint32Array(buffer) : new Uint16Array(buffer);
-  for (let i = 0, l = indirectBuffer.length; i < l; i++) {
-    indirectBuffer[i] = i;
-  }
-  return indirectBuffer;
-}
-function buildTree(bvh, triangleBounds, offset, count, options) {
-  const {
-    maxDepth,
-    verbose,
-    maxLeafTris,
-    strategy,
-    onProgress,
-    indirect
-  } = options;
-  const indirectBuffer = bvh._indirectBuffer;
-  const geometry = bvh.geometry;
-  const indexArray = geometry.index ? geometry.index.array : null;
-  const partionFunc = indirect ? partition_indirect : partition;
-  const totalTriangles = getTriCount(geometry);
-  const cacheCentroidBoundingData = new Float32Array(6);
-  let reachedMaxDepth = false;
-  const root = new MeshBVHNode();
-  getBounds(triangleBounds, offset, count, root.boundingData, cacheCentroidBoundingData);
-  splitNode(root, offset, count, cacheCentroidBoundingData);
-  return root;
-  function triggerProgress(trianglesProcessed) {
-    if (onProgress) {
-      onProgress(trianglesProcessed / totalTriangles);
-    }
-  }
-  function splitNode(node, offset2, count2, centroidBoundingData = null, depth = 0) {
-    if (!reachedMaxDepth && depth >= maxDepth) {
-      reachedMaxDepth = true;
-      if (verbose) {
-        console.warn(`MeshBVH: Max depth of ${maxDepth} reached when generating BVH. Consider increasing maxDepth.`);
-        console.warn(geometry);
-      }
-    }
-    if (count2 <= maxLeafTris || depth >= maxDepth) {
-      triggerProgress(offset2 + count2);
-      node.offset = offset2;
-      node.count = count2;
-      return node;
-    }
-    const split = getOptimalSplit(node.boundingData, centroidBoundingData, triangleBounds, offset2, count2, strategy);
-    if (split.axis === -1) {
-      triggerProgress(offset2 + count2);
-      node.offset = offset2;
-      node.count = count2;
-      return node;
-    }
-    const splitOffset = partionFunc(indirectBuffer, indexArray, triangleBounds, offset2, count2, split);
-    if (splitOffset === offset2 || splitOffset === offset2 + count2) {
-      triggerProgress(offset2 + count2);
-      node.offset = offset2;
-      node.count = count2;
-    } else {
-      node.splitAxis = split.axis;
-      const left = new MeshBVHNode();
-      const lstart = offset2;
-      const lcount = splitOffset - offset2;
-      node.left = left;
-      getBounds(triangleBounds, lstart, lcount, left.boundingData, cacheCentroidBoundingData);
-      splitNode(left, lstart, lcount, cacheCentroidBoundingData, depth + 1);
-      const right = new MeshBVHNode();
-      const rstart = splitOffset;
-      const rcount = count2 - lcount;
-      node.right = right;
-      getBounds(triangleBounds, rstart, rcount, right.boundingData, cacheCentroidBoundingData);
-      splitNode(right, rstart, rcount, cacheCentroidBoundingData, depth + 1);
-    }
-    return node;
-  }
-}
-function buildPackedTree(bvh, options) {
-  const geometry = bvh.geometry;
-  if (options.indirect) {
-    bvh._indirectBuffer = generateIndirectBuffer(geometry, options.useSharedArrayBuffer);
-    if (hasGroupGaps(geometry, options.range) && !options.verbose) {
-      console.warn(
-        'MeshBVH: Provided geometry contains groups or a range that do not fully span the vertex contents while using the "indirect" option. BVH may incorrectly report intersections on unrendered portions of the geometry.'
-      );
-    }
-  }
-  if (!bvh._indirectBuffer) {
-    ensureIndex(geometry, options);
-  }
-  const BufferConstructor = options.useSharedArrayBuffer ? SharedArrayBuffer : ArrayBuffer;
-  const triangleBounds = computeTriangleBounds(geometry);
-  const geometryRanges = options.indirect ? getFullGeometryRange(geometry, options.range) : getRootIndexRanges(geometry, options.range);
-  bvh._roots = geometryRanges.map((range) => {
-    const root = buildTree(bvh, triangleBounds, range.offset, range.count, options);
-    const nodeCount = countNodes(root);
-    const buffer = new BufferConstructor(BYTES_PER_NODE * nodeCount);
-    populateBuffer(0, root, buffer);
-    return buffer;
-  });
-}
-
-// node_modules/three-mesh-bvh/src/math/SeparatingAxisBounds.js
-var SeparatingAxisBounds = class {
-  constructor() {
-    this.min = Infinity;
-    this.max = -Infinity;
-  }
-  setFromPointsField(points, field) {
-    let min = Infinity;
-    let max2 = -Infinity;
-    for (let i = 0, l = points.length; i < l; i++) {
-      const p = points[i];
-      const val = p[field];
-      min = val < min ? val : min;
-      max2 = val > max2 ? val : max2;
-    }
-    this.min = min;
-    this.max = max2;
-  }
-  setFromPoints(axis, points) {
-    let min = Infinity;
-    let max2 = -Infinity;
-    for (let i = 0, l = points.length; i < l; i++) {
-      const p = points[i];
-      const val = axis.dot(p);
-      min = val < min ? val : min;
-      max2 = val > max2 ? val : max2;
-    }
-    this.min = min;
-    this.max = max2;
-  }
-  isSeparated(other) {
-    return this.min > other.max || other.min > this.max;
-  }
-};
-SeparatingAxisBounds.prototype.setFromBox = function() {
-  const p = new Vector3();
-  return function setFromBox(axis, box) {
-    const boxMin = box.min;
-    const boxMax = box.max;
-    let min = Infinity;
-    let max2 = -Infinity;
-    for (let x = 0; x <= 1; x++) {
-      for (let y = 0; y <= 1; y++) {
-        for (let z = 0; z <= 1; z++) {
-          p.x = boxMin.x * x + boxMax.x * (1 - x);
-          p.y = boxMin.y * y + boxMax.y * (1 - y);
-          p.z = boxMin.z * z + boxMax.z * (1 - z);
-          const val = axis.dot(p);
-          min = Math.min(val, min);
-          max2 = Math.max(val, max2);
-        }
-      }
-    }
-    this.min = min;
-    this.max = max2;
-  };
-}();
-var areIntersecting = function() {
-  const cacheSatBounds = new SeparatingAxisBounds();
-  return function areIntersecting2(shape1, shape2) {
-    const points1 = shape1.points;
-    const satAxes1 = shape1.satAxes;
-    const satBounds1 = shape1.satBounds;
-    const points2 = shape2.points;
-    const satAxes2 = shape2.satAxes;
-    const satBounds2 = shape2.satBounds;
-    for (let i = 0; i < 3; i++) {
-      const sb = satBounds1[i];
-      const sa = satAxes1[i];
-      cacheSatBounds.setFromPoints(sa, points2);
-      if (sb.isSeparated(cacheSatBounds)) return false;
-    }
-    for (let i = 0; i < 3; i++) {
-      const sb = satBounds2[i];
-      const sa = satAxes2[i];
-      cacheSatBounds.setFromPoints(sa, points1);
-      if (sb.isSeparated(cacheSatBounds)) return false;
-    }
-  };
-}();
-
-// node_modules/three-mesh-bvh/src/math/MathUtilities.js
-var closestPointLineToLine = function() {
-  const dir1 = new Vector3();
-  const dir2 = new Vector3();
-  const v02 = new Vector3();
-  return function closestPointLineToLine2(l1, l2, result) {
-    const v0 = l1.start;
-    const v10 = dir1;
-    const v2 = l2.start;
-    const v32 = dir2;
-    v02.subVectors(v0, v2);
-    dir1.subVectors(l1.end, l1.start);
-    dir2.subVectors(l2.end, l2.start);
-    const d0232 = v02.dot(v32);
-    const d3210 = v32.dot(v10);
-    const d3232 = v32.dot(v32);
-    const d0210 = v02.dot(v10);
-    const d1010 = v10.dot(v10);
-    const denom = d1010 * d3232 - d3210 * d3210;
-    let d, d2;
-    if (denom !== 0) {
-      d = (d0232 * d3210 - d0210 * d3232) / denom;
-    } else {
-      d = 0;
-    }
-    d2 = (d0232 + d * d3210) / d3232;
-    result.x = d;
-    result.y = d2;
-  };
-}();
-var closestPointsSegmentToSegment = function() {
-  const paramResult = new Vector2();
-  const temp14 = new Vector3();
-  const temp23 = new Vector3();
-  return function closestPointsSegmentToSegment2(l1, l2, target1, target2) {
-    closestPointLineToLine(l1, l2, paramResult);
-    let d = paramResult.x;
-    let d2 = paramResult.y;
-    if (d >= 0 && d <= 1 && d2 >= 0 && d2 <= 1) {
-      l1.at(d, target1);
-      l2.at(d2, target2);
-      return;
-    } else if (d >= 0 && d <= 1) {
-      if (d2 < 0) {
-        l2.at(0, target2);
-      } else {
-        l2.at(1, target2);
-      }
-      l1.closestPointToPoint(target2, true, target1);
-      return;
-    } else if (d2 >= 0 && d2 <= 1) {
-      if (d < 0) {
-        l1.at(0, target1);
-      } else {
-        l1.at(1, target1);
-      }
-      l2.closestPointToPoint(target1, true, target2);
-      return;
-    } else {
-      let p;
-      if (d < 0) {
-        p = l1.start;
-      } else {
-        p = l1.end;
-      }
-      let p2;
-      if (d2 < 0) {
-        p2 = l2.start;
-      } else {
-        p2 = l2.end;
-      }
-      const closestPoint = temp14;
-      const closestPoint2 = temp23;
-      l1.closestPointToPoint(p2, true, temp14);
-      l2.closestPointToPoint(p, true, temp23);
-      if (closestPoint.distanceToSquared(p2) <= closestPoint2.distanceToSquared(p)) {
-        target1.copy(closestPoint);
-        target2.copy(p2);
-        return;
-      } else {
-        target1.copy(p);
-        target2.copy(closestPoint2);
-        return;
-      }
-    }
-  };
-}();
-var sphereIntersectTriangle = function() {
-  const closestPointTemp = new Vector3();
-  const projectedPointTemp = new Vector3();
-  const planeTemp = new Plane();
-  const lineTemp = new Line3();
-  return function sphereIntersectTriangle2(sphere, triangle4) {
-    const { radius, center } = sphere;
-    const { a, b, c } = triangle4;
-    lineTemp.start = a;
-    lineTemp.end = b;
-    const closestPoint1 = lineTemp.closestPointToPoint(center, true, closestPointTemp);
-    if (closestPoint1.distanceTo(center) <= radius) return true;
-    lineTemp.start = a;
-    lineTemp.end = c;
-    const closestPoint2 = lineTemp.closestPointToPoint(center, true, closestPointTemp);
-    if (closestPoint2.distanceTo(center) <= radius) return true;
-    lineTemp.start = b;
-    lineTemp.end = c;
-    const closestPoint3 = lineTemp.closestPointToPoint(center, true, closestPointTemp);
-    if (closestPoint3.distanceTo(center) <= radius) return true;
-    const plane = triangle4.getPlane(planeTemp);
-    const dp = Math.abs(plane.distanceToPoint(center));
-    if (dp <= radius) {
-      const pp = plane.projectPoint(center, projectedPointTemp);
-      const cp = triangle4.containsPoint(pp);
-      if (cp) return true;
-    }
-    return false;
-  };
-}();
-
-// node_modules/three-mesh-bvh/src/math/ExtendedTriangle.js
-var ZERO_EPSILON = 1e-15;
-function isNearZero(value) {
-  return Math.abs(value) < ZERO_EPSILON;
-}
-var ExtendedTriangle = class extends Triangle {
-  constructor(...args) {
-    super(...args);
-    this.isExtendedTriangle = true;
-    this.satAxes = new Array(4).fill().map(() => new Vector3());
-    this.satBounds = new Array(4).fill().map(() => new SeparatingAxisBounds());
-    this.points = [this.a, this.b, this.c];
-    this.sphere = new Sphere();
-    this.plane = new Plane();
-    this.needsUpdate = true;
-  }
-  intersectsSphere(sphere) {
-    return sphereIntersectTriangle(sphere, this);
-  }
-  update() {
-    const a = this.a;
-    const b = this.b;
-    const c = this.c;
-    const points = this.points;
-    const satAxes = this.satAxes;
-    const satBounds = this.satBounds;
-    const axis0 = satAxes[0];
-    const sab0 = satBounds[0];
-    this.getNormal(axis0);
-    sab0.setFromPoints(axis0, points);
-    const axis1 = satAxes[1];
-    const sab1 = satBounds[1];
-    axis1.subVectors(a, b);
-    sab1.setFromPoints(axis1, points);
-    const axis2 = satAxes[2];
-    const sab2 = satBounds[2];
-    axis2.subVectors(b, c);
-    sab2.setFromPoints(axis2, points);
-    const axis3 = satAxes[3];
-    const sab3 = satBounds[3];
-    axis3.subVectors(c, a);
-    sab3.setFromPoints(axis3, points);
-    this.sphere.setFromPoints(this.points);
-    this.plane.setFromNormalAndCoplanarPoint(axis0, a);
-    this.needsUpdate = false;
-  }
-};
-ExtendedTriangle.prototype.closestPointToSegment = function() {
-  const point1 = new Vector3();
-  const point2 = new Vector3();
-  const edge = new Line3();
-  return function distanceToSegment(segment, target1 = null, target2 = null) {
-    const { start, end } = segment;
-    const points = this.points;
-    let distSq;
-    let closestDistanceSq = Infinity;
-    for (let i = 0; i < 3; i++) {
-      const nexti = (i + 1) % 3;
-      edge.start.copy(points[i]);
-      edge.end.copy(points[nexti]);
-      closestPointsSegmentToSegment(edge, segment, point1, point2);
-      distSq = point1.distanceToSquared(point2);
-      if (distSq < closestDistanceSq) {
-        closestDistanceSq = distSq;
-        if (target1) target1.copy(point1);
-        if (target2) target2.copy(point2);
-      }
-    }
-    this.closestPointToPoint(start, point1);
-    distSq = start.distanceToSquared(point1);
-    if (distSq < closestDistanceSq) {
-      closestDistanceSq = distSq;
-      if (target1) target1.copy(point1);
-      if (target2) target2.copy(start);
-    }
-    this.closestPointToPoint(end, point1);
-    distSq = end.distanceToSquared(point1);
-    if (distSq < closestDistanceSq) {
-      closestDistanceSq = distSq;
-      if (target1) target1.copy(point1);
-      if (target2) target2.copy(end);
-    }
-    return Math.sqrt(closestDistanceSq);
-  };
-}();
-ExtendedTriangle.prototype.intersectsTriangle = function() {
-  const saTri2 = new ExtendedTriangle();
-  const arr1 = new Array(3);
-  const arr2 = new Array(3);
-  const cachedSatBounds = new SeparatingAxisBounds();
-  const cachedSatBounds2 = new SeparatingAxisBounds();
-  const cachedAxis = new Vector3();
-  const dir = new Vector3();
-  const dir1 = new Vector3();
-  const dir2 = new Vector3();
-  const tempDir = new Vector3();
-  const edge = new Line3();
-  const edge1 = new Line3();
-  const edge2 = new Line3();
-  const tempPoint = new Vector3();
-  function triIntersectPlane(tri, plane, targetEdge) {
-    const points = tri.points;
-    let count = 0;
-    let startPointIntersection = -1;
-    for (let i = 0; i < 3; i++) {
-      const { start, end } = edge;
-      start.copy(points[i]);
-      end.copy(points[(i + 1) % 3]);
-      edge.delta(dir);
-      const startIntersects = isNearZero(plane.distanceToPoint(start));
-      if (isNearZero(plane.normal.dot(dir)) && startIntersects) {
-        targetEdge.copy(edge);
-        count = 2;
-        break;
-      }
-      const doesIntersect = plane.intersectLine(edge, tempPoint);
-      if (!doesIntersect && startIntersects) {
-        tempPoint.copy(start);
-      }
-      if ((doesIntersect || startIntersects) && !isNearZero(tempPoint.distanceTo(end))) {
-        if (count <= 1) {
-          const point = count === 1 ? targetEdge.start : targetEdge.end;
-          point.copy(tempPoint);
-          if (startIntersects) {
-            startPointIntersection = count;
-          }
-        } else if (count >= 2) {
-          const point = startPointIntersection === 1 ? targetEdge.start : targetEdge.end;
-          point.copy(tempPoint);
-          count = 2;
-          break;
-        }
-        count++;
-        if (count === 2 && startPointIntersection === -1) {
-          break;
-        }
-      }
-    }
-    return count;
-  }
-  return function intersectsTriangle(other, target = null, suppressLog = false) {
-    if (this.needsUpdate) {
-      this.update();
-    }
-    if (!other.isExtendedTriangle) {
-      saTri2.copy(other);
-      saTri2.update();
-      other = saTri2;
-    } else if (other.needsUpdate) {
-      other.update();
-    }
-    const plane1 = this.plane;
-    const plane2 = other.plane;
-    if (Math.abs(plane1.normal.dot(plane2.normal)) > 1 - 1e-10) {
-      const satBounds1 = this.satBounds;
-      const satAxes1 = this.satAxes;
-      arr2[0] = other.a;
-      arr2[1] = other.b;
-      arr2[2] = other.c;
-      for (let i = 0; i < 4; i++) {
-        const sb = satBounds1[i];
-        const sa = satAxes1[i];
-        cachedSatBounds.setFromPoints(sa, arr2);
-        if (sb.isSeparated(cachedSatBounds)) return false;
-      }
-      const satBounds2 = other.satBounds;
-      const satAxes2 = other.satAxes;
-      arr1[0] = this.a;
-      arr1[1] = this.b;
-      arr1[2] = this.c;
-      for (let i = 0; i < 4; i++) {
-        const sb = satBounds2[i];
-        const sa = satAxes2[i];
-        cachedSatBounds.setFromPoints(sa, arr1);
-        if (sb.isSeparated(cachedSatBounds)) return false;
-      }
-      for (let i = 0; i < 4; i++) {
-        const sa1 = satAxes1[i];
-        for (let i2 = 0; i2 < 4; i2++) {
-          const sa2 = satAxes2[i2];
-          cachedAxis.crossVectors(sa1, sa2);
-          cachedSatBounds.setFromPoints(cachedAxis, arr1);
-          cachedSatBounds2.setFromPoints(cachedAxis, arr2);
-          if (cachedSatBounds.isSeparated(cachedSatBounds2)) return false;
-        }
-      }
-      if (target) {
-        if (!suppressLog) {
-          console.warn("ExtendedTriangle.intersectsTriangle: Triangles are coplanar which does not support an output edge. Setting edge to 0, 0, 0.");
-        }
-        target.start.set(0, 0, 0);
-        target.end.set(0, 0, 0);
-      }
-      return true;
-    } else {
-      const count1 = triIntersectPlane(this, plane2, edge1);
-      if (count1 === 1 && other.containsPoint(edge1.end)) {
-        if (target) {
-          target.start.copy(edge1.end);
-          target.end.copy(edge1.end);
-        }
-        return true;
-      } else if (count1 !== 2) {
-        return false;
-      }
-      const count2 = triIntersectPlane(other, plane1, edge2);
-      if (count2 === 1 && this.containsPoint(edge2.end)) {
-        if (target) {
-          target.start.copy(edge2.end);
-          target.end.copy(edge2.end);
-        }
-        return true;
-      } else if (count2 !== 2) {
-        return false;
-      }
-      edge1.delta(dir1);
-      edge2.delta(dir2);
-      if (dir1.dot(dir2) < 0) {
-        let tmp2 = edge2.start;
-        edge2.start = edge2.end;
-        edge2.end = tmp2;
-      }
-      const s1 = edge1.start.dot(dir1);
-      const e1 = edge1.end.dot(dir1);
-      const s2 = edge2.start.dot(dir1);
-      const e2 = edge2.end.dot(dir1);
-      const separated1 = e1 < s2;
-      const separated2 = s1 < e2;
-      if (s1 !== e2 && s2 !== e1 && separated1 === separated2) {
-        return false;
-      }
-      if (target) {
-        tempDir.subVectors(edge1.start, edge2.start);
-        if (tempDir.dot(dir1) > 0) {
-          target.start.copy(edge1.start);
-        } else {
-          target.start.copy(edge2.start);
-        }
-        tempDir.subVectors(edge1.end, edge2.end);
-        if (tempDir.dot(dir1) < 0) {
-          target.end.copy(edge1.end);
-        } else {
-          target.end.copy(edge2.end);
-        }
-      }
-      return true;
-    }
-  };
-}();
-ExtendedTriangle.prototype.distanceToPoint = function() {
-  const target = new Vector3();
-  return function distanceToPoint(point) {
-    this.closestPointToPoint(point, target);
-    return point.distanceTo(target);
-  };
-}();
-ExtendedTriangle.prototype.distanceToTriangle = function() {
-  const point = new Vector3();
-  const point2 = new Vector3();
-  const cornerFields = ["a", "b", "c"];
-  const line1 = new Line3();
-  const line2 = new Line3();
-  return function distanceToTriangle(other, target1 = null, target2 = null) {
-    const lineTarget = target1 || target2 ? line1 : null;
-    if (this.intersectsTriangle(other, lineTarget)) {
-      if (target1 || target2) {
-        if (target1) lineTarget.getCenter(target1);
-        if (target2) lineTarget.getCenter(target2);
-      }
-      return 0;
-    }
-    let closestDistanceSq = Infinity;
-    for (let i = 0; i < 3; i++) {
-      let dist;
-      const field = cornerFields[i];
-      const otherVec = other[field];
-      this.closestPointToPoint(otherVec, point);
-      dist = otherVec.distanceToSquared(point);
-      if (dist < closestDistanceSq) {
-        closestDistanceSq = dist;
-        if (target1) target1.copy(point);
-        if (target2) target2.copy(otherVec);
-      }
-      const thisVec = this[field];
-      other.closestPointToPoint(thisVec, point);
-      dist = thisVec.distanceToSquared(point);
-      if (dist < closestDistanceSq) {
-        closestDistanceSq = dist;
-        if (target1) target1.copy(thisVec);
-        if (target2) target2.copy(point);
-      }
-    }
-    for (let i = 0; i < 3; i++) {
-      const f11 = cornerFields[i];
-      const f12 = cornerFields[(i + 1) % 3];
-      line1.set(this[f11], this[f12]);
-      for (let i2 = 0; i2 < 3; i2++) {
-        const f21 = cornerFields[i2];
-        const f22 = cornerFields[(i2 + 1) % 3];
-        line2.set(other[f21], other[f22]);
-        closestPointsSegmentToSegment(line1, line2, point, point2);
-        const dist = point.distanceToSquared(point2);
-        if (dist < closestDistanceSq) {
-          closestDistanceSq = dist;
-          if (target1) target1.copy(point);
-          if (target2) target2.copy(point2);
-        }
-      }
-    }
-    return Math.sqrt(closestDistanceSq);
-  };
-}();
-
-// node_modules/three-mesh-bvh/src/math/OrientedBox.js
-var OrientedBox = class {
-  constructor(min, max2, matrix) {
-    this.isOrientedBox = true;
-    this.min = new Vector3();
-    this.max = new Vector3();
-    this.matrix = new Matrix4();
-    this.invMatrix = new Matrix4();
-    this.points = new Array(8).fill().map(() => new Vector3());
-    this.satAxes = new Array(3).fill().map(() => new Vector3());
-    this.satBounds = new Array(3).fill().map(() => new SeparatingAxisBounds());
-    this.alignedSatBounds = new Array(3).fill().map(() => new SeparatingAxisBounds());
-    this.needsUpdate = false;
-    if (min) this.min.copy(min);
-    if (max2) this.max.copy(max2);
-    if (matrix) this.matrix.copy(matrix);
-  }
-  set(min, max2, matrix) {
-    this.min.copy(min);
-    this.max.copy(max2);
-    this.matrix.copy(matrix);
-    this.needsUpdate = true;
-  }
-  copy(other) {
-    this.min.copy(other.min);
-    this.max.copy(other.max);
-    this.matrix.copy(other.matrix);
-    this.needsUpdate = true;
-  }
-};
-OrientedBox.prototype.update = /* @__PURE__ */ function() {
-  return function update() {
-    const matrix = this.matrix;
-    const min = this.min;
-    const max2 = this.max;
-    const points = this.points;
-    for (let x = 0; x <= 1; x++) {
-      for (let y = 0; y <= 1; y++) {
-        for (let z = 0; z <= 1; z++) {
-          const i = (1 << 0) * x | (1 << 1) * y | (1 << 2) * z;
-          const v = points[i];
-          v.x = x ? max2.x : min.x;
-          v.y = y ? max2.y : min.y;
-          v.z = z ? max2.z : min.z;
-          v.applyMatrix4(matrix);
-        }
-      }
-    }
-    const satBounds = this.satBounds;
-    const satAxes = this.satAxes;
-    const minVec = points[0];
-    for (let i = 0; i < 3; i++) {
-      const axis = satAxes[i];
-      const sb = satBounds[i];
-      const index = 1 << i;
-      const pi2 = points[index];
-      axis.subVectors(minVec, pi2);
-      sb.setFromPoints(axis, points);
-    }
-    const alignedSatBounds = this.alignedSatBounds;
-    alignedSatBounds[0].setFromPointsField(points, "x");
-    alignedSatBounds[1].setFromPointsField(points, "y");
-    alignedSatBounds[2].setFromPointsField(points, "z");
-    this.invMatrix.copy(this.matrix).invert();
-    this.needsUpdate = false;
-  };
-}();
-OrientedBox.prototype.intersectsBox = function() {
-  const aabbBounds = new SeparatingAxisBounds();
-  return function intersectsBox(box) {
-    if (this.needsUpdate) {
-      this.update();
-    }
-    const min = box.min;
-    const max2 = box.max;
-    const satBounds = this.satBounds;
-    const satAxes = this.satAxes;
-    const alignedSatBounds = this.alignedSatBounds;
-    aabbBounds.min = min.x;
-    aabbBounds.max = max2.x;
-    if (alignedSatBounds[0].isSeparated(aabbBounds)) return false;
-    aabbBounds.min = min.y;
-    aabbBounds.max = max2.y;
-    if (alignedSatBounds[1].isSeparated(aabbBounds)) return false;
-    aabbBounds.min = min.z;
-    aabbBounds.max = max2.z;
-    if (alignedSatBounds[2].isSeparated(aabbBounds)) return false;
-    for (let i = 0; i < 3; i++) {
-      const axis = satAxes[i];
-      const sb = satBounds[i];
-      aabbBounds.setFromBox(axis, box);
-      if (sb.isSeparated(aabbBounds)) return false;
-    }
-    return true;
-  };
-}();
-OrientedBox.prototype.intersectsTriangle = function() {
-  const saTri = new ExtendedTriangle();
-  const pointsArr = new Array(3);
-  const cachedSatBounds = new SeparatingAxisBounds();
-  const cachedSatBounds2 = new SeparatingAxisBounds();
-  const cachedAxis = new Vector3();
-  return function intersectsTriangle(triangle4) {
-    if (this.needsUpdate) {
-      this.update();
-    }
-    if (!triangle4.isExtendedTriangle) {
-      saTri.copy(triangle4);
-      saTri.update();
-      triangle4 = saTri;
-    } else if (triangle4.needsUpdate) {
-      triangle4.update();
-    }
-    const satBounds = this.satBounds;
-    const satAxes = this.satAxes;
-    pointsArr[0] = triangle4.a;
-    pointsArr[1] = triangle4.b;
-    pointsArr[2] = triangle4.c;
-    for (let i = 0; i < 3; i++) {
-      const sb = satBounds[i];
-      const sa = satAxes[i];
-      cachedSatBounds.setFromPoints(sa, pointsArr);
-      if (sb.isSeparated(cachedSatBounds)) return false;
-    }
-    const triSatBounds = triangle4.satBounds;
-    const triSatAxes = triangle4.satAxes;
-    const points = this.points;
-    for (let i = 0; i < 3; i++) {
-      const sb = triSatBounds[i];
-      const sa = triSatAxes[i];
-      cachedSatBounds.setFromPoints(sa, points);
-      if (sb.isSeparated(cachedSatBounds)) return false;
-    }
-    for (let i = 0; i < 3; i++) {
-      const sa1 = satAxes[i];
-      for (let i2 = 0; i2 < 4; i2++) {
-        const sa2 = triSatAxes[i2];
-        cachedAxis.crossVectors(sa1, sa2);
-        cachedSatBounds.setFromPoints(cachedAxis, pointsArr);
-        cachedSatBounds2.setFromPoints(cachedAxis, points);
-        if (cachedSatBounds.isSeparated(cachedSatBounds2)) return false;
-      }
-    }
-    return true;
-  };
-}();
-OrientedBox.prototype.closestPointToPoint = /* @__PURE__ */ function() {
-  return function closestPointToPoint2(point, target1) {
-    if (this.needsUpdate) {
-      this.update();
-    }
-    target1.copy(point).applyMatrix4(this.invMatrix).clamp(this.min, this.max).applyMatrix4(this.matrix);
-    return target1;
-  };
-}();
-OrientedBox.prototype.distanceToPoint = function() {
-  const target = new Vector3();
-  return function distanceToPoint(point) {
-    this.closestPointToPoint(point, target);
-    return point.distanceTo(target);
-  };
-}();
-OrientedBox.prototype.distanceToBox = function() {
-  const xyzFields = ["x", "y", "z"];
-  const segments1 = new Array(12).fill().map(() => new Line3());
-  const segments2 = new Array(12).fill().map(() => new Line3());
-  const point1 = new Vector3();
-  const point2 = new Vector3();
-  return function distanceToBox(box, threshold = 0, target1 = null, target2 = null) {
-    if (this.needsUpdate) {
-      this.update();
-    }
-    if (this.intersectsBox(box)) {
-      if (target1 || target2) {
-        box.getCenter(point2);
-        this.closestPointToPoint(point2, point1);
-        box.closestPointToPoint(point1, point2);
-        if (target1) target1.copy(point1);
-        if (target2) target2.copy(point2);
-      }
-      return 0;
-    }
-    const threshold2 = threshold * threshold;
-    const min = box.min;
-    const max2 = box.max;
-    const points = this.points;
-    let closestDistanceSq = Infinity;
-    for (let i = 0; i < 8; i++) {
-      const p = points[i];
-      point2.copy(p).clamp(min, max2);
-      const dist = p.distanceToSquared(point2);
-      if (dist < closestDistanceSq) {
-        closestDistanceSq = dist;
-        if (target1) target1.copy(p);
-        if (target2) target2.copy(point2);
-        if (dist < threshold2) return Math.sqrt(dist);
-      }
-    }
-    let count = 0;
-    for (let i = 0; i < 3; i++) {
-      for (let i1 = 0; i1 <= 1; i1++) {
-        for (let i2 = 0; i2 <= 1; i2++) {
-          const nextIndex = (i + 1) % 3;
-          const nextIndex2 = (i + 2) % 3;
-          const index = i1 << nextIndex | i2 << nextIndex2;
-          const index2 = 1 << i | i1 << nextIndex | i2 << nextIndex2;
-          const p1 = points[index];
-          const p2 = points[index2];
-          const line1 = segments1[count];
-          line1.set(p1, p2);
-          const f1 = xyzFields[i];
-          const f2 = xyzFields[nextIndex];
-          const f3 = xyzFields[nextIndex2];
-          const line2 = segments2[count];
-          const start = line2.start;
-          const end = line2.end;
-          start[f1] = min[f1];
-          start[f2] = i1 ? min[f2] : max2[f2];
-          start[f3] = i2 ? min[f3] : max2[f2];
-          end[f1] = max2[f1];
-          end[f2] = i1 ? min[f2] : max2[f2];
-          end[f3] = i2 ? min[f3] : max2[f2];
-          count++;
-        }
-      }
-    }
-    for (let x = 0; x <= 1; x++) {
-      for (let y = 0; y <= 1; y++) {
-        for (let z = 0; z <= 1; z++) {
-          point2.x = x ? max2.x : min.x;
-          point2.y = y ? max2.y : min.y;
-          point2.z = z ? max2.z : min.z;
-          this.closestPointToPoint(point2, point1);
-          const dist = point2.distanceToSquared(point1);
-          if (dist < closestDistanceSq) {
-            closestDistanceSq = dist;
-            if (target1) target1.copy(point1);
-            if (target2) target2.copy(point2);
-            if (dist < threshold2) return Math.sqrt(dist);
-          }
-        }
-      }
-    }
-    for (let i = 0; i < 12; i++) {
-      const l1 = segments1[i];
-      for (let i2 = 0; i2 < 12; i2++) {
-        const l2 = segments2[i2];
-        closestPointsSegmentToSegment(l1, l2, point1, point2);
-        const dist = point1.distanceToSquared(point2);
-        if (dist < closestDistanceSq) {
-          closestDistanceSq = dist;
-          if (target1) target1.copy(point1);
-          if (target2) target2.copy(point2);
-          if (dist < threshold2) return Math.sqrt(dist);
-        }
-      }
-    }
-    return Math.sqrt(closestDistanceSq);
-  };
-}();
-
-// node_modules/three-mesh-bvh/src/utils/PrimitivePool.js
-var PrimitivePool = class {
-  constructor(getNewPrimitive) {
-    this._getNewPrimitive = getNewPrimitive;
-    this._primitives = [];
-  }
-  getPrimitive() {
-    const primitives = this._primitives;
-    if (primitives.length === 0) {
-      return this._getNewPrimitive();
-    } else {
-      return primitives.pop();
-    }
-  }
-  releasePrimitive(primitive) {
-    this._primitives.push(primitive);
-  }
-};
-
-// node_modules/three-mesh-bvh/src/utils/ExtendedTrianglePool.js
-var ExtendedTrianglePoolBase = class extends PrimitivePool {
-  constructor() {
-    super(() => new ExtendedTriangle());
-  }
-};
-var ExtendedTrianglePool = /* @__PURE__ */ new ExtendedTrianglePoolBase();
-
-// node_modules/three-mesh-bvh/src/core/utils/BufferStack.js
-var _BufferStack = class {
-  constructor() {
-    this.float32Array = null;
-    this.uint16Array = null;
-    this.uint32Array = null;
-    const stack = [];
-    let prevBuffer = null;
-    this.setBuffer = (buffer) => {
-      if (prevBuffer) {
-        stack.push(prevBuffer);
-      }
-      prevBuffer = buffer;
-      this.float32Array = new Float32Array(buffer);
-      this.uint16Array = new Uint16Array(buffer);
-      this.uint32Array = new Uint32Array(buffer);
-    };
-    this.clearBuffer = () => {
-      prevBuffer = null;
-      this.float32Array = null;
-      this.uint16Array = null;
-      this.uint32Array = null;
-      if (stack.length !== 0) {
-        this.setBuffer(stack.pop());
-      }
-    };
-  }
-};
-var BufferStack = new _BufferStack();
-
-// node_modules/three-mesh-bvh/src/core/cast/shapecast.js
-var _box1;
-var _box2;
-var boxStack = [];
-var boxPool = /* @__PURE__ */ new PrimitivePool(() => new Box3());
-function shapecast(bvh, root, intersectsBounds, intersectsRange, boundsTraverseOrder, byteOffset) {
-  _box1 = boxPool.getPrimitive();
-  _box2 = boxPool.getPrimitive();
-  boxStack.push(_box1, _box2);
-  BufferStack.setBuffer(bvh._roots[root]);
-  const result = shapecastTraverse(0, bvh.geometry, intersectsBounds, intersectsRange, boundsTraverseOrder, byteOffset);
-  BufferStack.clearBuffer();
-  boxPool.releasePrimitive(_box1);
-  boxPool.releasePrimitive(_box2);
-  boxStack.pop();
-  boxStack.pop();
-  const length = boxStack.length;
-  if (length > 0) {
-    _box2 = boxStack[length - 1];
-    _box1 = boxStack[length - 2];
-  }
-  return result;
-}
-function shapecastTraverse(nodeIndex32, geometry, intersectsBoundsFunc, intersectsRangeFunc, nodeScoreFunc = null, nodeIndexByteOffset = 0, depth = 0) {
-  const { float32Array: float32Array2, uint16Array: uint16Array2, uint32Array: uint32Array2 } = BufferStack;
-  let nodeIndex16 = nodeIndex32 * 2;
-  const isLeaf = IS_LEAF(nodeIndex16, uint16Array2);
-  if (isLeaf) {
-    const offset = OFFSET(nodeIndex32, uint32Array2);
-    const count = COUNT(nodeIndex16, uint16Array2);
-    arrayToBox(BOUNDING_DATA_INDEX(nodeIndex32), float32Array2, _box1);
-    return intersectsRangeFunc(offset, count, false, depth, nodeIndexByteOffset + nodeIndex32, _box1);
-  } else {
-    let getLeftOffset = function(nodeIndex322) {
-      const { uint16Array: uint16Array3, uint32Array: uint32Array3 } = BufferStack;
-      let nodeIndex162 = nodeIndex322 * 2;
-      while (!IS_LEAF(nodeIndex162, uint16Array3)) {
-        nodeIndex322 = LEFT_NODE(nodeIndex322);
-        nodeIndex162 = nodeIndex322 * 2;
-      }
-      return OFFSET(nodeIndex322, uint32Array3);
-    }, getRightEndOffset = function(nodeIndex322) {
-      const { uint16Array: uint16Array3, uint32Array: uint32Array3 } = BufferStack;
-      let nodeIndex162 = nodeIndex322 * 2;
-      while (!IS_LEAF(nodeIndex162, uint16Array3)) {
-        nodeIndex322 = RIGHT_NODE(nodeIndex322, uint32Array3);
-        nodeIndex162 = nodeIndex322 * 2;
-      }
-      return OFFSET(nodeIndex322, uint32Array3) + COUNT(nodeIndex162, uint16Array3);
-    };
-    const left = LEFT_NODE(nodeIndex32);
-    const right = RIGHT_NODE(nodeIndex32, uint32Array2);
-    let c1 = left;
-    let c2 = right;
-    let score1, score2;
-    let box1, box2;
-    if (nodeScoreFunc) {
-      box1 = _box1;
-      box2 = _box2;
-      arrayToBox(BOUNDING_DATA_INDEX(c1), float32Array2, box1);
-      arrayToBox(BOUNDING_DATA_INDEX(c2), float32Array2, box2);
-      score1 = nodeScoreFunc(box1);
-      score2 = nodeScoreFunc(box2);
-      if (score2 < score1) {
-        c1 = right;
-        c2 = left;
-        const temp5 = score1;
-        score1 = score2;
-        score2 = temp5;
-        box1 = box2;
-      }
-    }
-    if (!box1) {
-      box1 = _box1;
-      arrayToBox(BOUNDING_DATA_INDEX(c1), float32Array2, box1);
-    }
-    const isC1Leaf = IS_LEAF(c1 * 2, uint16Array2);
-    const c1Intersection = intersectsBoundsFunc(box1, isC1Leaf, score1, depth + 1, nodeIndexByteOffset + c1);
-    let c1StopTraversal;
-    if (c1Intersection === CONTAINED) {
-      const offset = getLeftOffset(c1);
-      const end = getRightEndOffset(c1);
-      const count = end - offset;
-      c1StopTraversal = intersectsRangeFunc(offset, count, true, depth + 1, nodeIndexByteOffset + c1, box1);
-    } else {
-      c1StopTraversal = c1Intersection && shapecastTraverse(
-        c1,
-        geometry,
-        intersectsBoundsFunc,
-        intersectsRangeFunc,
-        nodeScoreFunc,
-        nodeIndexByteOffset,
-        depth + 1
-      );
-    }
-    if (c1StopTraversal) return true;
-    box2 = _box2;
-    arrayToBox(BOUNDING_DATA_INDEX(c2), float32Array2, box2);
-    const isC2Leaf = IS_LEAF(c2 * 2, uint16Array2);
-    const c2Intersection = intersectsBoundsFunc(box2, isC2Leaf, score2, depth + 1, nodeIndexByteOffset + c2);
-    let c2StopTraversal;
-    if (c2Intersection === CONTAINED) {
-      const offset = getLeftOffset(c2);
-      const end = getRightEndOffset(c2);
-      const count = end - offset;
-      c2StopTraversal = intersectsRangeFunc(offset, count, true, depth + 1, nodeIndexByteOffset + c2, box2);
-    } else {
-      c2StopTraversal = c2Intersection && shapecastTraverse(
-        c2,
-        geometry,
-        intersectsBoundsFunc,
-        intersectsRangeFunc,
-        nodeScoreFunc,
-        nodeIndexByteOffset,
-        depth + 1
-      );
-    }
-    if (c2StopTraversal) return true;
-    return false;
-  }
-}
-
-// node_modules/three-mesh-bvh/src/core/cast/closestPointToPoint.js
-var temp = /* @__PURE__ */ new Vector3();
-var temp1 = /* @__PURE__ */ new Vector3();
-function closestPointToPoint(bvh, point, target = {}, minThreshold = 0, maxThreshold = Infinity) {
-  const minThresholdSq = minThreshold * minThreshold;
-  const maxThresholdSq = maxThreshold * maxThreshold;
-  let closestDistanceSq = Infinity;
-  let closestDistanceTriIndex = null;
-  bvh.shapecast(
-    {
-      boundsTraverseOrder: (box) => {
-        temp.copy(point).clamp(box.min, box.max);
-        return temp.distanceToSquared(point);
-      },
-      intersectsBounds: (box, isLeaf, score) => {
-        return score < closestDistanceSq && score < maxThresholdSq;
-      },
-      intersectsTriangle: (tri, triIndex) => {
-        tri.closestPointToPoint(point, temp);
-        const distSq = point.distanceToSquared(temp);
-        if (distSq < closestDistanceSq) {
-          temp1.copy(temp);
-          closestDistanceSq = distSq;
-          closestDistanceTriIndex = triIndex;
-        }
-        if (distSq < minThresholdSq) {
-          return true;
-        } else {
-          return false;
-        }
-      }
-    }
-  );
-  if (closestDistanceSq === Infinity) return null;
-  const closestDistance = Math.sqrt(closestDistanceSq);
-  if (!target.point) target.point = temp1.clone();
-  else target.point.copy(temp1);
-  target.distance = closestDistance, target.faceIndex = closestDistanceTriIndex;
-  return target;
-}
-
-// node_modules/three-mesh-bvh/src/utils/ThreeRayIntersectUtilities.js
-var _vA3 = /* @__PURE__ */ new Vector3();
-var _vB3 = /* @__PURE__ */ new Vector3();
-var _vC3 = /* @__PURE__ */ new Vector3();
-var _uvA2 = /* @__PURE__ */ new Vector2();
-var _uvB2 = /* @__PURE__ */ new Vector2();
-var _uvC2 = /* @__PURE__ */ new Vector2();
-var _normalA = /* @__PURE__ */ new Vector3();
-var _normalB = /* @__PURE__ */ new Vector3();
-var _normalC = /* @__PURE__ */ new Vector3();
-var _intersectionPoint2 = /* @__PURE__ */ new Vector3();
-function checkIntersection2(ray, pA, pB, pC, point, side, near, far) {
-  let intersect2;
-  if (side === BackSide) {
-    intersect2 = ray.intersectTriangle(pC, pB, pA, true, point);
-  } else {
-    intersect2 = ray.intersectTriangle(pA, pB, pC, side !== DoubleSide, point);
-  }
-  if (intersect2 === null) return null;
-  const distance = ray.origin.distanceTo(point);
-  if (distance < near || distance > far) return null;
-  return {
-    distance,
-    point: point.clone()
-  };
-}
-function checkBufferGeometryIntersection(ray, position, normal, uv, uv1, a, b, c, side, near, far) {
-  _vA3.fromBufferAttribute(position, a);
-  _vB3.fromBufferAttribute(position, b);
-  _vC3.fromBufferAttribute(position, c);
-  const intersection = checkIntersection2(ray, _vA3, _vB3, _vC3, _intersectionPoint2, side, near, far);
-  if (intersection) {
-    if (uv) {
-      _uvA2.fromBufferAttribute(uv, a);
-      _uvB2.fromBufferAttribute(uv, b);
-      _uvC2.fromBufferAttribute(uv, c);
-      intersection.uv = Triangle.getInterpolation(_intersectionPoint2, _vA3, _vB3, _vC3, _uvA2, _uvB2, _uvC2, new Vector2());
-    }
-    if (uv1) {
-      _uvA2.fromBufferAttribute(uv1, a);
-      _uvB2.fromBufferAttribute(uv1, b);
-      _uvC2.fromBufferAttribute(uv1, c);
-      intersection.uv1 = Triangle.getInterpolation(_intersectionPoint2, _vA3, _vB3, _vC3, _uvA2, _uvB2, _uvC2, new Vector2());
-    }
-    if (normal) {
-      _normalA.fromBufferAttribute(normal, a);
-      _normalB.fromBufferAttribute(normal, b);
-      _normalC.fromBufferAttribute(normal, c);
-      intersection.normal = Triangle.getInterpolation(_intersectionPoint2, _vA3, _vB3, _vC3, _normalA, _normalB, _normalC, new Vector3());
-      if (intersection.normal.dot(ray.direction) > 0) {
-        intersection.normal.multiplyScalar(-1);
-      }
-    }
-    const face = {
-      a,
-      b,
-      c,
-      normal: new Vector3(),
-      materialIndex: 0
-    };
-    Triangle.getNormal(_vA3, _vB3, _vC3, face.normal);
-    intersection.face = face;
-    intersection.faceIndex = a;
-  }
-  return intersection;
-}
-function intersectTri(geo, side, ray, tri, intersections, near, far) {
-  const triOffset = tri * 3;
-  let a = triOffset + 0;
-  let b = triOffset + 1;
-  let c = triOffset + 2;
-  const index = geo.index;
-  if (geo.index) {
-    a = index.getX(a);
-    b = index.getX(b);
-    c = index.getX(c);
-  }
-  const { position, normal, uv, uv1 } = geo.attributes;
-  const intersection = checkBufferGeometryIntersection(ray, position, normal, uv, uv1, a, b, c, side, near, far);
-  if (intersection) {
-    intersection.faceIndex = tri;
-    if (intersections) intersections.push(intersection);
-    return intersection;
-  }
-  return null;
-}
-
-// node_modules/three-mesh-bvh/src/utils/TriangleUtilities.js
-function setTriangle(tri, i, index, pos) {
-  const ta = tri.a;
-  const tb = tri.b;
-  const tc = tri.c;
-  let i0 = i;
-  let i1 = i + 1;
-  let i2 = i + 2;
-  if (index) {
-    i0 = index.getX(i0);
-    i1 = index.getX(i1);
-    i2 = index.getX(i2);
-  }
-  ta.x = pos.getX(i0);
-  ta.y = pos.getY(i0);
-  ta.z = pos.getZ(i0);
-  tb.x = pos.getX(i1);
-  tb.y = pos.getY(i1);
-  tb.z = pos.getZ(i1);
-  tc.x = pos.getX(i2);
-  tc.y = pos.getY(i2);
-  tc.z = pos.getZ(i2);
-}
-
-// node_modules/three-mesh-bvh/src/core/utils/iterationUtils.generated.js
-function intersectTris(bvh, side, ray, offset, count, intersections, near, far) {
-  const { geometry, _indirectBuffer } = bvh;
-  for (let i = offset, end = offset + count; i < end; i++) {
-    intersectTri(geometry, side, ray, i, intersections, near, far);
-  }
-}
-function intersectClosestTri(bvh, side, ray, offset, count, near, far) {
-  const { geometry, _indirectBuffer } = bvh;
-  let dist = Infinity;
-  let res = null;
-  for (let i = offset, end = offset + count; i < end; i++) {
-    let intersection;
-    intersection = intersectTri(geometry, side, ray, i, null, near, far);
-    if (intersection && intersection.distance < dist) {
-      res = intersection;
-      dist = intersection.distance;
-    }
-  }
-  return res;
-}
-function iterateOverTriangles(offset, count, bvh, intersectsTriangleFunc, contained, depth, triangle4) {
-  const { geometry } = bvh;
-  const { index } = geometry;
-  const pos = geometry.attributes.position;
-  for (let i = offset, l = count + offset; i < l; i++) {
-    let tri;
-    tri = i;
-    setTriangle(triangle4, tri * 3, index, pos);
-    triangle4.needsUpdate = true;
-    if (intersectsTriangleFunc(triangle4, tri, contained, depth)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// node_modules/three-mesh-bvh/src/core/cast/refit.generated.js
-function refit(bvh, nodeIndices = null) {
-  if (nodeIndices && Array.isArray(nodeIndices)) {
-    nodeIndices = new Set(nodeIndices);
-  }
-  const geometry = bvh.geometry;
-  const indexArr = geometry.index ? geometry.index.array : null;
-  const posAttr = geometry.attributes.position;
-  let buffer, uint32Array2, uint16Array2, float32Array2;
-  let byteOffset = 0;
-  const roots = bvh._roots;
-  for (let i = 0, l = roots.length; i < l; i++) {
-    buffer = roots[i];
-    uint32Array2 = new Uint32Array(buffer);
-    uint16Array2 = new Uint16Array(buffer);
-    float32Array2 = new Float32Array(buffer);
-    _traverse2(0, byteOffset);
-    byteOffset += buffer.byteLength;
-  }
-  function _traverse2(node32Index, byteOffset2, force = false) {
-    const node16Index = node32Index * 2;
-    const isLeaf = uint16Array2[node16Index + 15] === IS_LEAFNODE_FLAG;
-    if (isLeaf) {
-      const offset = uint32Array2[node32Index + 6];
-      const count = uint16Array2[node16Index + 14];
-      let minx = Infinity;
-      let miny = Infinity;
-      let minz = Infinity;
-      let maxx = -Infinity;
-      let maxy = -Infinity;
-      let maxz = -Infinity;
-      for (let i = 3 * offset, l = 3 * (offset + count); i < l; i++) {
-        let index = indexArr[i];
-        const x = posAttr.getX(index);
-        const y = posAttr.getY(index);
-        const z = posAttr.getZ(index);
-        if (x < minx) minx = x;
-        if (x > maxx) maxx = x;
-        if (y < miny) miny = y;
-        if (y > maxy) maxy = y;
-        if (z < minz) minz = z;
-        if (z > maxz) maxz = z;
-      }
-      if (float32Array2[node32Index + 0] !== minx || float32Array2[node32Index + 1] !== miny || float32Array2[node32Index + 2] !== minz || float32Array2[node32Index + 3] !== maxx || float32Array2[node32Index + 4] !== maxy || float32Array2[node32Index + 5] !== maxz) {
-        float32Array2[node32Index + 0] = minx;
-        float32Array2[node32Index + 1] = miny;
-        float32Array2[node32Index + 2] = minz;
-        float32Array2[node32Index + 3] = maxx;
-        float32Array2[node32Index + 4] = maxy;
-        float32Array2[node32Index + 5] = maxz;
-        return true;
-      } else {
-        return false;
-      }
-    } else {
-      const left = node32Index + 8;
-      const right = uint32Array2[node32Index + 6];
-      const offsetLeft = left + byteOffset2;
-      const offsetRight = right + byteOffset2;
-      let forceChildren = force;
-      let includesLeft = false;
-      let includesRight = false;
-      if (nodeIndices) {
-        if (!forceChildren) {
-          includesLeft = nodeIndices.has(offsetLeft);
-          includesRight = nodeIndices.has(offsetRight);
-          forceChildren = !includesLeft && !includesRight;
-        }
-      } else {
-        includesLeft = true;
-        includesRight = true;
-      }
-      const traverseLeft = forceChildren || includesLeft;
-      const traverseRight = forceChildren || includesRight;
-      let leftChange = false;
-      if (traverseLeft) {
-        leftChange = _traverse2(left, byteOffset2, forceChildren);
-      }
-      let rightChange = false;
-      if (traverseRight) {
-        rightChange = _traverse2(right, byteOffset2, forceChildren);
-      }
-      const didChange = leftChange || rightChange;
-      if (didChange) {
-        for (let i = 0; i < 3; i++) {
-          const lefti = left + i;
-          const righti = right + i;
-          const minLeftValue = float32Array2[lefti];
-          const maxLeftValue = float32Array2[lefti + 3];
-          const minRightValue = float32Array2[righti];
-          const maxRightValue = float32Array2[righti + 3];
-          float32Array2[node32Index + i] = minLeftValue < minRightValue ? minLeftValue : minRightValue;
-          float32Array2[node32Index + i + 3] = maxLeftValue > maxRightValue ? maxLeftValue : maxRightValue;
-        }
-      }
-      return didChange;
-    }
-  }
-}
-
-// node_modules/three-mesh-bvh/src/core/utils/intersectUtils.js
-function intersectRay(nodeIndex32, array, ray, near, far) {
-  let tmin, tmax, tymin, tymax, tzmin, tzmax;
-  const invdirx = 1 / ray.direction.x, invdiry = 1 / ray.direction.y, invdirz = 1 / ray.direction.z;
-  const ox = ray.origin.x;
-  const oy = ray.origin.y;
-  const oz = ray.origin.z;
-  let minx = array[nodeIndex32];
-  let maxx = array[nodeIndex32 + 3];
-  let miny = array[nodeIndex32 + 1];
-  let maxy = array[nodeIndex32 + 3 + 1];
-  let minz = array[nodeIndex32 + 2];
-  let maxz = array[nodeIndex32 + 3 + 2];
-  if (invdirx >= 0) {
-    tmin = (minx - ox) * invdirx;
-    tmax = (maxx - ox) * invdirx;
-  } else {
-    tmin = (maxx - ox) * invdirx;
-    tmax = (minx - ox) * invdirx;
-  }
-  if (invdiry >= 0) {
-    tymin = (miny - oy) * invdiry;
-    tymax = (maxy - oy) * invdiry;
-  } else {
-    tymin = (maxy - oy) * invdiry;
-    tymax = (miny - oy) * invdiry;
-  }
-  if (tmin > tymax || tymin > tmax) return false;
-  if (tymin > tmin || isNaN(tmin)) tmin = tymin;
-  if (tymax < tmax || isNaN(tmax)) tmax = tymax;
-  if (invdirz >= 0) {
-    tzmin = (minz - oz) * invdirz;
-    tzmax = (maxz - oz) * invdirz;
-  } else {
-    tzmin = (maxz - oz) * invdirz;
-    tzmax = (minz - oz) * invdirz;
-  }
-  if (tmin > tzmax || tzmin > tmax) return false;
-  if (tzmin > tmin || tmin !== tmin) tmin = tzmin;
-  if (tzmax < tmax || tmax !== tmax) tmax = tzmax;
-  return tmin <= far && tmax >= near;
-}
-
-// node_modules/three-mesh-bvh/src/core/utils/iterationUtils_indirect.generated.js
-function intersectTris_indirect(bvh, side, ray, offset, count, intersections, near, far) {
-  const { geometry, _indirectBuffer } = bvh;
-  for (let i = offset, end = offset + count; i < end; i++) {
-    let vi = _indirectBuffer ? _indirectBuffer[i] : i;
-    intersectTri(geometry, side, ray, vi, intersections, near, far);
-  }
-}
-function intersectClosestTri_indirect(bvh, side, ray, offset, count, near, far) {
-  const { geometry, _indirectBuffer } = bvh;
-  let dist = Infinity;
-  let res = null;
-  for (let i = offset, end = offset + count; i < end; i++) {
-    let intersection;
-    intersection = intersectTri(geometry, side, ray, _indirectBuffer ? _indirectBuffer[i] : i, null, near, far);
-    if (intersection && intersection.distance < dist) {
-      res = intersection;
-      dist = intersection.distance;
-    }
-  }
-  return res;
-}
-function iterateOverTriangles_indirect(offset, count, bvh, intersectsTriangleFunc, contained, depth, triangle4) {
-  const { geometry } = bvh;
-  const { index } = geometry;
-  const pos = geometry.attributes.position;
-  for (let i = offset, l = count + offset; i < l; i++) {
-    let tri;
-    tri = bvh.resolveTriangleIndex(i);
-    setTriangle(triangle4, tri * 3, index, pos);
-    triangle4.needsUpdate = true;
-    if (intersectsTriangleFunc(triangle4, tri, contained, depth)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// node_modules/three-mesh-bvh/src/core/cast/raycast.generated.js
-function raycast(bvh, root, side, ray, intersects2, near, far) {
-  BufferStack.setBuffer(bvh._roots[root]);
-  _raycast(0, bvh, side, ray, intersects2, near, far);
-  BufferStack.clearBuffer();
-}
-function _raycast(nodeIndex32, bvh, side, ray, intersects2, near, far) {
-  const { float32Array: float32Array2, uint16Array: uint16Array2, uint32Array: uint32Array2 } = BufferStack;
-  const nodeIndex16 = nodeIndex32 * 2;
-  const isLeaf = IS_LEAF(nodeIndex16, uint16Array2);
-  if (isLeaf) {
-    const offset = OFFSET(nodeIndex32, uint32Array2);
-    const count = COUNT(nodeIndex16, uint16Array2);
-    intersectTris(bvh, side, ray, offset, count, intersects2, near, far);
-  } else {
-    const leftIndex = LEFT_NODE(nodeIndex32);
-    if (intersectRay(leftIndex, float32Array2, ray, near, far)) {
-      _raycast(leftIndex, bvh, side, ray, intersects2, near, far);
-    }
-    const rightIndex = RIGHT_NODE(nodeIndex32, uint32Array2);
-    if (intersectRay(rightIndex, float32Array2, ray, near, far)) {
-      _raycast(rightIndex, bvh, side, ray, intersects2, near, far);
-    }
-  }
-}
-
-// node_modules/three-mesh-bvh/src/core/cast/raycastFirst.generated.js
-var _xyzFields = ["x", "y", "z"];
-function raycastFirst(bvh, root, side, ray, near, far) {
-  BufferStack.setBuffer(bvh._roots[root]);
-  const result = _raycastFirst(0, bvh, side, ray, near, far);
-  BufferStack.clearBuffer();
-  return result;
-}
-function _raycastFirst(nodeIndex32, bvh, side, ray, near, far) {
-  const { float32Array: float32Array2, uint16Array: uint16Array2, uint32Array: uint32Array2 } = BufferStack;
-  let nodeIndex16 = nodeIndex32 * 2;
-  const isLeaf = IS_LEAF(nodeIndex16, uint16Array2);
-  if (isLeaf) {
-    const offset = OFFSET(nodeIndex32, uint32Array2);
-    const count = COUNT(nodeIndex16, uint16Array2);
-    return intersectClosestTri(bvh, side, ray, offset, count, near, far);
-  } else {
-    const splitAxis = SPLIT_AXIS(nodeIndex32, uint32Array2);
-    const xyzAxis = _xyzFields[splitAxis];
-    const rayDir = ray.direction[xyzAxis];
-    const leftToRight = rayDir >= 0;
-    let c1, c2;
-    if (leftToRight) {
-      c1 = LEFT_NODE(nodeIndex32);
-      c2 = RIGHT_NODE(nodeIndex32, uint32Array2);
-    } else {
-      c1 = RIGHT_NODE(nodeIndex32, uint32Array2);
-      c2 = LEFT_NODE(nodeIndex32);
-    }
-    const c1Intersection = intersectRay(c1, float32Array2, ray, near, far);
-    const c1Result = c1Intersection ? _raycastFirst(c1, bvh, side, ray, near, far) : null;
-    if (c1Result) {
-      const point = c1Result.point[xyzAxis];
-      const isOutside = leftToRight ? point <= float32Array2[c2 + splitAxis] : (
-        // min bounding data
-        point >= float32Array2[c2 + splitAxis + 3]
-      );
-      if (isOutside) {
-        return c1Result;
-      }
-    }
-    const c2Intersection = intersectRay(c2, float32Array2, ray, near, far);
-    const c2Result = c2Intersection ? _raycastFirst(c2, bvh, side, ray, near, far) : null;
-    if (c1Result && c2Result) {
-      return c1Result.distance <= c2Result.distance ? c1Result : c2Result;
-    } else {
-      return c1Result || c2Result || null;
-    }
-  }
-}
-
-// node_modules/three-mesh-bvh/src/core/cast/intersectsGeometry.generated.js
-var boundingBox = /* @__PURE__ */ new Box3();
-var triangle = /* @__PURE__ */ new ExtendedTriangle();
-var triangle2 = /* @__PURE__ */ new ExtendedTriangle();
-var invertedMat = /* @__PURE__ */ new Matrix4();
-var obb = /* @__PURE__ */ new OrientedBox();
-var obb2 = /* @__PURE__ */ new OrientedBox();
-function intersectsGeometry(bvh, root, otherGeometry, geometryToBvh) {
-  BufferStack.setBuffer(bvh._roots[root]);
-  const result = _intersectsGeometry(0, bvh, otherGeometry, geometryToBvh);
-  BufferStack.clearBuffer();
-  return result;
-}
-function _intersectsGeometry(nodeIndex32, bvh, otherGeometry, geometryToBvh, cachedObb = null) {
-  const { float32Array: float32Array2, uint16Array: uint16Array2, uint32Array: uint32Array2 } = BufferStack;
-  let nodeIndex16 = nodeIndex32 * 2;
-  if (cachedObb === null) {
-    if (!otherGeometry.boundingBox) {
-      otherGeometry.computeBoundingBox();
-    }
-    obb.set(otherGeometry.boundingBox.min, otherGeometry.boundingBox.max, geometryToBvh);
-    cachedObb = obb;
-  }
-  const isLeaf = IS_LEAF(nodeIndex16, uint16Array2);
-  if (isLeaf) {
-    const thisGeometry = bvh.geometry;
-    const thisIndex = thisGeometry.index;
-    const thisPos = thisGeometry.attributes.position;
-    const index = otherGeometry.index;
-    const pos = otherGeometry.attributes.position;
-    const offset = OFFSET(nodeIndex32, uint32Array2);
-    const count = COUNT(nodeIndex16, uint16Array2);
-    invertedMat.copy(geometryToBvh).invert();
-    if (otherGeometry.boundsTree) {
-      arrayToBox(BOUNDING_DATA_INDEX(nodeIndex32), float32Array2, obb2);
-      obb2.matrix.copy(invertedMat);
-      obb2.needsUpdate = true;
-      const res = otherGeometry.boundsTree.shapecast({
-        intersectsBounds: (box) => obb2.intersectsBox(box),
-        intersectsTriangle: (tri) => {
-          tri.a.applyMatrix4(geometryToBvh);
-          tri.b.applyMatrix4(geometryToBvh);
-          tri.c.applyMatrix4(geometryToBvh);
-          tri.needsUpdate = true;
-          for (let i = offset * 3, l = (count + offset) * 3; i < l; i += 3) {
-            setTriangle(triangle2, i, thisIndex, thisPos);
-            triangle2.needsUpdate = true;
-            if (tri.intersectsTriangle(triangle2)) {
-              return true;
-            }
-          }
-          return false;
-        }
-      });
-      return res;
-    } else {
-      for (let i = offset * 3, l = (count + offset) * 3; i < l; i += 3) {
-        setTriangle(triangle, i, thisIndex, thisPos);
-        triangle.a.applyMatrix4(invertedMat);
-        triangle.b.applyMatrix4(invertedMat);
-        triangle.c.applyMatrix4(invertedMat);
-        triangle.needsUpdate = true;
-        for (let i2 = 0, l2 = index.count; i2 < l2; i2 += 3) {
-          setTriangle(triangle2, i2, index, pos);
-          triangle2.needsUpdate = true;
-          if (triangle.intersectsTriangle(triangle2)) {
-            return true;
-          }
-        }
-      }
-    }
-  } else {
-    const left = nodeIndex32 + 8;
-    const right = uint32Array2[nodeIndex32 + 6];
-    arrayToBox(BOUNDING_DATA_INDEX(left), float32Array2, boundingBox);
-    const leftIntersection = cachedObb.intersectsBox(boundingBox) && _intersectsGeometry(left, bvh, otherGeometry, geometryToBvh, cachedObb);
-    if (leftIntersection) return true;
-    arrayToBox(BOUNDING_DATA_INDEX(right), float32Array2, boundingBox);
-    const rightIntersection = cachedObb.intersectsBox(boundingBox) && _intersectsGeometry(right, bvh, otherGeometry, geometryToBvh, cachedObb);
-    if (rightIntersection) return true;
-    return false;
-  }
-}
-
-// node_modules/three-mesh-bvh/src/core/cast/closestPointToGeometry.generated.js
-var tempMatrix = /* @__PURE__ */ new Matrix4();
-var obb3 = /* @__PURE__ */ new OrientedBox();
-var obb22 = /* @__PURE__ */ new OrientedBox();
-var temp12 = /* @__PURE__ */ new Vector3();
-var temp2 = /* @__PURE__ */ new Vector3();
-var temp3 = /* @__PURE__ */ new Vector3();
-var temp4 = /* @__PURE__ */ new Vector3();
-function closestPointToGeometry(bvh, otherGeometry, geometryToBvh, target1 = {}, target2 = {}, minThreshold = 0, maxThreshold = Infinity) {
-  if (!otherGeometry.boundingBox) {
-    otherGeometry.computeBoundingBox();
-  }
-  obb3.set(otherGeometry.boundingBox.min, otherGeometry.boundingBox.max, geometryToBvh);
-  obb3.needsUpdate = true;
-  const geometry = bvh.geometry;
-  const pos = geometry.attributes.position;
-  const index = geometry.index;
-  const otherPos = otherGeometry.attributes.position;
-  const otherIndex = otherGeometry.index;
-  const triangle4 = ExtendedTrianglePool.getPrimitive();
-  const triangle23 = ExtendedTrianglePool.getPrimitive();
-  let tempTarget1 = temp12;
-  let tempTargetDest1 = temp2;
-  let tempTarget2 = null;
-  let tempTargetDest2 = null;
-  if (target2) {
-    tempTarget2 = temp3;
-    tempTargetDest2 = temp4;
-  }
-  let closestDistance = Infinity;
-  let closestDistanceTriIndex = null;
-  let closestDistanceOtherTriIndex = null;
-  tempMatrix.copy(geometryToBvh).invert();
-  obb22.matrix.copy(tempMatrix);
-  bvh.shapecast(
-    {
-      boundsTraverseOrder: (box) => {
-        return obb3.distanceToBox(box);
-      },
-      intersectsBounds: (box, isLeaf, score) => {
-        if (score < closestDistance && score < maxThreshold) {
-          if (isLeaf) {
-            obb22.min.copy(box.min);
-            obb22.max.copy(box.max);
-            obb22.needsUpdate = true;
-          }
-          return true;
-        }
-        return false;
-      },
-      intersectsRange: (offset, count) => {
-        if (otherGeometry.boundsTree) {
-          const otherBvh = otherGeometry.boundsTree;
-          return otherBvh.shapecast({
-            boundsTraverseOrder: (box) => {
-              return obb22.distanceToBox(box);
-            },
-            intersectsBounds: (box, isLeaf, score) => {
-              return score < closestDistance && score < maxThreshold;
-            },
-            intersectsRange: (otherOffset, otherCount) => {
-              for (let i2 = otherOffset, l2 = otherOffset + otherCount; i2 < l2; i2++) {
-                setTriangle(triangle23, 3 * i2, otherIndex, otherPos);
-                triangle23.a.applyMatrix4(geometryToBvh);
-                triangle23.b.applyMatrix4(geometryToBvh);
-                triangle23.c.applyMatrix4(geometryToBvh);
-                triangle23.needsUpdate = true;
-                for (let i = offset, l = offset + count; i < l; i++) {
-                  setTriangle(triangle4, 3 * i, index, pos);
-                  triangle4.needsUpdate = true;
-                  const dist = triangle4.distanceToTriangle(triangle23, tempTarget1, tempTarget2);
-                  if (dist < closestDistance) {
-                    tempTargetDest1.copy(tempTarget1);
-                    if (tempTargetDest2) {
-                      tempTargetDest2.copy(tempTarget2);
-                    }
-                    closestDistance = dist;
-                    closestDistanceTriIndex = i;
-                    closestDistanceOtherTriIndex = i2;
-                  }
-                  if (dist < minThreshold) {
-                    return true;
-                  }
-                }
-              }
-            }
-          });
-        } else {
-          const triCount = getTriCount(otherGeometry);
-          for (let i2 = 0, l2 = triCount; i2 < l2; i2++) {
-            setTriangle(triangle23, 3 * i2, otherIndex, otherPos);
-            triangle23.a.applyMatrix4(geometryToBvh);
-            triangle23.b.applyMatrix4(geometryToBvh);
-            triangle23.c.applyMatrix4(geometryToBvh);
-            triangle23.needsUpdate = true;
-            for (let i = offset, l = offset + count; i < l; i++) {
-              setTriangle(triangle4, 3 * i, index, pos);
-              triangle4.needsUpdate = true;
-              const dist = triangle4.distanceToTriangle(triangle23, tempTarget1, tempTarget2);
-              if (dist < closestDistance) {
-                tempTargetDest1.copy(tempTarget1);
-                if (tempTargetDest2) {
-                  tempTargetDest2.copy(tempTarget2);
-                }
-                closestDistance = dist;
-                closestDistanceTriIndex = i;
-                closestDistanceOtherTriIndex = i2;
-              }
-              if (dist < minThreshold) {
-                return true;
-              }
-            }
-          }
-        }
-      }
-    }
-  );
-  ExtendedTrianglePool.releasePrimitive(triangle4);
-  ExtendedTrianglePool.releasePrimitive(triangle23);
-  if (closestDistance === Infinity) {
-    return null;
-  }
-  if (!target1.point) {
-    target1.point = tempTargetDest1.clone();
-  } else {
-    target1.point.copy(tempTargetDest1);
-  }
-  target1.distance = closestDistance, target1.faceIndex = closestDistanceTriIndex;
-  if (target2) {
-    if (!target2.point) target2.point = tempTargetDest2.clone();
-    else target2.point.copy(tempTargetDest2);
-    target2.point.applyMatrix4(tempMatrix);
-    tempTargetDest1.applyMatrix4(tempMatrix);
-    target2.distance = tempTargetDest1.sub(target2.point).length();
-    target2.faceIndex = closestDistanceOtherTriIndex;
-  }
-  return target1;
-}
-
-// node_modules/three-mesh-bvh/src/core/cast/refit_indirect.generated.js
-function refit_indirect(bvh, nodeIndices = null) {
-  if (nodeIndices && Array.isArray(nodeIndices)) {
-    nodeIndices = new Set(nodeIndices);
-  }
-  const geometry = bvh.geometry;
-  const indexArr = geometry.index ? geometry.index.array : null;
-  const posAttr = geometry.attributes.position;
-  let buffer, uint32Array2, uint16Array2, float32Array2;
-  let byteOffset = 0;
-  const roots = bvh._roots;
-  for (let i = 0, l = roots.length; i < l; i++) {
-    buffer = roots[i];
-    uint32Array2 = new Uint32Array(buffer);
-    uint16Array2 = new Uint16Array(buffer);
-    float32Array2 = new Float32Array(buffer);
-    _traverse2(0, byteOffset);
-    byteOffset += buffer.byteLength;
-  }
-  function _traverse2(node32Index, byteOffset2, force = false) {
-    const node16Index = node32Index * 2;
-    const isLeaf = uint16Array2[node16Index + 15] === IS_LEAFNODE_FLAG;
-    if (isLeaf) {
-      const offset = uint32Array2[node32Index + 6];
-      const count = uint16Array2[node16Index + 14];
-      let minx = Infinity;
-      let miny = Infinity;
-      let minz = Infinity;
-      let maxx = -Infinity;
-      let maxy = -Infinity;
-      let maxz = -Infinity;
-      for (let i = offset, l = offset + count; i < l; i++) {
-        const t2 = 3 * bvh.resolveTriangleIndex(i);
-        for (let j = 0; j < 3; j++) {
-          let index = t2 + j;
-          index = indexArr ? indexArr[index] : index;
-          const x = posAttr.getX(index);
-          const y = posAttr.getY(index);
-          const z = posAttr.getZ(index);
-          if (x < minx) minx = x;
-          if (x > maxx) maxx = x;
-          if (y < miny) miny = y;
-          if (y > maxy) maxy = y;
-          if (z < minz) minz = z;
-          if (z > maxz) maxz = z;
-        }
-      }
-      if (float32Array2[node32Index + 0] !== minx || float32Array2[node32Index + 1] !== miny || float32Array2[node32Index + 2] !== minz || float32Array2[node32Index + 3] !== maxx || float32Array2[node32Index + 4] !== maxy || float32Array2[node32Index + 5] !== maxz) {
-        float32Array2[node32Index + 0] = minx;
-        float32Array2[node32Index + 1] = miny;
-        float32Array2[node32Index + 2] = minz;
-        float32Array2[node32Index + 3] = maxx;
-        float32Array2[node32Index + 4] = maxy;
-        float32Array2[node32Index + 5] = maxz;
-        return true;
-      } else {
-        return false;
-      }
-    } else {
-      const left = node32Index + 8;
-      const right = uint32Array2[node32Index + 6];
-      const offsetLeft = left + byteOffset2;
-      const offsetRight = right + byteOffset2;
-      let forceChildren = force;
-      let includesLeft = false;
-      let includesRight = false;
-      if (nodeIndices) {
-        if (!forceChildren) {
-          includesLeft = nodeIndices.has(offsetLeft);
-          includesRight = nodeIndices.has(offsetRight);
-          forceChildren = !includesLeft && !includesRight;
-        }
-      } else {
-        includesLeft = true;
-        includesRight = true;
-      }
-      const traverseLeft = forceChildren || includesLeft;
-      const traverseRight = forceChildren || includesRight;
-      let leftChange = false;
-      if (traverseLeft) {
-        leftChange = _traverse2(left, byteOffset2, forceChildren);
-      }
-      let rightChange = false;
-      if (traverseRight) {
-        rightChange = _traverse2(right, byteOffset2, forceChildren);
-      }
-      const didChange = leftChange || rightChange;
-      if (didChange) {
-        for (let i = 0; i < 3; i++) {
-          const lefti = left + i;
-          const righti = right + i;
-          const minLeftValue = float32Array2[lefti];
-          const maxLeftValue = float32Array2[lefti + 3];
-          const minRightValue = float32Array2[righti];
-          const maxRightValue = float32Array2[righti + 3];
-          float32Array2[node32Index + i] = minLeftValue < minRightValue ? minLeftValue : minRightValue;
-          float32Array2[node32Index + i + 3] = maxLeftValue > maxRightValue ? maxLeftValue : maxRightValue;
-        }
-      }
-      return didChange;
-    }
-  }
-}
-
-// node_modules/three-mesh-bvh/src/core/cast/raycast_indirect.generated.js
-function raycast_indirect(bvh, root, side, ray, intersects2, near, far) {
-  BufferStack.setBuffer(bvh._roots[root]);
-  _raycast2(0, bvh, side, ray, intersects2, near, far);
-  BufferStack.clearBuffer();
-}
-function _raycast2(nodeIndex32, bvh, side, ray, intersects2, near, far) {
-  const { float32Array: float32Array2, uint16Array: uint16Array2, uint32Array: uint32Array2 } = BufferStack;
-  const nodeIndex16 = nodeIndex32 * 2;
-  const isLeaf = IS_LEAF(nodeIndex16, uint16Array2);
-  if (isLeaf) {
-    const offset = OFFSET(nodeIndex32, uint32Array2);
-    const count = COUNT(nodeIndex16, uint16Array2);
-    intersectTris_indirect(bvh, side, ray, offset, count, intersects2, near, far);
-  } else {
-    const leftIndex = LEFT_NODE(nodeIndex32);
-    if (intersectRay(leftIndex, float32Array2, ray, near, far)) {
-      _raycast2(leftIndex, bvh, side, ray, intersects2, near, far);
-    }
-    const rightIndex = RIGHT_NODE(nodeIndex32, uint32Array2);
-    if (intersectRay(rightIndex, float32Array2, ray, near, far)) {
-      _raycast2(rightIndex, bvh, side, ray, intersects2, near, far);
-    }
-  }
-}
-
-// node_modules/three-mesh-bvh/src/core/cast/raycastFirst_indirect.generated.js
-var _xyzFields2 = ["x", "y", "z"];
-function raycastFirst_indirect(bvh, root, side, ray, near, far) {
-  BufferStack.setBuffer(bvh._roots[root]);
-  const result = _raycastFirst2(0, bvh, side, ray, near, far);
-  BufferStack.clearBuffer();
-  return result;
-}
-function _raycastFirst2(nodeIndex32, bvh, side, ray, near, far) {
-  const { float32Array: float32Array2, uint16Array: uint16Array2, uint32Array: uint32Array2 } = BufferStack;
-  let nodeIndex16 = nodeIndex32 * 2;
-  const isLeaf = IS_LEAF(nodeIndex16, uint16Array2);
-  if (isLeaf) {
-    const offset = OFFSET(nodeIndex32, uint32Array2);
-    const count = COUNT(nodeIndex16, uint16Array2);
-    return intersectClosestTri_indirect(bvh, side, ray, offset, count, near, far);
-  } else {
-    const splitAxis = SPLIT_AXIS(nodeIndex32, uint32Array2);
-    const xyzAxis = _xyzFields2[splitAxis];
-    const rayDir = ray.direction[xyzAxis];
-    const leftToRight = rayDir >= 0;
-    let c1, c2;
-    if (leftToRight) {
-      c1 = LEFT_NODE(nodeIndex32);
-      c2 = RIGHT_NODE(nodeIndex32, uint32Array2);
-    } else {
-      c1 = RIGHT_NODE(nodeIndex32, uint32Array2);
-      c2 = LEFT_NODE(nodeIndex32);
-    }
-    const c1Intersection = intersectRay(c1, float32Array2, ray, near, far);
-    const c1Result = c1Intersection ? _raycastFirst2(c1, bvh, side, ray, near, far) : null;
-    if (c1Result) {
-      const point = c1Result.point[xyzAxis];
-      const isOutside = leftToRight ? point <= float32Array2[c2 + splitAxis] : (
-        // min bounding data
-        point >= float32Array2[c2 + splitAxis + 3]
-      );
-      if (isOutside) {
-        return c1Result;
-      }
-    }
-    const c2Intersection = intersectRay(c2, float32Array2, ray, near, far);
-    const c2Result = c2Intersection ? _raycastFirst2(c2, bvh, side, ray, near, far) : null;
-    if (c1Result && c2Result) {
-      return c1Result.distance <= c2Result.distance ? c1Result : c2Result;
-    } else {
-      return c1Result || c2Result || null;
-    }
-  }
-}
-
-// node_modules/three-mesh-bvh/src/core/cast/intersectsGeometry_indirect.generated.js
-var boundingBox2 = /* @__PURE__ */ new Box3();
-var triangle3 = /* @__PURE__ */ new ExtendedTriangle();
-var triangle22 = /* @__PURE__ */ new ExtendedTriangle();
-var invertedMat2 = /* @__PURE__ */ new Matrix4();
-var obb4 = /* @__PURE__ */ new OrientedBox();
-var obb23 = /* @__PURE__ */ new OrientedBox();
-function intersectsGeometry_indirect(bvh, root, otherGeometry, geometryToBvh) {
-  BufferStack.setBuffer(bvh._roots[root]);
-  const result = _intersectsGeometry2(0, bvh, otherGeometry, geometryToBvh);
-  BufferStack.clearBuffer();
-  return result;
-}
-function _intersectsGeometry2(nodeIndex32, bvh, otherGeometry, geometryToBvh, cachedObb = null) {
-  const { float32Array: float32Array2, uint16Array: uint16Array2, uint32Array: uint32Array2 } = BufferStack;
-  let nodeIndex16 = nodeIndex32 * 2;
-  if (cachedObb === null) {
-    if (!otherGeometry.boundingBox) {
-      otherGeometry.computeBoundingBox();
-    }
-    obb4.set(otherGeometry.boundingBox.min, otherGeometry.boundingBox.max, geometryToBvh);
-    cachedObb = obb4;
-  }
-  const isLeaf = IS_LEAF(nodeIndex16, uint16Array2);
-  if (isLeaf) {
-    const thisGeometry = bvh.geometry;
-    const thisIndex = thisGeometry.index;
-    const thisPos = thisGeometry.attributes.position;
-    const index = otherGeometry.index;
-    const pos = otherGeometry.attributes.position;
-    const offset = OFFSET(nodeIndex32, uint32Array2);
-    const count = COUNT(nodeIndex16, uint16Array2);
-    invertedMat2.copy(geometryToBvh).invert();
-    if (otherGeometry.boundsTree) {
-      arrayToBox(BOUNDING_DATA_INDEX(nodeIndex32), float32Array2, obb23);
-      obb23.matrix.copy(invertedMat2);
-      obb23.needsUpdate = true;
-      const res = otherGeometry.boundsTree.shapecast({
-        intersectsBounds: (box) => obb23.intersectsBox(box),
-        intersectsTriangle: (tri) => {
-          tri.a.applyMatrix4(geometryToBvh);
-          tri.b.applyMatrix4(geometryToBvh);
-          tri.c.applyMatrix4(geometryToBvh);
-          tri.needsUpdate = true;
-          for (let i = offset, l = count + offset; i < l; i++) {
-            setTriangle(triangle22, 3 * bvh.resolveTriangleIndex(i), thisIndex, thisPos);
-            triangle22.needsUpdate = true;
-            if (tri.intersectsTriangle(triangle22)) {
-              return true;
-            }
-          }
-          return false;
-        }
-      });
-      return res;
-    } else {
-      for (let i = offset, l = count + offset; i < l; i++) {
-        const ti = bvh.resolveTriangleIndex(i);
-        setTriangle(triangle3, 3 * ti, thisIndex, thisPos);
-        triangle3.a.applyMatrix4(invertedMat2);
-        triangle3.b.applyMatrix4(invertedMat2);
-        triangle3.c.applyMatrix4(invertedMat2);
-        triangle3.needsUpdate = true;
-        for (let i2 = 0, l2 = index.count; i2 < l2; i2 += 3) {
-          setTriangle(triangle22, i2, index, pos);
-          triangle22.needsUpdate = true;
-          if (triangle3.intersectsTriangle(triangle22)) {
-            return true;
-          }
-        }
-      }
-    }
-  } else {
-    const left = nodeIndex32 + 8;
-    const right = uint32Array2[nodeIndex32 + 6];
-    arrayToBox(BOUNDING_DATA_INDEX(left), float32Array2, boundingBox2);
-    const leftIntersection = cachedObb.intersectsBox(boundingBox2) && _intersectsGeometry2(left, bvh, otherGeometry, geometryToBvh, cachedObb);
-    if (leftIntersection) return true;
-    arrayToBox(BOUNDING_DATA_INDEX(right), float32Array2, boundingBox2);
-    const rightIntersection = cachedObb.intersectsBox(boundingBox2) && _intersectsGeometry2(right, bvh, otherGeometry, geometryToBvh, cachedObb);
-    if (rightIntersection) return true;
-    return false;
-  }
-}
-
-// node_modules/three-mesh-bvh/src/core/cast/closestPointToGeometry_indirect.generated.js
-var tempMatrix2 = /* @__PURE__ */ new Matrix4();
-var obb5 = /* @__PURE__ */ new OrientedBox();
-var obb24 = /* @__PURE__ */ new OrientedBox();
-var temp13 = /* @__PURE__ */ new Vector3();
-var temp22 = /* @__PURE__ */ new Vector3();
-var temp32 = /* @__PURE__ */ new Vector3();
-var temp42 = /* @__PURE__ */ new Vector3();
-function closestPointToGeometry_indirect(bvh, otherGeometry, geometryToBvh, target1 = {}, target2 = {}, minThreshold = 0, maxThreshold = Infinity) {
-  if (!otherGeometry.boundingBox) {
-    otherGeometry.computeBoundingBox();
-  }
-  obb5.set(otherGeometry.boundingBox.min, otherGeometry.boundingBox.max, geometryToBvh);
-  obb5.needsUpdate = true;
-  const geometry = bvh.geometry;
-  const pos = geometry.attributes.position;
-  const index = geometry.index;
-  const otherPos = otherGeometry.attributes.position;
-  const otherIndex = otherGeometry.index;
-  const triangle4 = ExtendedTrianglePool.getPrimitive();
-  const triangle23 = ExtendedTrianglePool.getPrimitive();
-  let tempTarget1 = temp13;
-  let tempTargetDest1 = temp22;
-  let tempTarget2 = null;
-  let tempTargetDest2 = null;
-  if (target2) {
-    tempTarget2 = temp32;
-    tempTargetDest2 = temp42;
-  }
-  let closestDistance = Infinity;
-  let closestDistanceTriIndex = null;
-  let closestDistanceOtherTriIndex = null;
-  tempMatrix2.copy(geometryToBvh).invert();
-  obb24.matrix.copy(tempMatrix2);
-  bvh.shapecast(
-    {
-      boundsTraverseOrder: (box) => {
-        return obb5.distanceToBox(box);
-      },
-      intersectsBounds: (box, isLeaf, score) => {
-        if (score < closestDistance && score < maxThreshold) {
-          if (isLeaf) {
-            obb24.min.copy(box.min);
-            obb24.max.copy(box.max);
-            obb24.needsUpdate = true;
-          }
-          return true;
-        }
-        return false;
-      },
-      intersectsRange: (offset, count) => {
-        if (otherGeometry.boundsTree) {
-          const otherBvh = otherGeometry.boundsTree;
-          return otherBvh.shapecast({
-            boundsTraverseOrder: (box) => {
-              return obb24.distanceToBox(box);
-            },
-            intersectsBounds: (box, isLeaf, score) => {
-              return score < closestDistance && score < maxThreshold;
-            },
-            intersectsRange: (otherOffset, otherCount) => {
-              for (let i2 = otherOffset, l2 = otherOffset + otherCount; i2 < l2; i2++) {
-                const ti2 = otherBvh.resolveTriangleIndex(i2);
-                setTriangle(triangle23, 3 * ti2, otherIndex, otherPos);
-                triangle23.a.applyMatrix4(geometryToBvh);
-                triangle23.b.applyMatrix4(geometryToBvh);
-                triangle23.c.applyMatrix4(geometryToBvh);
-                triangle23.needsUpdate = true;
-                for (let i = offset, l = offset + count; i < l; i++) {
-                  const ti = bvh.resolveTriangleIndex(i);
-                  setTriangle(triangle4, 3 * ti, index, pos);
-                  triangle4.needsUpdate = true;
-                  const dist = triangle4.distanceToTriangle(triangle23, tempTarget1, tempTarget2);
-                  if (dist < closestDistance) {
-                    tempTargetDest1.copy(tempTarget1);
-                    if (tempTargetDest2) {
-                      tempTargetDest2.copy(tempTarget2);
-                    }
-                    closestDistance = dist;
-                    closestDistanceTriIndex = i;
-                    closestDistanceOtherTriIndex = i2;
-                  }
-                  if (dist < minThreshold) {
-                    return true;
-                  }
-                }
-              }
-            }
-          });
-        } else {
-          const triCount = getTriCount(otherGeometry);
-          for (let i2 = 0, l2 = triCount; i2 < l2; i2++) {
-            setTriangle(triangle23, 3 * i2, otherIndex, otherPos);
-            triangle23.a.applyMatrix4(geometryToBvh);
-            triangle23.b.applyMatrix4(geometryToBvh);
-            triangle23.c.applyMatrix4(geometryToBvh);
-            triangle23.needsUpdate = true;
-            for (let i = offset, l = offset + count; i < l; i++) {
-              const ti = bvh.resolveTriangleIndex(i);
-              setTriangle(triangle4, 3 * ti, index, pos);
-              triangle4.needsUpdate = true;
-              const dist = triangle4.distanceToTriangle(triangle23, tempTarget1, tempTarget2);
-              if (dist < closestDistance) {
-                tempTargetDest1.copy(tempTarget1);
-                if (tempTargetDest2) {
-                  tempTargetDest2.copy(tempTarget2);
-                }
-                closestDistance = dist;
-                closestDistanceTriIndex = i;
-                closestDistanceOtherTriIndex = i2;
-              }
-              if (dist < minThreshold) {
-                return true;
-              }
-            }
-          }
-        }
-      }
-    }
-  );
-  ExtendedTrianglePool.releasePrimitive(triangle4);
-  ExtendedTrianglePool.releasePrimitive(triangle23);
-  if (closestDistance === Infinity) {
-    return null;
-  }
-  if (!target1.point) {
-    target1.point = tempTargetDest1.clone();
-  } else {
-    target1.point.copy(tempTargetDest1);
-  }
-  target1.distance = closestDistance, target1.faceIndex = closestDistanceTriIndex;
-  if (target2) {
-    if (!target2.point) target2.point = tempTargetDest2.clone();
-    else target2.point.copy(tempTargetDest2);
-    target2.point.applyMatrix4(tempMatrix2);
-    tempTargetDest1.applyMatrix4(tempMatrix2);
-    target2.distance = tempTargetDest1.sub(target2.point).length();
-    target2.faceIndex = closestDistanceOtherTriIndex;
-  }
-  return target1;
-}
-
-// node_modules/three-mesh-bvh/src/utils/BufferUtils.js
-function isSharedArrayBufferSupported() {
-  return typeof SharedArrayBuffer !== "undefined";
-}
-
-// node_modules/three-mesh-bvh/src/core/cast/bvhcast.js
-var _bufferStack1 = new BufferStack.constructor();
-var _bufferStack2 = new BufferStack.constructor();
-var _boxPool = new PrimitivePool(() => new Box3());
-var _leftBox1 = new Box3();
-var _rightBox1 = new Box3();
-var _leftBox2 = new Box3();
-var _rightBox2 = new Box3();
-var _active = false;
-function bvhcast(bvh, otherBvh, matrixToLocal, intersectsRanges) {
-  if (_active) {
-    throw new Error("MeshBVH: Recursive calls to bvhcast not supported.");
-  }
-  _active = true;
-  const roots = bvh._roots;
-  const otherRoots = otherBvh._roots;
-  let result;
-  let offset1 = 0;
-  let offset2 = 0;
-  const invMat = new Matrix4().copy(matrixToLocal).invert();
-  for (let i = 0, il = roots.length; i < il; i++) {
-    _bufferStack1.setBuffer(roots[i]);
-    offset2 = 0;
-    const localBox = _boxPool.getPrimitive();
-    arrayToBox(BOUNDING_DATA_INDEX(0), _bufferStack1.float32Array, localBox);
-    localBox.applyMatrix4(invMat);
-    for (let j = 0, jl = otherRoots.length; j < jl; j++) {
-      _bufferStack2.setBuffer(otherRoots[j]);
-      result = _traverse(
-        0,
-        0,
-        matrixToLocal,
-        invMat,
-        intersectsRanges,
-        offset1,
-        offset2,
-        0,
-        0,
-        localBox
-      );
-      _bufferStack2.clearBuffer();
-      offset2 += otherRoots[j].length;
-      if (result) {
-        break;
-      }
-    }
-    _boxPool.releasePrimitive(localBox);
-    _bufferStack1.clearBuffer();
-    offset1 += roots[i].length;
-    if (result) {
-      break;
-    }
-  }
-  _active = false;
-  return result;
-}
-function _traverse(node1Index32, node2Index32, matrix2to1, matrix1to2, intersectsRangesFunc, node1IndexByteOffset = 0, node2IndexByteOffset = 0, depth1 = 0, depth2 = 0, currBox = null, reversed = false) {
-  let bufferStack1, bufferStack2;
-  if (reversed) {
-    bufferStack1 = _bufferStack2;
-    bufferStack2 = _bufferStack1;
-  } else {
-    bufferStack1 = _bufferStack1;
-    bufferStack2 = _bufferStack2;
-  }
-  const float32Array1 = bufferStack1.float32Array, uint32Array1 = bufferStack1.uint32Array, uint16Array1 = bufferStack1.uint16Array, float32Array2 = bufferStack2.float32Array, uint32Array2 = bufferStack2.uint32Array, uint16Array2 = bufferStack2.uint16Array;
-  const node1Index16 = node1Index32 * 2;
-  const node2Index16 = node2Index32 * 2;
-  const isLeaf1 = IS_LEAF(node1Index16, uint16Array1);
-  const isLeaf2 = IS_LEAF(node2Index16, uint16Array2);
-  let result = false;
-  if (isLeaf2 && isLeaf1) {
-    if (reversed) {
-      result = intersectsRangesFunc(
-        OFFSET(node2Index32, uint32Array2),
-        COUNT(node2Index32 * 2, uint16Array2),
-        OFFSET(node1Index32, uint32Array1),
-        COUNT(node1Index32 * 2, uint16Array1),
-        depth2,
-        node2IndexByteOffset + node2Index32,
-        depth1,
-        node1IndexByteOffset + node1Index32
-      );
-    } else {
-      result = intersectsRangesFunc(
-        OFFSET(node1Index32, uint32Array1),
-        COUNT(node1Index32 * 2, uint16Array1),
-        OFFSET(node2Index32, uint32Array2),
-        COUNT(node2Index32 * 2, uint16Array2),
-        depth1,
-        node1IndexByteOffset + node1Index32,
-        depth2,
-        node2IndexByteOffset + node2Index32
-      );
-    }
-  } else if (isLeaf2) {
-    const newBox = _boxPool.getPrimitive();
-    arrayToBox(BOUNDING_DATA_INDEX(node2Index32), float32Array2, newBox);
-    newBox.applyMatrix4(matrix2to1);
-    const cl1 = LEFT_NODE(node1Index32);
-    const cr1 = RIGHT_NODE(node1Index32, uint32Array1);
-    arrayToBox(BOUNDING_DATA_INDEX(cl1), float32Array1, _leftBox1);
-    arrayToBox(BOUNDING_DATA_INDEX(cr1), float32Array1, _rightBox1);
-    const intersectCl1 = newBox.intersectsBox(_leftBox1);
-    const intersectCr1 = newBox.intersectsBox(_rightBox1);
-    result = intersectCl1 && _traverse(
-      node2Index32,
-      cl1,
-      matrix1to2,
-      matrix2to1,
-      intersectsRangesFunc,
-      node2IndexByteOffset,
-      node1IndexByteOffset,
-      depth2,
-      depth1 + 1,
-      newBox,
-      !reversed
-    ) || intersectCr1 && _traverse(
-      node2Index32,
-      cr1,
-      matrix1to2,
-      matrix2to1,
-      intersectsRangesFunc,
-      node2IndexByteOffset,
-      node1IndexByteOffset,
-      depth2,
-      depth1 + 1,
-      newBox,
-      !reversed
-    );
-    _boxPool.releasePrimitive(newBox);
-  } else {
-    const cl2 = LEFT_NODE(node2Index32);
-    const cr2 = RIGHT_NODE(node2Index32, uint32Array2);
-    arrayToBox(BOUNDING_DATA_INDEX(cl2), float32Array2, _leftBox2);
-    arrayToBox(BOUNDING_DATA_INDEX(cr2), float32Array2, _rightBox2);
-    const leftIntersects = currBox.intersectsBox(_leftBox2);
-    const rightIntersects = currBox.intersectsBox(_rightBox2);
-    if (leftIntersects && rightIntersects) {
-      result = _traverse(
-        node1Index32,
-        cl2,
-        matrix2to1,
-        matrix1to2,
-        intersectsRangesFunc,
-        node1IndexByteOffset,
-        node2IndexByteOffset,
-        depth1,
-        depth2 + 1,
-        currBox,
-        reversed
-      ) || _traverse(
-        node1Index32,
-        cr2,
-        matrix2to1,
-        matrix1to2,
-        intersectsRangesFunc,
-        node1IndexByteOffset,
-        node2IndexByteOffset,
-        depth1,
-        depth2 + 1,
-        currBox,
-        reversed
-      );
-    } else if (leftIntersects) {
-      if (isLeaf1) {
-        result = _traverse(
-          node1Index32,
-          cl2,
-          matrix2to1,
-          matrix1to2,
-          intersectsRangesFunc,
-          node1IndexByteOffset,
-          node2IndexByteOffset,
-          depth1,
-          depth2 + 1,
-          currBox,
-          reversed
-        );
-      } else {
-        const newBox = _boxPool.getPrimitive();
-        newBox.copy(_leftBox2).applyMatrix4(matrix2to1);
-        const cl1 = LEFT_NODE(node1Index32);
-        const cr1 = RIGHT_NODE(node1Index32, uint32Array1);
-        arrayToBox(BOUNDING_DATA_INDEX(cl1), float32Array1, _leftBox1);
-        arrayToBox(BOUNDING_DATA_INDEX(cr1), float32Array1, _rightBox1);
-        const intersectCl1 = newBox.intersectsBox(_leftBox1);
-        const intersectCr1 = newBox.intersectsBox(_rightBox1);
-        result = intersectCl1 && _traverse(
-          cl2,
-          cl1,
-          matrix1to2,
-          matrix2to1,
-          intersectsRangesFunc,
-          node2IndexByteOffset,
-          node1IndexByteOffset,
-          depth2,
-          depth1 + 1,
-          newBox,
-          !reversed
-        ) || intersectCr1 && _traverse(
-          cl2,
-          cr1,
-          matrix1to2,
-          matrix2to1,
-          intersectsRangesFunc,
-          node2IndexByteOffset,
-          node1IndexByteOffset,
-          depth2,
-          depth1 + 1,
-          newBox,
-          !reversed
-        );
-        _boxPool.releasePrimitive(newBox);
-      }
-    } else if (rightIntersects) {
-      if (isLeaf1) {
-        result = _traverse(
-          node1Index32,
-          cr2,
-          matrix2to1,
-          matrix1to2,
-          intersectsRangesFunc,
-          node1IndexByteOffset,
-          node2IndexByteOffset,
-          depth1,
-          depth2 + 1,
-          currBox,
-          reversed
-        );
-      } else {
-        const newBox = _boxPool.getPrimitive();
-        newBox.copy(_rightBox2).applyMatrix4(matrix2to1);
-        const cl1 = LEFT_NODE(node1Index32);
-        const cr1 = RIGHT_NODE(node1Index32, uint32Array1);
-        arrayToBox(BOUNDING_DATA_INDEX(cl1), float32Array1, _leftBox1);
-        arrayToBox(BOUNDING_DATA_INDEX(cr1), float32Array1, _rightBox1);
-        const intersectCl1 = newBox.intersectsBox(_leftBox1);
-        const intersectCr1 = newBox.intersectsBox(_rightBox1);
-        result = intersectCl1 && _traverse(
-          cr2,
-          cl1,
-          matrix1to2,
-          matrix2to1,
-          intersectsRangesFunc,
-          node2IndexByteOffset,
-          node1IndexByteOffset,
-          depth2,
-          depth1 + 1,
-          newBox,
-          !reversed
-        ) || intersectCr1 && _traverse(
-          cr2,
-          cr1,
-          matrix1to2,
-          matrix2to1,
-          intersectsRangesFunc,
-          node2IndexByteOffset,
-          node1IndexByteOffset,
-          depth2,
-          depth1 + 1,
-          newBox,
-          !reversed
-        );
-        _boxPool.releasePrimitive(newBox);
-      }
-    }
-  }
-  return result;
-}
-
-// node_modules/three-mesh-bvh/src/core/MeshBVH.js
-var obb6 = /* @__PURE__ */ new OrientedBox();
-var tempBox = /* @__PURE__ */ new Box3();
-var DEFAULT_OPTIONS = {
-  strategy: CENTER,
-  maxDepth: 40,
-  maxLeafTris: 10,
-  useSharedArrayBuffer: false,
-  setBoundingBox: true,
-  onProgress: null,
-  indirect: false,
-  verbose: true,
-  range: null
-};
-var MeshBVH = class _MeshBVH {
-  static serialize(bvh, options = {}) {
-    options = {
-      cloneBuffers: true,
-      ...options
-    };
-    const geometry = bvh.geometry;
-    const rootData = bvh._roots;
-    const indirectBuffer = bvh._indirectBuffer;
-    const indexAttribute = geometry.getIndex();
-    let result;
-    if (options.cloneBuffers) {
-      result = {
-        roots: rootData.map((root) => root.slice()),
-        index: indexAttribute ? indexAttribute.array.slice() : null,
-        indirectBuffer: indirectBuffer ? indirectBuffer.slice() : null
-      };
-    } else {
-      result = {
-        roots: rootData,
-        index: indexAttribute ? indexAttribute.array : null,
-        indirectBuffer
-      };
-    }
-    return result;
-  }
-  static deserialize(data, geometry, options = {}) {
-    options = {
-      setIndex: true,
-      indirect: Boolean(data.indirectBuffer),
-      ...options
-    };
-    const { index, roots, indirectBuffer } = data;
-    const bvh = new _MeshBVH(geometry, { ...options, [SKIP_GENERATION]: true });
-    bvh._roots = roots;
-    bvh._indirectBuffer = indirectBuffer || null;
-    if (options.setIndex) {
-      const indexAttribute = geometry.getIndex();
-      if (indexAttribute === null) {
-        const newIndex = new BufferAttribute(data.index, 1, false);
-        geometry.setIndex(newIndex);
-      } else if (indexAttribute.array !== index) {
-        indexAttribute.array.set(index);
-        indexAttribute.needsUpdate = true;
-      }
-    }
-    return bvh;
-  }
-  get indirect() {
-    return !!this._indirectBuffer;
-  }
-  constructor(geometry, options = {}) {
-    if (!geometry.isBufferGeometry) {
-      throw new Error("MeshBVH: Only BufferGeometries are supported.");
-    } else if (geometry.index && geometry.index.isInterleavedBufferAttribute) {
-      throw new Error("MeshBVH: InterleavedBufferAttribute is not supported for the index attribute.");
-    }
-    options = Object.assign({
-      ...DEFAULT_OPTIONS,
-      // undocumented options
-      // Whether to skip generating the tree. Used for deserialization.
-      [SKIP_GENERATION]: false
-    }, options);
-    if (options.useSharedArrayBuffer && !isSharedArrayBufferSupported()) {
-      throw new Error("MeshBVH: SharedArrayBuffer is not available.");
-    }
-    this.geometry = geometry;
-    this._roots = null;
-    this._indirectBuffer = null;
-    if (!options[SKIP_GENERATION]) {
-      buildPackedTree(this, options);
-      if (!geometry.boundingBox && options.setBoundingBox) {
-        geometry.boundingBox = this.getBoundingBox(new Box3());
-      }
-    }
-    this.resolveTriangleIndex = options.indirect ? (i) => this._indirectBuffer[i] : (i) => i;
-  }
-  refit(nodeIndices = null) {
-    const refitFunc = this.indirect ? refit_indirect : refit;
-    return refitFunc(this, nodeIndices);
-  }
-  traverse(callback, rootIndex = 0) {
-    const buffer = this._roots[rootIndex];
-    const uint32Array2 = new Uint32Array(buffer);
-    const uint16Array2 = new Uint16Array(buffer);
-    _traverse2(0);
-    function _traverse2(node32Index, depth = 0) {
-      const node16Index = node32Index * 2;
-      const isLeaf = uint16Array2[node16Index + 15] === IS_LEAFNODE_FLAG;
-      if (isLeaf) {
-        const offset = uint32Array2[node32Index + 6];
-        const count = uint16Array2[node16Index + 14];
-        callback(depth, isLeaf, new Float32Array(buffer, node32Index * 4, 6), offset, count);
-      } else {
-        const left = node32Index + BYTES_PER_NODE / 4;
-        const right = uint32Array2[node32Index + 6];
-        const splitAxis = uint32Array2[node32Index + 7];
-        const stopTraversal = callback(depth, isLeaf, new Float32Array(buffer, node32Index * 4, 6), splitAxis);
-        if (!stopTraversal) {
-          _traverse2(left, depth + 1);
-          _traverse2(right, depth + 1);
-        }
-      }
-    }
-  }
-  /* Core Cast Functions */
-  raycast(ray, materialOrSide = FrontSide, near = 0, far = Infinity) {
-    const roots = this._roots;
-    const geometry = this.geometry;
-    const intersects2 = [];
-    const isMaterial = materialOrSide.isMaterial;
-    const isArrayMaterial = Array.isArray(materialOrSide);
-    const groups = geometry.groups;
-    const side = isMaterial ? materialOrSide.side : materialOrSide;
-    const raycastFunc = this.indirect ? raycast_indirect : raycast;
-    for (let i = 0, l = roots.length; i < l; i++) {
-      const materialSide = isArrayMaterial ? materialOrSide[groups[i].materialIndex].side : side;
-      const startCount = intersects2.length;
-      raycastFunc(this, i, materialSide, ray, intersects2, near, far);
-      if (isArrayMaterial) {
-        const materialIndex = groups[i].materialIndex;
-        for (let j = startCount, jl = intersects2.length; j < jl; j++) {
-          intersects2[j].face.materialIndex = materialIndex;
-        }
-      }
-    }
-    return intersects2;
-  }
-  raycastFirst(ray, materialOrSide = FrontSide, near = 0, far = Infinity) {
-    const roots = this._roots;
-    const geometry = this.geometry;
-    const isMaterial = materialOrSide.isMaterial;
-    const isArrayMaterial = Array.isArray(materialOrSide);
-    let closestResult = null;
-    const groups = geometry.groups;
-    const side = isMaterial ? materialOrSide.side : materialOrSide;
-    const raycastFirstFunc = this.indirect ? raycastFirst_indirect : raycastFirst;
-    for (let i = 0, l = roots.length; i < l; i++) {
-      const materialSide = isArrayMaterial ? materialOrSide[groups[i].materialIndex].side : side;
-      const result = raycastFirstFunc(this, i, materialSide, ray, near, far);
-      if (result != null && (closestResult == null || result.distance < closestResult.distance)) {
-        closestResult = result;
-        if (isArrayMaterial) {
-          result.face.materialIndex = groups[i].materialIndex;
-        }
-      }
-    }
-    return closestResult;
-  }
-  intersectsGeometry(otherGeometry, geomToMesh) {
-    let result = false;
-    const roots = this._roots;
-    const intersectsGeometryFunc = this.indirect ? intersectsGeometry_indirect : intersectsGeometry;
-    for (let i = 0, l = roots.length; i < l; i++) {
-      result = intersectsGeometryFunc(this, i, otherGeometry, geomToMesh);
-      if (result) {
-        break;
-      }
-    }
-    return result;
-  }
-  shapecast(callbacks) {
-    const triangle4 = ExtendedTrianglePool.getPrimitive();
-    const iterateFunc = this.indirect ? iterateOverTriangles_indirect : iterateOverTriangles;
-    let {
-      boundsTraverseOrder,
-      intersectsBounds,
-      intersectsRange,
-      intersectsTriangle
-    } = callbacks;
-    if (intersectsRange && intersectsTriangle) {
-      const originalIntersectsRange = intersectsRange;
-      intersectsRange = (offset, count, contained, depth, nodeIndex) => {
-        if (!originalIntersectsRange(offset, count, contained, depth, nodeIndex)) {
-          return iterateFunc(offset, count, this, intersectsTriangle, contained, depth, triangle4);
-        }
-        return true;
-      };
-    } else if (!intersectsRange) {
-      if (intersectsTriangle) {
-        intersectsRange = (offset, count, contained, depth) => {
-          return iterateFunc(offset, count, this, intersectsTriangle, contained, depth, triangle4);
-        };
-      } else {
-        intersectsRange = (offset, count, contained) => {
-          return contained;
-        };
-      }
-    }
-    let result = false;
-    let byteOffset = 0;
-    const roots = this._roots;
-    for (let i = 0, l = roots.length; i < l; i++) {
-      const root = roots[i];
-      result = shapecast(this, i, intersectsBounds, intersectsRange, boundsTraverseOrder, byteOffset);
-      if (result) {
-        break;
-      }
-      byteOffset += root.byteLength;
-    }
-    ExtendedTrianglePool.releasePrimitive(triangle4);
-    return result;
-  }
-  bvhcast(otherBvh, matrixToLocal, callbacks) {
-    let {
-      intersectsRanges,
-      intersectsTriangles
-    } = callbacks;
-    const triangle1 = ExtendedTrianglePool.getPrimitive();
-    const indexAttr1 = this.geometry.index;
-    const positionAttr1 = this.geometry.attributes.position;
-    const assignTriangle1 = this.indirect ? (i1) => {
-      const ti = this.resolveTriangleIndex(i1);
-      setTriangle(triangle1, ti * 3, indexAttr1, positionAttr1);
-    } : (i1) => {
-      setTriangle(triangle1, i1 * 3, indexAttr1, positionAttr1);
-    };
-    const triangle23 = ExtendedTrianglePool.getPrimitive();
-    const indexAttr2 = otherBvh.geometry.index;
-    const positionAttr2 = otherBvh.geometry.attributes.position;
-    const assignTriangle2 = otherBvh.indirect ? (i2) => {
-      const ti2 = otherBvh.resolveTriangleIndex(i2);
-      setTriangle(triangle23, ti2 * 3, indexAttr2, positionAttr2);
-    } : (i2) => {
-      setTriangle(triangle23, i2 * 3, indexAttr2, positionAttr2);
-    };
-    if (intersectsTriangles) {
-      const iterateOverDoubleTriangles = (offset1, count1, offset2, count2, depth1, index1, depth2, index2) => {
-        for (let i2 = offset2, l2 = offset2 + count2; i2 < l2; i2++) {
-          assignTriangle2(i2);
-          triangle23.a.applyMatrix4(matrixToLocal);
-          triangle23.b.applyMatrix4(matrixToLocal);
-          triangle23.c.applyMatrix4(matrixToLocal);
-          triangle23.needsUpdate = true;
-          for (let i1 = offset1, l1 = offset1 + count1; i1 < l1; i1++) {
-            assignTriangle1(i1);
-            triangle1.needsUpdate = true;
-            if (intersectsTriangles(triangle1, triangle23, i1, i2, depth1, index1, depth2, index2)) {
-              return true;
-            }
-          }
-        }
-        return false;
-      };
-      if (intersectsRanges) {
-        const originalIntersectsRanges = intersectsRanges;
-        intersectsRanges = function(offset1, count1, offset2, count2, depth1, index1, depth2, index2) {
-          if (!originalIntersectsRanges(offset1, count1, offset2, count2, depth1, index1, depth2, index2)) {
-            return iterateOverDoubleTriangles(offset1, count1, offset2, count2, depth1, index1, depth2, index2);
-          }
-          return true;
-        };
-      } else {
-        intersectsRanges = iterateOverDoubleTriangles;
-      }
-    }
-    return bvhcast(this, otherBvh, matrixToLocal, intersectsRanges);
-  }
-  /* Derived Cast Functions */
-  intersectsBox(box, boxToMesh) {
-    obb6.set(box.min, box.max, boxToMesh);
-    obb6.needsUpdate = true;
-    return this.shapecast(
-      {
-        intersectsBounds: (box2) => obb6.intersectsBox(box2),
-        intersectsTriangle: (tri) => obb6.intersectsTriangle(tri)
-      }
-    );
-  }
-  intersectsSphere(sphere) {
-    return this.shapecast(
-      {
-        intersectsBounds: (box) => sphere.intersectsBox(box),
-        intersectsTriangle: (tri) => tri.intersectsSphere(sphere)
-      }
-    );
-  }
-  closestPointToGeometry(otherGeometry, geometryToBvh, target1 = {}, target2 = {}, minThreshold = 0, maxThreshold = Infinity) {
-    const closestPointToGeometryFunc = this.indirect ? closestPointToGeometry_indirect : closestPointToGeometry;
-    return closestPointToGeometryFunc(
-      this,
-      otherGeometry,
-      geometryToBvh,
-      target1,
-      target2,
-      minThreshold,
-      maxThreshold
-    );
-  }
-  closestPointToPoint(point, target = {}, minThreshold = 0, maxThreshold = Infinity) {
-    return closestPointToPoint(
-      this,
-      point,
-      target,
-      minThreshold,
-      maxThreshold
-    );
-  }
-  getBoundingBox(target) {
-    target.makeEmpty();
-    const roots = this._roots;
-    roots.forEach((buffer) => {
-      arrayToBox(0, new Float32Array(buffer), tempBox);
-      target.union(tempBox);
-    });
-    return target;
-  }
-};
-
-// node_modules/three-mesh-bvh/src/gpu/glsl/common_functions.glsl.js
-var common_functions = (
-  /* glsl */
-  `
-
-// A stack of uint32 indices can can store the indices for
-// a perfectly balanced tree with a depth up to 31. Lower stack
-// depth gets higher performance.
-//
-// However not all trees are balanced. Best value to set this to
-// is the trees max depth.
-#ifndef BVH_STACK_DEPTH
-#define BVH_STACK_DEPTH 60
-#endif
-
-#ifndef INFINITY
-#define INFINITY 1e20
-#endif
-
-// Utilities
-uvec4 uTexelFetch1D( usampler2D tex, uint index ) {
-
-	uint width = uint( textureSize( tex, 0 ).x );
-	uvec2 uv;
-	uv.x = index % width;
-	uv.y = index / width;
-
-	return texelFetch( tex, ivec2( uv ), 0 );
-
-}
-
-ivec4 iTexelFetch1D( isampler2D tex, uint index ) {
-
-	uint width = uint( textureSize( tex, 0 ).x );
-	uvec2 uv;
-	uv.x = index % width;
-	uv.y = index / width;
-
-	return texelFetch( tex, ivec2( uv ), 0 );
-
-}
-
-vec4 texelFetch1D( sampler2D tex, uint index ) {
-
-	uint width = uint( textureSize( tex, 0 ).x );
-	uvec2 uv;
-	uv.x = index % width;
-	uv.y = index / width;
-
-	return texelFetch( tex, ivec2( uv ), 0 );
-
-}
-
-vec4 textureSampleBarycoord( sampler2D tex, vec3 barycoord, uvec3 faceIndices ) {
-
-	return
-		barycoord.x * texelFetch1D( tex, faceIndices.x ) +
-		barycoord.y * texelFetch1D( tex, faceIndices.y ) +
-		barycoord.z * texelFetch1D( tex, faceIndices.z );
-
-}
-
-void ndcToCameraRay(
-	vec2 coord, mat4 cameraWorld, mat4 invProjectionMatrix,
-	out vec3 rayOrigin, out vec3 rayDirection
-) {
-
-	// get camera look direction and near plane for camera clipping
-	vec4 lookDirection = cameraWorld * vec4( 0.0, 0.0, - 1.0, 0.0 );
-	vec4 nearVector = invProjectionMatrix * vec4( 0.0, 0.0, - 1.0, 1.0 );
-	float near = abs( nearVector.z / nearVector.w );
-
-	// get the camera direction and position from camera matrices
-	vec4 origin = cameraWorld * vec4( 0.0, 0.0, 0.0, 1.0 );
-	vec4 direction = invProjectionMatrix * vec4( coord, 0.5, 1.0 );
-	direction /= direction.w;
-	direction = cameraWorld * direction - origin;
-
-	// slide the origin along the ray until it sits at the near clip plane position
-	origin.xyz += direction.xyz * near / dot( direction, lookDirection );
-
-	rayOrigin = origin.xyz;
-	rayDirection = direction.xyz;
-
-}
-`
-);
-
-// node_modules/three-mesh-bvh/src/gpu/glsl/bvh_ray_functions.glsl.js
-var bvh_ray_functions = (
-  /* glsl */
-  `
-
-#ifndef TRI_INTERSECT_EPSILON
-#define TRI_INTERSECT_EPSILON 1e-5
-#endif
-
-// Raycasting
-bool intersectsBounds( vec3 rayOrigin, vec3 rayDirection, vec3 boundsMin, vec3 boundsMax, out float dist ) {
-
-	// https://www.reddit.com/r/opengl/comments/8ntzz5/fast_glsl_ray_box_intersection/
-	// https://tavianator.com/2011/ray_box.html
-	vec3 invDir = 1.0 / rayDirection;
-
-	// find intersection distances for each plane
-	vec3 tMinPlane = invDir * ( boundsMin - rayOrigin );
-	vec3 tMaxPlane = invDir * ( boundsMax - rayOrigin );
-
-	// get the min and max distances from each intersection
-	vec3 tMinHit = min( tMaxPlane, tMinPlane );
-	vec3 tMaxHit = max( tMaxPlane, tMinPlane );
-
-	// get the furthest hit distance
-	vec2 t = max( tMinHit.xx, tMinHit.yz );
-	float t0 = max( t.x, t.y );
-
-	// get the minimum hit distance
-	t = min( tMaxHit.xx, tMaxHit.yz );
-	float t1 = min( t.x, t.y );
-
-	// set distance to 0.0 if the ray starts inside the box
-	dist = max( t0, 0.0 );
-
-	return t1 >= dist;
-
-}
-
-bool intersectsTriangle(
-	vec3 rayOrigin, vec3 rayDirection, vec3 a, vec3 b, vec3 c,
-	out vec3 barycoord, out vec3 norm, out float dist, out float side
-) {
-
-	// https://stackoverflow.com/questions/42740765/intersection-between-line-and-triangle-in-3d
-	vec3 edge1 = b - a;
-	vec3 edge2 = c - a;
-	norm = cross( edge1, edge2 );
-
-	float det = - dot( rayDirection, norm );
-	float invdet = 1.0 / det;
-
-	vec3 AO = rayOrigin - a;
-	vec3 DAO = cross( AO, rayDirection );
-
-	vec4 uvt;
-	uvt.x = dot( edge2, DAO ) * invdet;
-	uvt.y = - dot( edge1, DAO ) * invdet;
-	uvt.z = dot( AO, norm ) * invdet;
-	uvt.w = 1.0 - uvt.x - uvt.y;
-
-	// set the hit information
-	barycoord = uvt.wxy; // arranged in A, B, C order
-	dist = uvt.z;
-	side = sign( det );
-	norm = side * normalize( norm );
-
-	// add an epsilon to avoid misses between triangles
-	uvt += vec4( TRI_INTERSECT_EPSILON );
-
-	return all( greaterThanEqual( uvt, vec4( 0.0 ) ) );
-
-}
-
-bool intersectTriangles(
-	// geometry info and triangle range
-	sampler2D positionAttr, usampler2D indexAttr, uint offset, uint count,
-
-	// ray
-	vec3 rayOrigin, vec3 rayDirection,
-
-	// outputs
-	inout float minDistance, inout uvec4 faceIndices, inout vec3 faceNormal, inout vec3 barycoord,
-	inout float side, inout float dist
-) {
-
-	bool found = false;
-	vec3 localBarycoord, localNormal;
-	float localDist, localSide;
-	for ( uint i = offset, l = offset + count; i < l; i ++ ) {
-
-		uvec3 indices = uTexelFetch1D( indexAttr, i ).xyz;
-		vec3 a = texelFetch1D( positionAttr, indices.x ).rgb;
-		vec3 b = texelFetch1D( positionAttr, indices.y ).rgb;
-		vec3 c = texelFetch1D( positionAttr, indices.z ).rgb;
-
-		if (
-			intersectsTriangle( rayOrigin, rayDirection, a, b, c, localBarycoord, localNormal, localDist, localSide )
-			&& localDist < minDistance
-		) {
-
-			found = true;
-			minDistance = localDist;
-
-			faceIndices = uvec4( indices.xyz, i );
-			faceNormal = localNormal;
-
-			side = localSide;
-			barycoord = localBarycoord;
-			dist = localDist;
-
-		}
-
-	}
-
-	return found;
-
-}
-
-bool intersectsBVHNodeBounds( vec3 rayOrigin, vec3 rayDirection, sampler2D bvhBounds, uint currNodeIndex, out float dist ) {
-
-	uint cni2 = currNodeIndex * 2u;
-	vec3 boundsMin = texelFetch1D( bvhBounds, cni2 ).xyz;
-	vec3 boundsMax = texelFetch1D( bvhBounds, cni2 + 1u ).xyz;
-	return intersectsBounds( rayOrigin, rayDirection, boundsMin, boundsMax, dist );
-
-}
-
-// use a macro to hide the fact that we need to expand the struct into separate fields
-#define	bvhIntersectFirstHit(		bvh,		rayOrigin, rayDirection, faceIndices, faceNormal, barycoord, side, dist	)	_bvhIntersectFirstHit(		bvh.position, bvh.index, bvh.bvhBounds, bvh.bvhContents,		rayOrigin, rayDirection, faceIndices, faceNormal, barycoord, side, dist	)
-
-bool _bvhIntersectFirstHit(
-	// bvh info
-	sampler2D bvh_position, usampler2D bvh_index, sampler2D bvh_bvhBounds, usampler2D bvh_bvhContents,
-
-	// ray
-	vec3 rayOrigin, vec3 rayDirection,
-
-	// output variables split into separate variables due to output precision
-	inout uvec4 faceIndices, inout vec3 faceNormal, inout vec3 barycoord,
-	inout float side, inout float dist
-) {
-
-	// stack needs to be twice as long as the deepest tree we expect because
-	// we push both the left and right child onto the stack every traversal
-	int ptr = 0;
-	uint stack[ BVH_STACK_DEPTH ];
-	stack[ 0 ] = 0u;
-
-	float triangleDistance = INFINITY;
-	bool found = false;
-	while ( ptr > - 1 && ptr < BVH_STACK_DEPTH ) {
-
-		uint currNodeIndex = stack[ ptr ];
-		ptr --;
-
-		// check if we intersect the current bounds
-		float boundsHitDistance;
-		if (
-			! intersectsBVHNodeBounds( rayOrigin, rayDirection, bvh_bvhBounds, currNodeIndex, boundsHitDistance )
-			|| boundsHitDistance > triangleDistance
-		) {
-
-			continue;
-
-		}
-
-		uvec2 boundsInfo = uTexelFetch1D( bvh_bvhContents, currNodeIndex ).xy;
-		bool isLeaf = bool( boundsInfo.x & 0xffff0000u );
-
-		if ( isLeaf ) {
-
-			uint count = boundsInfo.x & 0x0000ffffu;
-			uint offset = boundsInfo.y;
-
-			found = intersectTriangles(
-				bvh_position, bvh_index, offset, count,
-				rayOrigin, rayDirection, triangleDistance,
-				faceIndices, faceNormal, barycoord, side, dist
-			) || found;
-
-		} else {
-
-			uint leftIndex = currNodeIndex + 1u;
-			uint splitAxis = boundsInfo.x & 0x0000ffffu;
-			uint rightIndex = boundsInfo.y;
-
-			bool leftToRight = rayDirection[ splitAxis ] >= 0.0;
-			uint c1 = leftToRight ? leftIndex : rightIndex;
-			uint c2 = leftToRight ? rightIndex : leftIndex;
-
-			// set c2 in the stack so we traverse it later. We need to keep track of a pointer in
-			// the stack while we traverse. The second pointer added is the one that will be
-			// traversed first
-			ptr ++;
-			stack[ ptr ] = c2;
-
-			ptr ++;
-			stack[ ptr ] = c1;
-
-		}
-
-	}
-
-	return found;
-
-}
-`
-);
-
-// node_modules/three-mesh-bvh/src/index.js
-var shaderIntersectFunction = `
-	${common_functions}
-	${bvh_ray_functions}
-`;
 
 // frontend/js/viewer/heatmap.js
 function applyDeviationHeatmap(target, other, matrix4, diag) {
@@ -54512,7 +60355,7 @@ var ScenePanel = class {
       const wasDrag = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) > 6 || performance.now() - downTime > 350;
       downPos = null;
       if (wasDrag) return;
-      if (v._objects.length < 2 || v._measureMode || this._gizmo.dragging) return;
+      if (v._objects.length < 2 || v._measureMode || this._gizmo.dragging || v._toolMode && v._toolMode !== "none") return;
       const rect = canvas.getBoundingClientRect();
       mouse.x = (e.clientX - rect.left) / rect.width * 2 - 1;
       mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -54606,13 +60449,25 @@ var ScenePanel = class {
 
 // frontend/js/timeline_panel.js
 var TimelinePanel = class {
-  constructor(viewer) {
+  /**
+   * @param viewer Viewer3D
+   * @param api    ViewerControlAPI (mutations; may be null for read-only use)
+   * @param deps   {showToast}
+   */
+  constructor(viewer, api = null, deps = {}) {
     this._viewer = viewer;
+    this._api = api;
+    this._toast = deps.showToast || (() => {
+    });
     this._bar = document.getElementById("timeline-bar");
     this._playBtn = document.getElementById("timeline-play-btn");
     this._scrub = document.getElementById("timeline-scrub");
     this._ticks = document.getElementById("timeline-ticks");
     this._timeEl = document.getElementById("timeline-time");
+    this._keyBtn = document.getElementById("timeline-key-btn");
+    this._durInput = document.getElementById("timeline-duration");
+    this._emptyHint = document.getElementById("timeline-empty-hint");
+    this._menu = null;
     if (!this._bar) return;
     this._playBtn.addEventListener("click", () => {
       const tl2 = viewer._timeline;
@@ -54630,13 +60485,93 @@ var TimelinePanel = class {
       seekTimeline(viewer, { time: this._scrub.value / 100 * dur });
       this._refresh();
     });
+    if (this._keyBtn && api) {
+      this._keyBtn.addEventListener("click", () => this._keyActiveObject());
+    }
+    if (this._durInput && api) {
+      this._durInput.addEventListener("change", () => this._applyDuration());
+    }
+    document.addEventListener("click", () => this._closeMenu());
     setInterval(() => this._refresh(), 200);
   }
+  // ------------------------------------------------------------------
+  // Authoring
+  // ------------------------------------------------------------------
+  async _keyActiveObject() {
+    const v = this._viewer;
+    const entry = v._activeEntry();
+    if (!entry) {
+      this._toast("Load an object first", "info");
+      return;
+    }
+    const tl2 = v._timeline;
+    const time = tl2 ? Math.round(tl2.time * 1e3) / 1e3 : 0;
+    const r = await this._api.execute({
+      action: "set_keyframe",
+      params: { id: entry.id, time, capture: true }
+    });
+    if (!r.ok) {
+      this._toast(r.error, "error");
+      return;
+    }
+    const note = r.result && r.result.note;
+    const anim = this._viewer.getState().animation || {};
+    const clipHint = anim.hasAnimations && anim.playing ? " (the playing clip animates the model's inner nodes \u2014 \u25CF keys the object's placement only)" : "";
+    this._toast(`Keyed '${entry.name}' @ ${time.toFixed(2)}s` + (note ? ` \u2014 ${note}` : "") + clipHint, "info");
+    if (this._duration() <= 0) {
+      await this._api.execute({
+        action: "set_timeline",
+        params: { duration: 5 }
+      });
+      this._toast("Timeline duration set to 5s \u2014 scrub to place the next key (adjust in the seconds field)", "info");
+    }
+    this._refresh(true);
+  }
+  async _applyDuration() {
+    const v = this._viewer;
+    const requested = parseFloat(this._durInput.value);
+    if (!(requested > 0)) return;
+    const lastKey = this._lastKeyTime();
+    const duration = Math.max(requested, lastKey);
+    const r = await this._api.execute({
+      action: "set_timeline",
+      params: { duration }
+    });
+    if (!r.ok) {
+      this._toast(r.error, "error");
+      return;
+    }
+    if (duration !== requested) {
+      this._toast(`Duration clamped to the last key (${duration.toFixed(2)}s)`, "info");
+      this._durInput.value = String(duration);
+    }
+    this._refresh(true);
+  }
+  async _deleteKey(objectId, name, t2) {
+    const r = await this._api.execute({
+      action: "delete_keyframe",
+      params: { id: objectId, time: t2 }
+      // EXACT stored t — never rounded
+    });
+    this._toast(
+      r.ok ? `Deleted key @ ${t2.toFixed(2)}s (${name})` : r.error,
+      r.ok ? "info" : "error"
+    );
+    this._refresh(true);
+  }
+  // ------------------------------------------------------------------
+  // Rendering
+  // ------------------------------------------------------------------
   _duration() {
     const tl2 = this._viewer._timeline;
     if (!tl2) return 0;
     if (tl2.duration > 0) return tl2.duration;
+    return this._lastKeyTime();
+  }
+  _lastKeyTime() {
+    const tl2 = this._viewer._timeline;
     let max2 = 0;
+    if (!tl2) return 0;
     for (const channels of tl2.tracks.values()) {
       for (const keys of Object.values(channels)) {
         if (keys.length) max2 = Math.max(max2, keys[keys.length - 1].t);
@@ -54644,37 +60579,631 @@ var TimelinePanel = class {
     }
     return max2;
   }
-  _refresh() {
-    const tl2 = this._viewer._timeline;
+  /** Exact key times (unrounded) → the objects keyed at each. */
+  _keyIndex() {
+    const v = this._viewer;
+    const tl2 = v._timeline;
+    const byTime = /* @__PURE__ */ new Map();
+    if (!tl2) return byTime;
+    for (const [id, channels] of tl2.tracks) {
+      const entry = v._objects.find((o) => o.id === id);
+      const name = entry ? entry.name : `object ${id}`;
+      const seen = /* @__PURE__ */ new Set();
+      for (const keys of Object.values(channels)) {
+        for (const k of keys) {
+          if (seen.has(k.t)) continue;
+          seen.add(k.t);
+          let list = byTime.get(k.t);
+          if (!list) {
+            list = [];
+            byTime.set(k.t, list);
+          }
+          if (!list.some((x) => x.id === id)) list.push({ id, name });
+        }
+      }
+    }
+    return byTime;
+  }
+  _refresh(force) {
+    const v = this._viewer;
+    const tl2 = v._timeline;
+    const hasModel = v._objects.length > 0;
     const hasTracks = tl2 && tl2.tracks.size > 0;
-    this._bar.style.display = hasTracks ? "flex" : "none";
-    if (!hasTracks) return;
+    this._bar.style.display = hasModel ? "flex" : "none";
+    if (!hasModel) return;
+    const animBar = document.getElementById("animation-bar");
+    const stacked = animBar && animBar.style.display !== "none";
+    this._bar.style.bottom = stacked ? "112px" : "64px";
+    if (this._emptyHint) {
+      this._emptyHint.style.display = hasTracks ? "none" : "inline";
+    }
+    this._playBtn.disabled = !hasTracks;
+    this._scrub.disabled = !hasTracks;
+    if (!hasTracks) {
+      this._playBtn.textContent = "\u25B6";
+      this._timeEl.textContent = "";
+      if (this._tickSig !== "empty") {
+        this._tickSig = "empty";
+        this._ticks.innerHTML = "";
+      }
+      return;
+    }
     const dur = this._duration();
     this._playBtn.textContent = tl2.playing ? "\u23F8" : "\u25B6";
     if (dur > 0) {
       this._scrub.value = String(tl2.time / dur * 100);
       this._timeEl.textContent = `${tl2.time.toFixed(1)}s / ${dur.toFixed(1)}s`;
     }
-    const times = /* @__PURE__ */ new Set();
-    for (const channels of tl2.tracks.values()) {
-      for (const keys of Object.values(channels)) {
-        for (const k of keys) times.add(Math.round(k.t * 100) / 100);
-      }
+    if (this._durInput && document.activeElement !== this._durInput) {
+      this._durInput.value = String(Math.round(dur * 100) / 100);
     }
-    const sig = [...times].sort((a, b) => a - b).join(",") + "|" + dur;
-    if (sig !== this._tickSig) {
+    const byTime = this._keyIndex();
+    const sig = [...byTime.keys()].sort((a, b) => a - b).join(",") + "|" + dur;
+    if (sig !== this._tickSig || force) {
       this._tickSig = sig;
       this._ticks.innerHTML = "";
-      if (dur > 0) {
-        for (const t2 of times) {
+      {
+        const denom = dur > 0 ? dur : 1;
+        for (const [t2, objs] of byTime) {
           const tick = document.createElement("div");
           tick.className = "timeline-tick";
-          tick.style.left = `${t2 / dur * 100}%`;
-          tick.title = `key @ ${t2}s`;
+          tick.style.left = `${Math.min(100, t2 / denom * 100)}%`;
+          tick.title = `key @ ${t2.toFixed(2)}s (${objs.map((o) => o.name).join(", ")}) \u2014 click to seek, right-click to delete`;
+          tick.dataset.t = String(t2);
+          tick.addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (tl2.playing) pauseTimeline(this._viewer);
+            seekTimeline(this._viewer, { time: t2 });
+            this._refresh();
+          });
+          tick.addEventListener("contextmenu", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this._openMenu(e, t2, objs);
+          });
           this._ticks.appendChild(tick);
         }
       }
     }
+  }
+  _openMenu(e, t2, objs) {
+    this._closeMenu();
+    if (!this._api) return;
+    const menu = document.createElement("div");
+    menu.className = "timeline-tick-menu";
+    for (const { id, name } of objs) {
+      const row = document.createElement("button");
+      row.className = "timeline-tick-menu-row";
+      row.textContent = `Delete key @ ${t2.toFixed(2)}s \u2014 ${name}`;
+      row.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        this._closeMenu();
+        this._deleteKey(id, name, t2);
+      });
+      menu.appendChild(row);
+    }
+    document.body.appendChild(menu);
+    const rect = this._bar.getBoundingClientRect();
+    menu.style.left = `${Math.min(e.clientX, window.innerWidth - 240)}px`;
+    menu.style.top = `${rect.top - menu.offsetHeight - 6}px`;
+    this._menu = menu;
+  }
+  _closeMenu() {
+    if (this._menu) {
+      this._menu.remove();
+      this._menu = null;
+    }
+  }
+};
+
+// frontend/js/edit_panel.js
+var SCULPT_TOOLS = ["draw", "inflate", "smooth", "flatten", "pinch"];
+var STRENGTH_DEFAULTS = { draw: 0.1, inflate: 0.1, smooth: 0.5, flatten: 0.5, pinch: 0.4 };
+var DISPLACEMENT_TOOLS = /* @__PURE__ */ new Set(["draw", "inflate"]);
+var FLUSH_POINTS = 16;
+var FLUSH_MS = 100;
+var HOVER_THROTTLE_MS = 66;
+var EditPanel = class {
+  /**
+   * @param viewer  Viewer3D
+   * @param api     ViewerControlAPI (mutations only)
+   * @param deps    {showToast, getGizmo, setMeasure} — app-owned hooks
+   */
+  constructor(viewer, api, deps) {
+    this._viewer = viewer;
+    this._api = api;
+    this._toast = deps.showToast;
+    this._getGizmo = deps.getGizmo || (() => null);
+    this._setMeasure = deps.setMeasure || (() => {
+    });
+    viewer._toolMode = "none";
+    this._panel = document.getElementById("edit-panel");
+    this._toggleBtn = document.getElementById("edit-toggle");
+    if (!this._panel || !this._toggleBtn) return;
+    this._tool = "draw";
+    this._strength = { ...STRENGTH_DEFAULTS };
+    this._radiusRel = 0.12;
+    this._paint = { color: "#ff3b30", opacity: 0.9, hardness: 0.6, tier: 1024 };
+    this._stroke = null;
+    this._flushChain = Promise.resolve();
+    this._undoSnap = null;
+    this._raycaster = new Raycaster();
+    this._ndc = new Vector2();
+    this._lastHover = 0;
+    this._initDom();
+    this._initPointer();
+    this._initKeys();
+    viewer._container.addEventListener("objectschange", () => {
+      this._endStroke(true);
+      if (viewer._toolMode !== "none") this._preflight();
+    });
+    viewer._container.addEventListener("navmodechange", (e) => {
+      if (e.detail && e.detail.mode === "fpv") this.exitToolMode();
+    });
+  }
+  // ------------------------------------------------------------------
+  // Mode lifecycle
+  // ------------------------------------------------------------------
+  get mode() {
+    return this._viewer._toolMode;
+  }
+  enterToolMode(mode) {
+    const v = this._viewer;
+    if (v._objects.length === 0) {
+      this._toast("Load a model first", "info");
+      return;
+    }
+    this._setMeasure(false);
+    if (v._navMode === "fpv") v.setNavMode("orbit");
+    v._toolMode = mode;
+    this._panel.style.display = "block";
+    this._toggleBtn.classList.add("active");
+    this._syncTabs();
+    this._preflight();
+    this._cursor().style.display = "none";
+    if (mode === "paint") this._ensureTexturedRenderMode();
+    if (mode === "sculpt") this._prewarmWeld();
+  }
+  exitToolMode() {
+    this._endStroke(true);
+    this._viewer._toolMode = "none";
+    this._panel.style.display = "none";
+    this._toggleBtn.classList.remove("active");
+    this._cursor().style.display = "none";
+  }
+  _syncTabs() {
+    const mode = this.mode;
+    this._panel.querySelector("#edit-tab-sculpt").classList.toggle("active", mode === "sculpt");
+    this._panel.querySelector("#edit-tab-paint").classList.toggle("active", mode === "paint");
+    this._panel.querySelector("#edit-sculpt-body").style.display = mode === "sculpt" ? "block" : "none";
+    this._panel.querySelector("#edit-paint-body").style.display = mode === "paint" ? "block" : "none";
+  }
+  /** Disable the tool for states the engine refuses; explain inline, not via throws. */
+  _preflight() {
+    const v = this._viewer;
+    const entry = v._activeEntry();
+    const banner = this._panel.querySelector("#edit-banner");
+    const msgs = [];
+    if (!entry) {
+      msgs.push("No object loaded.");
+    } else {
+      if (entry.skinned) {
+        msgs.push("Skinned (rigged) model \u2014 sculpt/paint would corrupt the bind pose. Placement and keyframes still work.");
+      }
+      if (v._timeline && v._timeline.playing) {
+        msgs.push("Timeline is playing \u2014 pause it to edit (a brush on a moving object would bake a transient pose).");
+      }
+      if (this.mode === "paint") {
+        let hasUV = false, ktx2 = false;
+        entry.model.traverse((c) => {
+          if (!c.isMesh || !c.geometry) return;
+          if (c.geometry.getAttribute("uv")) hasUV = true;
+          const stash = c._mvOriginalMaterial || c.material;
+          const m = Array.isArray(stash) ? stash[0] : stash;
+          const img = m && m.map && m.map.image;
+          if (img && typeof HTMLImageElement !== "undefined" && !(img instanceof HTMLImageElement) && !(img instanceof HTMLCanvasElement) && (typeof ImageBitmap === "undefined" || !(img instanceof ImageBitmap)) && !(m.userData && m.userData._mvPaint)) {
+            ktx2 = true;
+          }
+        });
+        if (!hasUV) {
+          msgs.push("This mesh has no UV coordinates (STL/PLY) \u2014 painting needs them. Sculpting still works.");
+        }
+        if (ktx2) {
+          msgs.push("Compressed texture (GPU-only): painting starts from a flat base color \u2014 the original texture can't be read back.");
+        }
+      }
+    }
+    banner.textContent = msgs.join(" ");
+    banner.style.display = msgs.length ? "block" : "none";
+    const blocked = !entry || entry.skinned;
+    this._panel.querySelectorAll(".edit-tool-btn, .edit-slider").forEach((el) => {
+      el.disabled = blocked;
+    });
+    this._updateBudgetLine();
+  }
+  _ensureTexturedRenderMode() {
+    const state = this._viewer.getState();
+    const mode = state.display && state.display.renderMode;
+    if (mode && mode !== "textured") {
+      this._exec("set_render_mode", { mode: "textured" }).then((r) => {
+        if (r.ok) this._toast("Render mode switched to textured (paint is invisible under wireframe/solid overrides)", "info");
+      });
+    }
+  }
+  _prewarmWeld() {
+    setTimeout(() => {
+      try {
+        prewarmSculptCaches(this._viewer);
+      } catch {
+      }
+    }, 30);
+  }
+  // ------------------------------------------------------------------
+  // DOM
+  // ------------------------------------------------------------------
+  _initDom() {
+    this._toggleBtn.addEventListener("click", () => {
+      if (this.mode === "none") this.enterToolMode("sculpt");
+      else this.exitToolMode();
+    });
+    this._panel.querySelector("#edit-tab-sculpt").addEventListener("click", () => {
+      if (this.mode !== "sculpt") {
+        this._viewer._toolMode = "sculpt";
+        this._syncTabs();
+        this._preflight();
+        this._prewarmWeld();
+      }
+    });
+    this._panel.querySelector("#edit-tab-paint").addEventListener("click", () => {
+      if (this.mode !== "paint") {
+        this._viewer._toolMode = "paint";
+        this._syncTabs();
+        this._preflight();
+        this._ensureTexturedRenderMode();
+      }
+    });
+    this._panel.querySelector("#edit-close").addEventListener("click", () => this.exitToolMode());
+    const toolsRow = this._panel.querySelector("#edit-tools");
+    for (const tool of SCULPT_TOOLS) {
+      const b = document.createElement("button");
+      b.className = "btn btn-small edit-tool-btn" + (tool === this._tool ? " active" : "");
+      b.textContent = tool;
+      b.title = `${tool} brush`;
+      b.addEventListener("click", () => {
+        this._tool = tool;
+        toolsRow.querySelectorAll(".edit-tool-btn").forEach((x) => x.classList.toggle("active", x.textContent === tool));
+        this._panel.querySelector("#edit-strength").value = String(this._strength[tool]);
+        this._panel.querySelector("#edit-strength-val").textContent = this._strength[tool].toFixed(2);
+      });
+      toolsRow.appendChild(b);
+    }
+    const bindSlider = (id, valId, get, set, fmt2 = (x) => x.toFixed(2)) => {
+      const el = this._panel.querySelector(id);
+      const val = this._panel.querySelector(valId);
+      el.value = String(get());
+      val.textContent = fmt2(get());
+      el.addEventListener("input", () => {
+        set(parseFloat(el.value));
+        val.textContent = fmt2(get());
+      });
+    };
+    bindSlider(
+      "#edit-radius",
+      "#edit-radius-val",
+      () => this._radiusRel,
+      (x) => {
+        this._radiusRel = x;
+      }
+    );
+    bindSlider(
+      "#edit-strength",
+      "#edit-strength-val",
+      () => this._strength[this._tool],
+      (x) => {
+        this._strength[this._tool] = x;
+      }
+    );
+    bindSlider(
+      "#edit-opacity",
+      "#edit-opacity-val",
+      () => this._paint.opacity,
+      (x) => {
+        this._paint.opacity = x;
+      }
+    );
+    bindSlider(
+      "#edit-hardness",
+      "#edit-hardness-val",
+      () => this._paint.hardness,
+      (x) => {
+        this._paint.hardness = x;
+      }
+    );
+    const color = this._panel.querySelector("#edit-color");
+    color.value = this._paint.color;
+    color.addEventListener("input", () => {
+      this._paint.color = color.value;
+    });
+    const tier = this._panel.querySelector("#edit-tier");
+    tier.value = String(this._paint.tier);
+    tier.addEventListener("change", () => {
+      this._paint.tier = parseInt(tier.value, 10);
+    });
+    this._invert = false;
+    const invertBtn = this._panel.querySelector("#edit-invert");
+    invertBtn.addEventListener("click", () => {
+      this._invert = !this._invert;
+      invertBtn.classList.toggle("active", this._invert);
+    });
+    this._panel.querySelector("#edit-undo").addEventListener("click", () => this._undo());
+    this._panel.querySelector("#edit-undo-paint").addEventListener("click", () => this._undo());
+    this._panel.querySelector("#edit-clear-paint").addEventListener("click", async () => {
+      const r = await this._exec("clear_paint", {});
+      this._toast(r.ok ? `Paint cleared (${r.result.clearedMeshes} mesh(es))` : r.error, r.ok ? "info" : "error");
+      this._updateBudgetLine();
+    });
+  }
+  _cursor() {
+    if (!this._cursorEl) {
+      this._cursorEl = document.createElement("div");
+      this._cursorEl.id = "edit-brush-cursor";
+      this._cursorEl.style.display = "none";
+      this._viewer._container.appendChild(this._cursorEl);
+    }
+    return this._cursorEl;
+  }
+  _updateBudgetLine() {
+    const line = this._panel.querySelector("#edit-budget");
+    try {
+      const b = paintBudgetInfo();
+      const frac = b.usedFraction !== void 0 ? b.usedFraction : b.texelsUsed / Math.max(1, b.texelsBudget);
+      line.textContent = `paint memory: ${(frac * 100).toFixed(0)}%`;
+      line.classList.toggle("warn", frac >= 0.75);
+    } catch {
+      line.textContent = "";
+    }
+  }
+  // ------------------------------------------------------------------
+  // Pointer input
+  // ------------------------------------------------------------------
+  _initPointer() {
+    const canvas = this._viewer._renderer.domElement;
+    canvas.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      if (this.mode === "none") return;
+      const gizmo = this._getGizmo();
+      if (gizmo && (gizmo.dragging || gizmo.axis)) return;
+      const v = this._viewer;
+      if (v._timeline && v._timeline.playing) {
+        this._toast("Timeline is playing \u2014 pause to edit", "info");
+        return;
+      }
+      const entry = v._activeEntry();
+      if (!entry || entry.skinned) return;
+      const hit = this._raycastActive(e);
+      if (!hit) return;
+      v._controls.enabled = false;
+      canvas.setPointerCapture(e.pointerId);
+      const worldRadius = this._worldRadius();
+      this._undoSnap = this.mode === "sculpt" ? snapshotActivePositions(v) : this._undoSnap;
+      this._stroke = {
+        pointerId: e.pointerId,
+        buffer: [[hit.point.x, hit.point.y, hit.point.z]],
+        firstAt: performance.now(),
+        lastPoint: hit.point.clone(),
+        spacing: worldRadius / 2,
+        errors: /* @__PURE__ */ new Set(),
+        notes: /* @__PURE__ */ new Set(),
+        // Alt at gesture start inverts displacement brushes (dent).
+        invert: e.altKey || this._invert,
+        // One undo/opacity unit per GESTURE: the engine groups all
+        // flush slices under this token (undo_group).
+        gid: `ui-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+        stats: { count: 0, meanAlpha: 0, affected: 0, maxDisplacement: 0 }
+      };
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      if (this.mode === "none") return;
+      if (this._stroke) {
+        const hit2 = this._raycastActive(e);
+        if (hit2) {
+          this._updateCursor(e, hit2);
+          if (hit2.point.distanceTo(this._stroke.lastPoint) >= this._stroke.spacing) {
+            this._stroke.buffer.push([hit2.point.x, hit2.point.y, hit2.point.z]);
+            this._stroke.lastPoint = hit2.point.clone();
+          }
+          if (this._stroke.buffer.length >= FLUSH_POINTS || performance.now() - this._stroke.firstAt >= FLUSH_MS) {
+            this._flush(false);
+          }
+        } else {
+          this._cursor().style.display = "none";
+        }
+        return;
+      }
+      const now2 = performance.now();
+      if (now2 - this._lastHover < HOVER_THROTTLE_MS) return;
+      this._lastHover = now2;
+      const hit = this._raycastActive(e);
+      if (hit) this._updateCursor(e, hit);
+      else this._cursor().style.display = "none";
+    });
+    const end = (e) => {
+      if (this._stroke && (!e || e.pointerId === this._stroke.pointerId)) {
+        this._endStroke(false);
+      }
+    };
+    canvas.addEventListener("pointerup", end);
+    canvas.addEventListener("pointercancel", end);
+    canvas.addEventListener("lostpointercapture", end);
+    window.addEventListener("blur", () => this._endStroke(false));
+    canvas.addEventListener("pointerleave", () => {
+      if (!this._stroke) this._cursor().style.display = "none";
+    });
+    this._panel.addEventListener("pointerenter", () => {
+      if (!this._stroke) this._cursor().style.display = "none";
+    });
+  }
+  /** Local raycast against the ACTIVE object's meshes only (M7): strokes on
+   *  other objects fall through to orbit instead of teaching-error spam. */
+  _raycastActive(e) {
+    const v = this._viewer;
+    const entry = v._activeEntry();
+    if (!entry || !entry.visible) return null;
+    const canvas = v._renderer.domElement;
+    const rect = canvas.getBoundingClientRect();
+    this._ndc.x = (e.clientX - rect.left) / rect.width * 2 - 1;
+    this._ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this._raycaster.setFromCamera(this._ndc, v._camera);
+    const meshes = [];
+    entry.model.traverse((c) => {
+      if (c.isMesh && c.visible) meshes.push(c);
+    });
+    const hits = this._raycaster.intersectObjects(meshes, false);
+    return hits.length ? hits[0] : null;
+  }
+  _worldRadius() {
+    const entry = this._viewer._activeEntry();
+    if (!entry) return 0.1;
+    const box = new Box3().setFromObject(entry.wrapper);
+    const sphereR = box.getSize(new Vector3()).length() / 2;
+    return Math.max(1e-6, this._radiusRel * sphereR);
+  }
+  _updateCursor(e, hit) {
+    const v = this._viewer;
+    const rect = v._renderer.domElement.getBoundingClientRect();
+    const dist = hit.distance;
+    const fovRad = v._camera.fov * Math.PI / 180;
+    const px2 = this._worldRadius() * (rect.height / 2) / (dist * Math.tan(fovRad / 2));
+    const c = this._cursor();
+    const size = Math.max(4, Math.min(600, px2 * 2));
+    c.style.width = `${size}px`;
+    c.style.height = `${size}px`;
+    c.style.left = `${e.clientX - rect.left}px`;
+    c.style.top = `${e.clientY - rect.top}px`;
+    c.style.display = "block";
+    c.classList.toggle("paint", this.mode === "paint");
+  }
+  // ------------------------------------------------------------------
+  // Stroke flushing (through the AGENT command surface)
+  // ------------------------------------------------------------------
+  _exec(action, params) {
+    return this._api.execute({ action, params });
+  }
+  _flush(final) {
+    const stroke = this._stroke;
+    if (!stroke || stroke.buffer.length === 0) return;
+    const points = stroke.buffer.splice(0, 64);
+    stroke.firstAt = performance.now();
+    const mode = this.mode;
+    let action, params;
+    if (mode === "sculpt") {
+      let strength = DISPLACEMENT_TOOLS.has(this._tool) ? this._strength[this._tool] * this._worldRadius() : this._strength[this._tool];
+      if (stroke.invert && DISPLACEMENT_TOOLS.has(this._tool)) {
+        strength = -strength;
+      }
+      action = points.length === 1 ? "sculpt" : "sculpt_stroke";
+      params = {
+        tool: this._tool,
+        radius_rel: this._radiusRel,
+        strength,
+        ...points.length === 1 ? { center: points[0] } : { points }
+      };
+    } else {
+      action = points.length === 1 ? "paint" : "paint_stroke";
+      params = {
+        radius_rel: this._radiusRel,
+        color: this._paint.color,
+        opacity: this._paint.opacity,
+        hardness: this._paint.hardness,
+        texture_size: this._paint.tier,
+        undo_group: stroke.gid,
+        ...points.length === 1 ? { center: points[0] } : { points }
+      };
+    }
+    this._flushChain = this._flushChain.then(async () => {
+      const r = await this._exec(action, params);
+      if (!r.ok) {
+        if (!stroke.errors.has(r.error)) {
+          stroke.errors.add(r.error);
+          this._toast(r.error, "error");
+        }
+        return;
+      }
+      const res = r.result || {};
+      const s = stroke.stats;
+      if (res.note) stroke.notes.add(res.note);
+      if (mode === "sculpt") {
+        s.affected += res.affected || 0;
+        s.maxDisplacement = Math.max(s.maxDisplacement, res.maxDisplacement || 0);
+        this._panel.querySelector("#edit-sculpt-status").textContent = `affected ${s.affected} \xB7 max \u0394 ${s.maxDisplacement.toFixed(4)}`;
+      } else {
+        s.count += res.painted || 0;
+        if (res.meanAlpha !== void 0 && res.meanAlpha > 0) {
+          s.meanAlpha = res.meanAlpha;
+        }
+        this._panel.querySelector("#edit-paint-status").textContent = `painted ${s.count} texels \xB7 alpha ${s.meanAlpha}`;
+      }
+    });
+  }
+  /** Gesture-end feedback — runs for EVERY gesture (the earlier version only
+   *  ran when unflushed points remained at pointer-up, so the flush timer
+   *  usually starved it: no advisory, stale budget line — gauntlet bug). */
+  _afterGesture(stroke) {
+    if (this.mode === "paint") {
+      if (stroke.stats.count > 0 && stroke.stats.meanAlpha < 0.05) {
+        this._toast("Paint nearly invisible \u2014 raise opacity/hardness", "info");
+      }
+      this._updateBudgetLine();
+    }
+    const note = stroke.notes.values().next().value;
+    if (note) this._toast(note, "info");
+  }
+  _endStroke(cancel) {
+    const stroke = this._stroke;
+    if (!stroke) return;
+    this._stroke = null;
+    const canvas = this._viewer._renderer.domElement;
+    try {
+      canvas.releasePointerCapture(stroke.pointerId);
+    } catch {
+    }
+    this._viewer._controls.enabled = true;
+    if (!cancel && stroke.buffer.length) {
+      this._stroke = stroke;
+      this._stroke.buffer = stroke.buffer;
+      this._flush(true);
+      this._stroke = null;
+    }
+    if (!cancel) {
+      this._flushChain = this._flushChain.then(() => this._afterGesture(stroke));
+    }
+  }
+  async _undo() {
+    if (this.mode === "paint") {
+      const r = await this._exec("undo_paint", {});
+      this._toast(r.ok ? `Last stroke undone (${r.result.restoredPatches} patch(es))` : r.error, r.ok ? "info" : "error");
+      return;
+    }
+    if (this.mode !== "sculpt") return;
+    if (!this._undoSnap) {
+      this._toast("Nothing to undo (one gesture is remembered)", "info");
+      return;
+    }
+    const ok = restorePositionsSnapshot(this._viewer, this._undoSnap);
+    this._toast(ok ? "Last sculpt gesture undone" : "Undo unavailable (geometry changed since)", "info");
+    this._undoSnap = null;
+  }
+  _initKeys() {
+    window.addEventListener("keydown", (e) => {
+      const tag = document.activeElement && document.activeElement.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key === "Escape" && this.mode !== "none") {
+        this.exitToolMode();
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z" && this.mode !== "none") {
+        e.preventDefault();
+        this._undo();
+      }
+    });
   }
 };
 
@@ -54724,12 +61253,26 @@ var App = class {
         resolveResource: (ref) => `/api/asset/related?path=${encodeURIComponent(ref)}`
       }
     );
+    this._controlAPI = new ViewerControlAPI(this._viewer);
     this._comparer = new ModelComparer(this._viewer, (m, t2) => this._showToast(m, t2));
     this._scenePanel = new ScenePanel(this._viewer, {
       showToast: (m, t2) => this._showToast(m, t2),
       onSaveScene: () => this._saveScene()
     });
-    this._timelinePanel = new TimelinePanel(this._viewer);
+    this._timelinePanel = new TimelinePanel(this._viewer, this._controlAPI, {
+      showToast: (m, t2) => this._showToast(m, t2)
+    });
+    this._editPanel = new EditPanel(this._viewer, this._controlAPI, {
+      showToast: (m, t2) => this._showToast(m, t2),
+      getGizmo: () => this._scenePanel && this._scenePanel._gizmo,
+      setMeasure: (active) => this._setMeasureMode(active)
+    });
+    this._elements.viewerContainer.addEventListener("objectschange", (e) => {
+      const any = (e.detail.objects || []).length > 0;
+      this._elements.viewerPlaceholder.style.display = any ? "none" : "flex";
+      const active = this._viewer._activeEntry && this._viewer._activeEntry();
+      if (active && active.stats) this._updateViewerInfo(active.stats);
+    });
     this._exportPanel = new ExportPanel(
       {
         controls: this._elements.assetControls,
@@ -56132,11 +62675,20 @@ Use right-click \u2192 "Add to scene" to compose instead, or Save the scene firs
     btn.addEventListener("click", () => {
       const active = this._viewer.toggleMeasureMode();
       btn.classList.toggle("active", active);
+      if (active && this._editPanel) this._editPanel.exitToolMode();
       this._showToast(
         active ? "Measure: click two points on the model to measure distance" : "Measure mode off",
         "info"
       );
     });
+  }
+  /** Programmatic measure off-switch (edit panel's mutual exclusion hook). */
+  _setMeasureMode(active) {
+    const btn = document.getElementById("measure-toggle");
+    if (!active && this._viewer._measureMode) {
+      this._viewer.toggleMeasureMode();
+      if (btn) btn.classList.remove("active");
+    }
   }
   // ==========================================================
   // Drag-and-drop load (019)

@@ -284,6 +284,22 @@ class LocalModelServer:
         request.wfile.write(body)
 
 
+# The minimal page hosting the standalone viewer for headless runtimes. Served
+# by LocalModelServer at "/" with the frontend directory as the static root
+# (dist/meshvault-viewer.js + vendored decoders resolve as siblings).
+DEFAULT_HARNESS_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>MeshVault headless host</title>
+<style>html,body,#app{margin:0;width:100%;height:100%;overflow:hidden;background:#33373f}</style>
+</head><body><div id="app"></div>
+<script type="module">
+import { createViewer } from "./dist/meshvault-viewer.js";
+window.mv = createViewer(document.getElementById("app"));
+window.mvReady = true;
+</script></body></html>"""
+
+FRONTEND_ROOT = Path(__file__).resolve().parent.parent / "frontend"
+
+
 class HeadlessViewer:
     """One headless Chromium page hosting the standalone viewer (window.mv).
 
@@ -427,3 +443,115 @@ class HeadlessViewer:
             self._idle_task.cancel()
             self._idle_task = None
         await self._close_browser_only()
+
+
+class HeadlessSession:
+    """LocalModelServer + HeadlessViewer composed into one ready-to-drive unit.
+
+    The embedding seam (backlog 053): everything a host application needs to
+    drive the full viewer surface headless — load local models WITH their
+    companion files, run any control-API command, capture renders, and write
+    GLB exports — without speaking MCP. `mcp_server._Runtime` composes this
+    same class, so the MCP server and library embedders share one load path.
+    """
+
+    def __init__(self, *, harness_html: str = DEFAULT_HARNESS_HTML,
+                 static_root: Path | None = FRONTEND_ROOT,
+                 viewport: tuple[int, int] = (1024, 768),
+                 idle_close_s: float | None = None):
+        self.server = LocalModelServer(harness_html, static_root=static_root)
+        self.viewer = HeadlessViewer(viewport=viewport, idle_close_s=idle_close_s)
+
+    @property
+    def base_url(self):
+        return self.server.base_url
+
+    async def page(self):
+        """Start (once) and return the ready viewer page."""
+        if self.viewer.page is not None:
+            return self.viewer.page
+        self.server.start()
+        return await self.viewer.ensure(self.server.base_url + "/")
+
+    async def execute(self, action: str, params: dict | None = None) -> dict:
+        await self.page()
+        return await self.viewer.execute(action, params)
+
+    def register(self, file_path: Path) -> str:
+        return self.server.register(file_path)
+
+    async def load_local(self, path: Path | str, *, name: str | None = None,
+                         add: bool = False, transform: dict | None = None) -> dict:
+        """Load a LOCAL model file (validated, served with companions).
+
+        add=True composes into the current scene (viewer `add_model`) instead of
+        replacing it; `transform` optionally places the added object. The entry
+        records its source identity so scene manifests stay truthful.
+        """
+        p = Path(path).expanduser()
+        if not p.is_absolute():
+            return {"ok": False, "error": f"Local path must be absolute: {path}"}
+        if p.is_dir():
+            return {"ok": False, "error": f"Path is a directory, not a model file: {p}"}
+        if not p.is_file():
+            return {"ok": False, "error": f"File not found: {p}"}
+        ext = p.suffix.lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            return {"ok": False,
+                    "error": f"Unsupported format '{ext}'. "
+                             f"Supported: {' '.join(sorted(SUPPORTED_EXTENSIONS))}"}
+        if p.stat().st_size > MAX_MODEL_BYTES:
+            return {"ok": False,
+                    "error": f"File exceeds {MAX_MODEL_BYTES // (1 << 20)} MB cap: {p}"}
+        await self.page()  # server must be up before registering
+        url = self.register(p)
+        params: dict = {
+            "url": url,
+            "name": name or p.name,
+            "extension": ext,
+            "source": {"kind": "file", "path": str(p)},
+        }
+        related = companion_files(p)
+        if related:
+            params["relatedFiles"] = related
+        if add and transform:
+            params["transform"] = transform
+        return await self.execute("add_model" if add else "load", params)
+
+    async def apply_render_preset(self, name: str) -> None:
+        await self.page()
+        await self.viewer.apply_render_preset(name)
+
+    async def capture_png(self, width: int, height: int, **kwargs) -> bytes:
+        await self.page()
+        return await self.viewer.capture_png(width, height, **kwargs)
+
+    async def export_glb_to_file(self, target: Path | str,
+                                 animation: bool | None = None,
+                                 texture_size: int | None = None) -> dict:
+        """Run export_glb and write the result to disk (parent dirs created).
+
+        The data URL is fetched in-process (no MCP string truncation applies).
+        """
+        t = Path(target).expanduser()
+        if t.suffix.lower() != ".glb":
+            t = t.with_name(t.name + ".glb")
+        params: dict = {}
+        if animation is not None:
+            params["animation"] = animation
+        if texture_size is not None:
+            params["texture_size"] = texture_size
+        result = await self.execute("export_glb", params)
+        if not result.get("ok"):
+            return {"ok": False, "error": result.get("error", "export failed")}
+        data_url = result.get("result")
+        if not data_url:
+            return {"ok": False, "error": "Nothing to export (no visible objects)."}
+        glb = base64.b64decode(data_url.split(",", 1)[1])
+        t.parent.mkdir(parents=True, exist_ok=True)
+        t.write_bytes(glb)
+        return {"ok": True, "path": str(t), "bytes": len(glb)}
+
+    async def close(self):
+        await self.viewer.close()
+        self.server.shutdown()

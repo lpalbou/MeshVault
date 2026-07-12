@@ -166,6 +166,7 @@ A single, self-describing command surface designed to be driven by AI agents or 
   `add_primitive`/`sculpt`/`sculpt_stroke`/`paint`/`paint_stroke`/`fill_paint`/`clear_paint`/`pick`/`raycast`/`batch`
   (creation: primitives, world-space sculpt brushes, texture-paint layers, screenshot-to-surface picking — see `viewer/sculpt.js`),
   `inspect_region`/`simplify_region`/`fix_mesh`/`inspect_texture`/`blur_paint`/`clone_paint`/`resize_texture` (inspection + repair),
+  `detect_symmetry`/`mirror_paint`/`undo_paint` (heal from the object's own mirror counterpart + single-slot brush undo, backlog 050),
   `render_texture`/`get_uv_islands`/`transform_uv`/`preview_uv_transform`/`project_paint` (texture forensics, backlog 047),
   `detect_parts`/`split_object`/`set_parent`/`set_pivot`/`explode_view` (articulation),
   `set_keyframe`/`delete_keyframe`/`get_timeline`/`clear_timeline`/`set_timeline`/`play_timeline`/`pause_timeline`/`seek_timeline` (scene timeline),
@@ -176,6 +177,22 @@ A single, self-describing command surface designed to be driven by AI agents or 
   Model-dependent commands return `{ok:false}` when no model is loaded; unknown params are rejected.
 - Agent docs are served at `/llms.txt` (index) and `/llms-full.txt` (full command reference);
   MCP access is documented in [MCP Server](mcp.md).
+
+### `viewer/symmetry.js` — mirror-plane detection + symmetry healing (backlog 050)
+`detect_symmetry` (axis + PCA candidate planes through the area centroid, scored
+by reflected-distance median/p90 + normal agreement over a `geometryRev`-cached
+BVH) and `mirror_paint` (per-texel reflected correspondence through wrapper-local
+Householder maps — content arrives intrinsically mirrored, NO flip step; reflected-
+normal source filtering; bilinear snapshot sampling; loud skip accounting).
+
+### `edit_panel.js` — human sculpt/paint authoring (backlog 054)
+One tabbed panel driving the SAME control-API commands agents use (mutations
+only; hover/stroke sampling via a local raycaster so demand rendering stays
+parked). `viewer._toolMode` arbitration: hit-on-active-object captures the
+pointer and streams thinned points into `sculpt_stroke`/`paint_stroke` batches
+(≥16 points or 100 ms); misses fall through to OrbitControls untouched.
+Per-gesture sculpt undo (one slot), pre-flight banners for engine-refused
+states, world-radius ring cursor, paint-budget line.
 
 ### `viewer/sculpt.js` — sculpting, painting, picking (backlog 045)
 World-space brush engine for agent-driven creation: welded canonical-position
@@ -250,3 +267,17 @@ Export   → Modified: OBJExporter → POST /api/export_modified
 |--------|-----------|
 | Camera, FPV→Orbit, Scale→1× | Wireframe, Grid, Axes, Normals |
 | Transforms, Modified flag | Background, Lights |
+
+---
+
+## Testing
+
+- `poetry run pytest` — the Python suite (security, endpoints, scene API,
+  headless runtime, mesh compare). Browser suites self-skip here.
+- `scripts/e2e.sh` — the browser E2E suites (`tests/e2e/`, `-m e2e`,
+  backlog 048): 127 checks driving the REAL viewer in headless Chromium
+  through the same `window.mv` commands agents use — sculpt/paint,
+  articulation/timeline, symmetry healing, the human edit UI, brush-gesture
+  semantics, and the GLB UV round-trip. Uses a running app
+  (`MESHVAULT_E2E_URL`) or spins up its own server. The release workflow
+  runs them as a publish gate.

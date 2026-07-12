@@ -30,6 +30,7 @@ const FALLOFFS = {
     linear: (t) => 1 - t,
     sharp: (t) => (1 - t) * (1 - t),
 };
+export { FALLOFFS };
 
 /** Meshes of the ACTIVE object (sculpt/paint targets). */
 function activeMeshes(viewer) {
@@ -68,7 +69,7 @@ export function wrongObjectHint(viewer, worldPoint) {
     return "";
 }
 
-function assertNotSkinned(viewer) {
+export function assertNotSkinned(viewer) {
     const entry = viewer._activeEntry();
     if (entry && entry.skinned) {
         throw new Error(
@@ -319,12 +320,172 @@ function finalizeSculpt(viewer, touchedGeometries) {
     viewer.invalidate();
 }
 
+// ---------------------------------------------------------------------------
+// Single-slot texture-brush undo (backlog 050 gauntlet: every stamp was a
+// one-way door — clear_paint nukes ALL layers including earlier good repairs).
+// Each brush COMMAND stashes the pre-write canvas rect(s); undo_paint restores
+// the most recent command's rects exactly once.
+// ---------------------------------------------------------------------------
+
+const PATCH_TEXEL_CAP = 2048 * 2048;   // don't pin >16 MB of undo bytes
+let _lastPaintOp = null;
+
+/**
+ * Start a new undoable brush op. `group` (opts.undo_group) merges CONSECUTIVE
+ * calls into one undo unit — the human UI slices a drag into many stroke
+ * commands (flush cadence), and "undo" must mean the GESTURE, not the last
+ * 100 ms slice (gauntlet finding). Agents batching one logical stroke across
+ * calls can use the same token.
+ */
+export function beginPaintOp(action, group) {
+    if (group && _lastPaintOp && _lastPaintOp.group === group) return;
+    _lastPaintOp = { action, group: group || null, patches: [] };
+}
+
+/** Stash the CURRENT canvas content of a rect about to be overwritten. */
+export function stashPaintPatch(action, layer, x, y, w, h) {
+    if (w <= 0 || h <= 0 || w * h > PATCH_TEXEL_CAP) return;
+    if (!_lastPaintOp) beginPaintOp(action);
+    _lastPaintOp.patches.push({
+        layer, layerSize: layer.size, x, y,
+        data: layer.ctx.getImageData(x, y, w, h),
+    });
+}
+
+/** Restore the last brush op's pre-write texels (one-shot). */
+export function undoPaint(viewer) {
+    if (!_lastPaintOp || _lastPaintOp.patches.length === 0) {
+        throw new Error(
+            "Nothing to undo — ONE brush call is remembered (the slot is "
+            + "consumed by undo and replaced by each new paint/blur/clone/"
+            + "mirror call). clear_paint removes ALL paint layers instead.");
+    }
+    let restored = 0, stale = 0;
+    // REVERSED: within a grouped gesture, rects overlap — the earliest patch
+    // holds the pristine content and must be applied last so it wins.
+    for (const p of [..._lastPaintOp.patches].reverse()) {
+        // The layer object survives, but resize_texture reallocates its canvas
+        // (size changes) and clear_paint detaches it — skip those safely.
+        if (!p.layer || !p.layer.ctx || p.layer.size !== p.layerSize) {
+            stale++;
+            continue;
+        }
+        try {
+            p.layer.ctx.putImageData(p.data, p.x, p.y);
+            p.layer.texture.needsUpdate = true;
+            restored++;
+        } catch {
+            stale++;
+        }
+    }
+    const action = _lastPaintOp.action;
+    _lastPaintOp = null;
+    _gestureAlpha = null;   // the composited alphas no longer exist on canvas
+    viewer.invalidate();
+    const out = { undone: action, restoredPatches: restored };
+    if (stale) {
+        out.stalePatches = stale;
+        out.note = "Some patches were stale (layer resized or cleared since) "
+            + "and were skipped.";
+    }
+    return out;
+}
+
+/**
+ * Gesture-scoped alpha ledger: with undo_group set, overlapping slices of one
+ * gesture COMPOSE toward the requested opacity instead of compounding past it
+ * (a slow 0.05-opacity wiggle otherwise stacked to ~0.44 across its ~9 flush
+ * slices — painter semantics must hold per GESTURE, not per command).
+ * Map: layer -> Map(texelKey -> alpha already applied this gesture).
+ */
+let _gestureAlpha = null;
+
+function gestureAlphaMap(group, layer) {
+    if (!group) return null;
+    if (!_gestureAlpha || _gestureAlpha.group !== group) {
+        _gestureAlpha = { group, layers: new Map() };
+    }
+    let m = _gestureAlpha.layers.get(layer);
+    if (!m) { m = new Map(); _gestureAlpha.layers.set(layer, m); }
+    return m;
+}
+
+/**
+ * Pre-build the sculpt caches (mutable buffers + weld/adjacency maps) for the
+ * ACTIVE object without touching any state flags — the human UI calls this on
+ * sculpt-mode entry so the first stamp of a gesture doesn't pay the weld-map
+ * build mid-drag (visible hitch at ~120k triangles). Routing a zero-strength
+ * sculpt command instead would falsely mark the entry modified/sculpted.
+ */
+export function prewarmSculptCaches(viewer) {
+    const entry = viewer._activeEntry();
+    if (!entry || entry.skinned) return { warmed: 0 };
+    let warmed = 0;
+    const seen = new Set();
+    entry.model.traverse((c) => {
+        if (!c.isMesh || !c.geometry || seen.has(c.geometry)) return;
+        seen.add(c.geometry);
+        ensureMutable(c.geometry);
+        getWeld(c.geometry);
+        warmed++;
+    });
+    return { warmed };
+}
+
+/**
+ * Per-gesture undo support for the human UI (backlog 054): snapshot the ACTIVE
+ * object's decoded positions before a brush gesture, restore on undo. One slot,
+ * panel-owned; distinct from the entry's reset snapshot (which restores the
+ * ORIGINAL geometry and would also revert bakes/simplify).
+ */
+export function snapshotActivePositions(viewer) {
+    const entry = viewer._activeEntry();
+    if (!entry || entry.skinned) return null;
+    const geometries = [];
+    const seen = new Set();
+    entry.model.traverse((c) => {
+        if (!c.isMesh || !c.geometry || seen.has(c.geometry)) return;
+        seen.add(c.geometry);
+        const pos = c.geometry.getAttribute("position");
+        if (!pos) return;
+        // Accessor-decoded copy (quantized/interleaved safe — same rule as the
+        // reset snapshots).
+        const arr = new Float32Array(pos.count * 3);
+        for (let i = 0; i < pos.count; i++) {
+            arr[i * 3] = pos.getX(i);
+            arr[i * 3 + 1] = pos.getY(i);
+            arr[i * 3 + 2] = pos.getZ(i);
+        }
+        geometries.push({ geometry: c.geometry, positions: arr, count: pos.count });
+    });
+    return geometries.length ? { entryId: entry.id, geometries } : null;
+}
+
+/** Restore a snapshotActivePositions() snapshot. Returns true when applied. */
+export function restorePositionsSnapshot(viewer, snap) {
+    const entry = viewer._activeEntry();
+    if (!snap || !entry || entry.id !== snap.entryId) return false;
+    const touched = [];
+    for (const g of snap.geometries) {
+        const pos = g.geometry.getAttribute("position");
+        // Geometry replaced since the snapshot (simplify/split) — skip safely.
+        if (!pos || pos.count !== g.count) continue;
+        for (let i = 0; i < g.count; i++) {
+            pos.setXYZ(i, g.positions[i * 3], g.positions[i * 3 + 1],
+                       g.positions[i * 3 + 2]);
+        }
+        touched.push(g.geometry);
+    }
+    if (touched.length) finalizeSculpt(viewer, touched);
+    return touched.length > 0;
+}
+
 /**
  * Resolve the brush radius: absolute `radius` (world units) or `radius_rel`
  * (fraction of the ACTIVE object's bounding-sphere radius — scale-free, so an
  * agent needn't know if the model is 2 units or 2000).
  */
-function resolveRadius(viewer, opts, command) {
+export function resolveRadius(viewer, opts, command) {
     if (opts.radius > 0) return opts.radius;
     if (opts.radius_rel > 0) {
         const model = viewer._currentModel;
@@ -658,7 +819,7 @@ export function clearPaint(viewer) {
 }
 
 /** UV (u,v in [0,1]) → canvas pixel row/col respecting the layer orientation. */
-function uvToPixel(layer, u, v) {
+export function uvToPixel(layer, u, v) {
     const x = u * layer.size;
     const y = layer.flipY ? (1 - v) * layer.size : v * layer.size;
     return [x, y];
@@ -681,6 +842,8 @@ export function paintStroke(viewer, opts) {
 function paintPoints(viewer, opts, points) {
     assertNotSkinned(viewer);
     const meshes = activeMeshes(viewer);
+    // One undo unit per COMMAND — or per GESTURE when undo_group is given.
+    beginPaintOp("paint", opts.undo_group);
     const radius = resolveRadius(viewer, opts, "paint");
     const color = new THREE.Color(opts.color !== undefined ? String(opts.color) : "#ff3333");
     const opacity = opts.opacity !== undefined ? Math.max(0, Math.min(1, opts.opacity)) : 1;
@@ -698,6 +861,7 @@ function paintPoints(viewer, opts, points) {
         ? Math.cos(Math.max(1, Math.min(180, maxNormalDeg)) * Math.PI / 180) : null;
 
     let pixels = 0;
+    let rasterized = 0;
     let alphaSum = 0;
     const paintedLayers = new Set();
     const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
@@ -852,29 +1016,47 @@ function paintPoints(viewer, opts, points) {
             const w = maxPX - minPX + 1;
             const img = layer.ctx.getImageData(minPX, minPY, w, maxPY - minPY + 1);
             const data = img.data;
+            // Gesture ledger: alpha already applied to each texel THIS gesture
+            // (undo_group). A new slice only tops the texel up to its target —
+            // total composite = max slice alpha, never the compounded product.
+            const ledger = gestureAlphaMap(opts.undo_group, layer);
+            let painted = 0;
             for (const [key, alpha] of acc) {
+                let eff = alpha;
+                if (ledger) {
+                    const prev = ledger.get(key) || 0;
+                    if (alpha <= prev + 0.004) continue;
+                    eff = (alpha - prev) / (1 - prev);
+                    ledger.set(key, alpha);
+                }
                 const px = key % dim;
                 const py = (key - px) / dim;
                 const o = ((py - minPY) * w + (px - minPX)) * 4;
-                data[o] = Math.round(data[o] * (1 - alpha) + cr * alpha);
-                data[o + 1] = Math.round(data[o + 1] * (1 - alpha) + cg * alpha);
-                data[o + 2] = Math.round(data[o + 2] * (1 - alpha) + cb * alpha);
+                data[o] = Math.round(data[o] * (1 - eff) + cr * eff);
+                data[o + 1] = Math.round(data[o + 1] * (1 - eff) + cg * eff);
+                data[o + 2] = Math.round(data[o + 2] * (1 - eff) + cb * eff);
                 data[o + 3] = 255;
                 alphaSum += alpha;
+                painted++;
             }
+            stashPaintPatch("paint", layer, minPX, minPY, img.width, img.height);
             layer.ctx.putImageData(img, minPX, minPY);
-            pixels += acc.size;
+            pixels += painted;
+            rasterized += acc.size;
             paintedLayers.add(layer);
         }
     }
 
-    if (uvLess > 0 && paintedLayers.size === 0 && pixels === 0) {
+    if (uvLess > 0 && paintedLayers.size === 0 && rasterized === 0) {
         throw new Error(
             "The touched meshes have no UV coordinates, so texture painting has "
             + "nowhere to land. Paint works on primitives (add_primitive) and "
             + "UV-mapped models; STL/PLY meshes have no UVs.");
     }
-    if (pixels === 0) {
+    // A grouped slice that lands entirely on texels the SAME gesture already
+    // covered is a quiet success, not a miss — only zero RASTERIZED texels
+    // means the brush genuinely touched nothing.
+    if (rasterized === 0) {
         // Loud failure with the fix — see the sculpt miss rationale.
         throw new Error(
             "Brush touched no surface. Check center (world coords — use pick, "
@@ -885,7 +1067,8 @@ function paintPoints(viewer, opts, points) {
     const entry = viewer._activeEntry();
     if (entry) entry.modified = true;
     viewer.invalidate();
-    const meanAlpha = Math.round((alphaSum / pixels) * 1000) / 1000;
+    const meanAlpha = pixels > 0
+        ? Math.round((alphaSum / pixels) * 1000) / 1000 : 0;
     const result = {
         painted: pixels,
         // Honest visibility feedback: how strongly the average touched texel
@@ -959,7 +1142,7 @@ export function fillPaint(viewer, opts) {
 /** A repair brush needs a READABLE base: refuse when the material had a real
  *  texture that could not be drawn into the layer (KTX2/GPU-only) — otherwise
  *  "repair" silently blurs a flat-color stand-in of the real texture. */
-function ensureRepairableLayer(viewer, mesh, size) {
+export function ensureRepairableLayer(viewer, mesh, size) {
     const material = paintTargetMaterial(mesh);
     const prev = material.map;
     if (prev && !(material.userData && material.userData._mvPaint)) {
@@ -978,8 +1161,9 @@ function ensureRepairableLayer(viewer, mesh, size) {
 }
 
 /** Collect the texel footprint of a world-space brush on a mesh (reuses the
- *  paint rasterization): Map(texelKey -> {alpha, worldPos}). */
-function brushFootprint(mesh, layer, center, radius, hardness, falloffFn) {
+ *  paint rasterization): Map(texelKey -> {alpha, world, n}) — `n` is the owning
+ *  triangle's world normal (mirror_paint's two-sheet guard needs it). */
+export function brushFootprint(mesh, layer, center, radius, hardness, falloffFn) {
     const geometry = mesh.geometry;
     const uvAttr = geometry.getAttribute("uv");
     if (!uvAttr) return null;
@@ -991,6 +1175,7 @@ function brushFootprint(mesh, layer, center, radius, hardness, falloffFn) {
     const idxOf = (t, k) => (index ? index.getX(t * 3 + k) : t * 3 + k);
     const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
     const p = new THREE.Vector3();
+    const e1 = new THREE.Vector3(), e2 = new THREE.Vector3();
     const r2 = radius * radius;
     const dim = layer.size;
     const acc = new Map();
@@ -1002,6 +1187,8 @@ function brushFootprint(mesh, layer, center, radius, hardness, falloffFn) {
         p.copy(a).add(b).add(c).divideScalar(3);
         const triR = Math.max(a.distanceTo(p), b.distanceTo(p), c.distanceTo(p));
         if (p.distanceToSquared(center) > (radius + triR) ** 2) continue;
+        e1.copy(b).sub(a); e2.copy(c).sub(a);
+        const triN = e1.clone().cross(e2).normalize();
         const [u0, v0] = uvToPixel(layer, uvAttr.getX(i0), uvAttr.getY(i0));
         const [u1, v1] = uvToPixel(layer, uvAttr.getX(i1), uvAttr.getY(i1));
         const [u2, v2] = uvToPixel(layer, uvAttr.getX(i2), uvAttr.getY(i2));
@@ -1031,7 +1218,8 @@ function brushFootprint(mesh, layer, center, radius, hardness, falloffFn) {
                 const key = py * dim + px;
                 const prev = acc.get(key);
                 if (!prev || soft > prev.alpha) {
-                    acc.set(key, { alpha: soft, world: [p.x, p.y, p.z] });
+                    acc.set(key, { alpha: soft, world: [p.x, p.y, p.z],
+                                   n: [triN.x, triN.y, triN.z] });
                 }
             }
         }
@@ -1048,6 +1236,7 @@ function brushFootprint(mesh, layer, center, radius, hardness, falloffFn) {
 export function blurPaint(viewer, opts = {}) {
     assertNotSkinned(viewer);
     const meshes = activeMeshes(viewer);
+    beginPaintOp("blur_paint", opts.undo_group);
     const radius = resolveRadius(viewer, opts, "blur_paint");
     const strength = opts.strength !== undefined ? Math.max(0, Math.min(1, opts.strength)) : 0.5;
     const center = new THREE.Vector3(...(opts.center || []));
@@ -1101,6 +1290,7 @@ export function blurPaint(viewer, opts = {}) {
             blurred++;
             blurAlphaSum += alpha;
         }
+        stashPaintPatch("blur_paint", layer, minX, minY, dstImg.width, dstImg.height);
         layer.ctx.putImageData(dstImg, minX, minY);
         layer.texture.needsUpdate = true;
     }
@@ -1126,6 +1316,7 @@ export function blurPaint(viewer, opts = {}) {
 export function clonePaint(viewer, opts = {}) {
     assertNotSkinned(viewer);
     const meshes = activeMeshes(viewer);
+    beginPaintOp("clone_paint", opts.undo_group);
     const radius = resolveRadius(viewer, opts, "clone_paint");
     if (!opts.from || opts.from.length !== 3 || !opts.to || opts.to.length !== 3) {
         throw new Error("clone_paint requires from:[x,y,z] and to:[x,y,z] "
@@ -1261,6 +1452,7 @@ export function clonePaint(viewer, opts = {}) {
             cloned++;
             alphaSum += alpha;
         }
+        stashPaintPatch("clone_paint", layer, minX, minY, img.width, img.height);
         layer.ctx.putImageData(img, minX, minY);
         layer.texture.needsUpdate = true;
     }

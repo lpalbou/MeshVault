@@ -341,6 +341,37 @@ The decision loop for "this area is over-detailed for what it represents":
   surfaces within 45°). Both return quantified {blurred|cloned, meanAlpha}.
   Repair recipe: close-up screenshot → pick the defect → pick a nearby donor →
   clone_paint → blur_paint the boundary → before/after close-ups.
+- `detect_symmetry { samples? }` — find the object's dominant MIRROR plane
+  (3 local axis planes + PCA axes through the surface's area centroid; ~1k
+  seeded samples reflected and measured against the surface). Returns the
+  winning plane + per-candidate {medianDistRel, p90DistRel, normalAgreement}
+  and a verdict strong/moderate/weak; cached until the geometry changes.
+  Geometric symmetry ≠ TEXTURE symmetry — verify heals with a render.
+- `mirror_paint { center, radius|radius_rel, strength?, plane?, plane_origin? }`
+  — heal a region from its MIRROR counterpart (the left/right donor
+  clone_paint's 45° cone refuses: a clean right eye heals the left eye,
+  arriving anatomically mirrored — no flip math needed, the reflection does
+  it). Auto-detects the plane when none is cached; refuses weak symmetry
+  unless plane:"x"|"y"|"z" overrides — overrides are SCORED and the result
+  warns when the override is weak or disagrees with the detected winner.
+  Same-mesh textures only; oversized brushes error at a work budget (heal in
+  passes). Returns {healed, meanAlpha, skipped{noSource,normalReject},
+  selfSourceFraction} — selfSourceFraction = share of texels whose mirror
+  source lands back INSIDE the brush (self-copy; >0.4 notes the brush
+  straddles the plane: little visible change there). Baked directional
+  lighting transfers with the donor (a luminance seam can remain) —
+  blur_paint the boundary when visible. GEOMETRIC symmetry does not imply
+  TEXTURE symmetry (a mirrored chair rewrites a unique seat patch with
+  mirrored weave) — always verify with a render.
+- `undo_paint {}` — restore the texels overwritten by the LAST texture-brush
+  call (paint/paint_stroke/blur_paint/clone_paint/mirror_paint). ONE slot,
+  consumed by undo, replaced by each new call — a bad stamp is no longer a
+  one-way door. fill_paint/clear_paint are not undoable this way.
+- `undo_group` (param on all texture brushes): calls sharing the token form
+  ONE undo unit AND one opacity unit — overlapping stamps across grouped
+  calls COMPOSE toward the requested opacity instead of compounding past it.
+  Use it when one logical stroke spans several calls (e.g. batches of ≤64
+  points); without it, per-command painter semantics apply unchanged.
 - `resize_texture { size, filter? }` — re-allocate paint layers (tiers work);
   authored textures downsample at EXPORT (`export_glb {texture_size}`) instead.
 

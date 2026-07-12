@@ -319,6 +319,15 @@
                         <line x1="12" y1="10" x2="14" y2="8"/>
                     </svg>
                 </button>
+                <!-- Edit (sculpt/paint) toggle, backlog 054 -->
+                <button id="edit-toggle" class="btn btn-icon viewer-tool-btn" title="Edit: sculpt &amp; paint brushes (ESC exits)">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 19l7-7 3 3-7 7-3-3z"/>
+                        <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/>
+                        <path d="M2 2l7.586 7.586"/>
+                        <circle cx="11" cy="11" r="2"/>
+                    </svg>
+                </button>
                 <!-- Light controls toggle -->
                 <button id="light-toggle" class="btn btn-icon viewer-tool-btn" title="Light settings">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -415,6 +424,82 @@
             </div>
             </div><!-- end viewer-toolbar -->
 
+            <!-- Edit panel: human sculpt/paint (backlog 054). A DIRECT child of
+                 the viewer container (top-left) — inside the toolbar it would
+                 cover the button column, and sharing the lights anchor buried
+                 whichever panel opened second. -->
+            <div id="edit-panel" class="light-panel edit-panel" style="display: none;">
+                <div class="light-panel-header">
+                    <div class="edit-tabs">
+                        <button id="edit-tab-sculpt" class="edit-tab active">Sculpt</button>
+                        <button id="edit-tab-paint" class="edit-tab">Paint</button>
+                    </div>
+                    <button id="edit-close" class="btn btn-icon btn-xs" title="Close (ESC)">&times;</button>
+                </div>
+                <div class="light-panel-body">
+                    <div id="edit-banner" class="edit-banner" style="display:none;"></div>
+                    <div class="light-control">
+                        <label>Radius</label>
+                        <div class="slider-row">
+                            <input type="range" id="edit-radius" class="edit-slider" min="0.02" max="0.5" value="0.12" step="0.01" />
+                            <span class="slider-value" id="edit-radius-val">0.12</span>
+                        </div>
+                    </div>
+                    <div id="edit-sculpt-body">
+                        <div class="light-control">
+                            <label>Brush</label>
+                            <div id="edit-tools" class="edit-tools"></div>
+                        </div>
+                        <div class="light-control">
+                            <label>Strength</label>
+                            <div class="slider-row">
+                                <input type="range" id="edit-strength" class="edit-slider" min="0.02" max="1" value="0.1" step="0.01" />
+                                <span class="slider-value" id="edit-strength-val">0.10</span>
+                            </div>
+                        </div>
+                        <div class="edit-actions">
+                            <button id="edit-invert" class="btn btn-sm" title="Invert draw/inflate: carve INWARD (dent) instead of raising — or hold Alt while dragging">Invert (dent)</button>
+                            <button id="edit-undo" class="btn btn-sm" title="Undo the last brush gesture (Cmd/Ctrl+Z)">Undo gesture</button>
+                        </div>
+                        <div id="edit-sculpt-status" class="edit-status"></div>
+                    </div>
+                    <div id="edit-paint-body" style="display:none;">
+                        <div class="light-control">
+                            <label>Color</label>
+                            <div class="slider-row">
+                                <input type="color" id="edit-color" value="#ff3b30" />
+                                <select id="edit-tier" class="sort-select" title="Texture resolution (paint layer)">
+                                    <option value="512">512</option>
+                                    <option value="1024" selected>1024</option>
+                                    <option value="2048">2048</option>
+                                    <option value="4096">4096</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="light-control">
+                            <label>Opacity</label>
+                            <div class="slider-row">
+                                <input type="range" id="edit-opacity" class="edit-slider" min="0.05" max="1" value="0.9" step="0.05" />
+                                <span class="slider-value" id="edit-opacity-val">0.90</span>
+                            </div>
+                        </div>
+                        <div class="light-control">
+                            <label>Hardness</label>
+                            <div class="slider-row">
+                                <input type="range" id="edit-hardness" class="edit-slider" min="0" max="1" value="0.6" step="0.05" />
+                                <span class="slider-value" id="edit-hardness-val">0.60</span>
+                            </div>
+                        </div>
+                        <div class="edit-actions">
+                            <button id="edit-undo-paint" class="btn btn-sm" title="Undo the last stroke (whole gesture; Cmd/Ctrl+Z)">Undo stroke</button>
+                            <button id="edit-clear-paint" class="btn btn-sm" title="Remove ALL paint layers from the active object">Clear paint</button>
+                        </div>
+                        <div id="edit-paint-status" class="edit-status"></div>
+                        <div id="edit-budget" class="edit-budget"></div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Scale control (bottom-right) -->
             <div id="scale-control" style="display: none;">
                 <label for="model-scale">Scale</label>
@@ -458,15 +543,18 @@
                 </select>
             </div>
 
-            <!-- Scene timeline (backlog 046) — shown when keyframe tracks exist -->
+            <!-- Scene timeline (backlog 046; keyframe authoring 054) — shown when a model is loaded -->
             <div id="timeline-bar" class="animation-bar timeline-bar" style="display: none;">
-                <span class="timeline-label" title="Scene keyframe timeline (agent-authored animation)">⏱ Timeline</span>
+                <span class="timeline-label" title="Scene keyframe timeline">⏱ Timeline</span>
+                <button id="timeline-key-btn" class="btn btn-sm timeline-key" title="Key the ACTIVE object's current pose at the playhead">●</button>
                 <button id="timeline-play-btn" class="btn btn-sm anim-play" title="Play/Pause timeline">▶</button>
                 <div class="timeline-scrub-wrap">
                     <input type="range" id="timeline-scrub" class="anim-scrub" min="0" max="100" value="0" step="0.1" title="Scrub the timeline" />
                     <div id="timeline-ticks" class="timeline-ticks"></div>
                 </div>
                 <span id="timeline-time" class="anim-time">0.0s / 0.0s</span>
+                <input type="number" id="timeline-duration" class="timeline-duration" min="0.1" step="0.5" title="Timeline duration (seconds; clamps to the last key)" />
+                <span id="timeline-empty-hint" class="timeline-empty-hint">pose the object, press ●</span>
             </div>
 
             <!-- Viewer info -->

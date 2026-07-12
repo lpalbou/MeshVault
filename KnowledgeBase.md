@@ -532,6 +532,111 @@ Renders illustrate; numbers decide. Proof packs live outside the repo
 (~/MeshVault_assets/proofs/ + INDEX.md) because GLBs and screenshots are
 artifacts, not source.
 
+## Symmetry healing (backlog 050, v0.8.0)
+
+### Reflected correspondence mirrors content BY ITSELF — a flip step is a bug
+`mirror_paint` maps every destination texel to its reflected world position and
+samples the source surface there. That map has determinant −1: it reverses
+orientation, so a right eye sampled this way arrives as a LEFT eye (tear duct
+on the nose side) with zero explicit image math. Composing an additional 2D
+"flip the patch" step — which the original design sketch called for — yields
+det +1, an orientation-PRESERVING copy: the donor pasted un-mirrored. Flip
+steps belong only to sample-rect-then-stamp architectures; per-texel
+correspondence has no rect. (Adversarial review caught this before a naive
+implementation shipped it.)
+
+### Reflection math lives in wrapper-LOCAL space, or non-uniform scale corrupts it
+Reflecting world points across a world-transformed plane normal is only valid
+under rotation + uniform scale. The correct world-side map is `W · R · W⁻¹`
+(W = wrapper matrixWorld, R = local Householder), and normals go through the
+composite's normal matrix `(A⁻¹)ᵀ`. "Local" means WRAPPER-local — meshes
+inside the model carry their own node transforms.
+
+### Brush metrics must be reachable, budgets must be loud (050 field lessons)
+- A metric whose documented trigger is mathematically unreachable is worse
+  than no metric: `selfSourceFraction` counted mirrors within 10% of the
+  radius, capping it at ~0.06 for an on-plane disc (expected 4ε/π), so the
+  promised "≈1 + note" could never fire. Derive thresholds from the geometry
+  of the definition (mirror lands INSIDE the brush → up to ~0.6 on-plane).
+- O(texels × candidates) loops need work budgets: a half-head brush ran 6
+  silent minutes — indistinguishable from a hang, and agents with timeouts
+  kill the session and lose paint state. Budget in naive pair-tests + a
+  centroid prefilter (nearest-conceivable-point rejection) for the real cost.
+- Zero-result diagnostics must exclude the thing that just failed: the
+  cross-mesh hint named the object's OWN single mesh and detoured the agent
+  to clone_paint — which refuses mirrored donors by design.
+- Detection origins wander with the sample seed (~cm on a head — a smear at
+  iris scale): refine the plane offset along its normal with a 1D
+  median-distance scan; both seeds then converge to the true plane.
+
+### Geometry-only symmetry detection: score distance AND normal agreement
+Median + p90 reflected-point-to-surface distance (BVH; normalized by the local
+bbox diagonal) through the AREA CENTROID (bbox centers are biased by one-sided
+features like pedestals), plus mean dot(reflected source normal, hit normal) —
+positional scores alone accept planes that map surface onto surface with the
+wrong orientation (thin plates). On near-perfect shapes every centroid plane
+ties (a sphere mirrors across ALL of them): prefer canonical axis planes over
+PCA on ties or the choice is float-noise-random. And geometric symmetry never
+guarantees TEXTURE symmetry — verify heals with a render. The BVH cache keys
+on `geometryRev`; MeshBVH construction REORDERS the geometry index, so
+triangle lookups by `faceIndex` must go through the index, never by `f*3`
+position order (a sphere scored normalAgreement ≈ −0.29 until fixed).
+
+## Human editing UI over the agent surface (backlog 054, v0.8.0)
+
+### One command surface, two drivers — mutations only
+The panels instantiate the app's single `ViewerControlAPI` and route every
+MUTATION through it (the E2E suites test `execute()`, so UI edits are covered
+transitively). READS must NOT go through it: every successful `execute()`
+invalidates the renderer, so a per-pointermove hover pick would force
+continuous rendering and defeat the parked 0%-idle-CPU loop. Hover and stroke
+sampling use a local `THREE.Raycaster`.
+
+### Input arbitration is a shared flag, not event propagation
+Canvas input consumers are split across MOUSE events (click-select, measure)
+and POINTER events (OrbitControls, TransformControls) — `stopPropagation` on
+pointerdown never reaches the derived mouse listeners. A `viewer._toolMode`
+flag consulted by every consumer (precedent: `_measureMode`) is the only
+arbitration that works. OrbitControls can stay ENABLED and be disabled AFTER
+a synchronous hit-test: rotation happens in pointermove, which re-checks
+`enabled` per event — nothing leaks, and misses orbit for free. Capture the
+pointer on the CANVAS (capturing an overlay starves OrbitControls' dynamically
+bound pointerup and corrupts its tracking). The gizmo is guarded by its
+hover-set `axis` property — checkable BEFORE its own pointerdown runs.
+
+### Mode transitions notify from the OWNER, both directions
+`navmodechange` was dispatched at →orbit call sites only; nothing announced
+→fpv, so tool modes never learned about it and a human could paint while
+flying (gauntlet). Per-call-site notification IS the bug class ("some caller
+forgot"); the state owner (`setNavMode`) must dispatch on every transition.
+The same event then keeps the toolbar icon honest for free when other code
+forces a mode.
+
+### Gestures are the human unit; commands are the agent unit — bridge explicitly
+The UI slices one drag into many stroke COMMANDS (flush cadence). Anything
+with per-command semantics silently degrades to per-slice for humans: undo
+undid the last 100 ms slice, painter opacity compounded across slices
+(0.05 → ~0.44 over a slow wiggle), and gesture-end feedback starved when the
+flush timer drained the buffer before pointer-up. The bridge is an explicit
+`undo_group` token on the brush commands: same token = one undo unit AND one
+alpha-composition unit (per-texel gesture ledger: `eff = (α−prev)/(1−prev)`
+tops each texel up to the target instead of compounding). Public param —
+agents batching a logical stroke across ≤64-point calls get the same
+semantics. And run gesture-end feedback at gesture end, unconditionally.
+
+### Registry events are the source of truth for chrome
+The app's placeholder hid only in file-load flows; objects created through
+the control API (agent pushes, primitives) left it covering the canvas — where
+it silently ate every pointer event. UI chrome that depends on "is anything
+loaded" must track `objectschange`, not load call sites.
+
+### Stroke flush cadence: points-or-time, never per-frame
+The engine recomputes whole-geometry normals per COMMAND (~5–15 ms at 120k
+triangles). Flushing per animation frame means 60 recomputes/s — 30–90% of
+the frame budget, jank exactly while dragging. Buffer radius/2-thinned points
+and flush at ≥16 points or 100 ms; fidelity is unchanged (stamp density is
+bounded by the thinning, not the flush rate).
+
 ### Manifest v2: index-based references, two-pass application
 Hierarchy (`parent`), pivots and timeline tracks persist by OBJECT INDEX in
 the manifest's objects array, never by live registry id (ids are

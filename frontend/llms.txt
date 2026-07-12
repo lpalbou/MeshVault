@@ -55,7 +55,9 @@ Key facts for agents:
 - Repair & adaptive LoD: `inspect_region` (density survey, opportunity-sorted grid)
   → `simplify_region` (boundary-locked regional decimation — adaptive resolution by
   agent judgment), `fix_mesh` (degenerate/normals/flipped-face passes with issue
-  deltas), `inspect_texture` (texel density + worst spots), `blur_paint`/`clone_paint`
+  deltas), `inspect_texture` (texel density + worst spots), `blur_paint`/`clone_paint`,
+  `detect_symmetry`/`mirror_paint` (heal from the object's own mirror counterpart),
+  `undo_paint` (single-slot brush undo — a bad stamp is not a one-way door)
   (defect softening + world-space heal brush), texture tiers low/medium/high/xhigh
   (512→4096) on paint and on export.
 - Articulation & animation: `detect_parts`/`split_object` (plane cuts with suggested
