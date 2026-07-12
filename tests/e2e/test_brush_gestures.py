@@ -3,7 +3,9 @@ Ported from the /tmp field harnesses (backlog 048). Run via scripts/e2e.sh.
 """
 import pytest
 import json, sys, urllib.parse
-from playwright.sync_api import sync_playwright
+_pw = pytest.importorskip("playwright.sync_api",
+                          reason="playwright not installed (pip install 'meshvault[mcp]')")
+sync_playwright = _pw.sync_playwright
 import json, sys
 
 

@@ -18,7 +18,9 @@ import json
 import sys
 
 import pytest
-from playwright.sync_api import sync_playwright
+_pw = pytest.importorskip("playwright.sync_api",
+                          reason="playwright not installed (pip install 'meshvault[mcp]')")
+sync_playwright = _pw.sync_playwright
 
 
 

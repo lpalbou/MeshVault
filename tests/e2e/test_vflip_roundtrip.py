@@ -18,7 +18,9 @@ import struct
 import urllib.parse
 
 import pytest
-from playwright.sync_api import sync_playwright
+_pw = pytest.importorskip("playwright.sync_api",
+                          reason="playwright not installed (pip install 'meshvault[mcp]')")
+sync_playwright = _pw.sync_playwright
 
 
 def uv_v_range(glb_bytes):
