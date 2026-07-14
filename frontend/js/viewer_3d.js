@@ -40,6 +40,13 @@ import { SSAOPass } from "three/addons/postprocessing/SSAOPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { clonePaintLayer, paintBudgetInfo, paintedMeshNames, releasePaintBudget } from "./viewer/sculpt.js";
 import { releaseSymmetryCache } from "./viewer/symmetry.js";
+import {
+    dropMorphs,
+    morphSummary,
+    rebuildMorphAttributes,
+    releaseMorphBudget,
+    transformMorphsForBake,
+} from "./viewer/morphs.js";
 import { restoreTimeline, sampleTimeline, serializeTimeline, tickTimeline, timelineState } from "./viewer/timeline.js";
 
 /**
@@ -452,9 +459,34 @@ export class Viewer3D {
                 params = { radius: num(p.radius, 0.3), length: num(p.length, 0.6),
                            capSegments: seg(p.capSegments, 24),
                            radialSegments: seg(p.radialSegments, 64) };
-                geometry = new THREE.CapsuleGeometry(
-                    params.radius, params.length,
-                    params.capSegments, params.radialSegments);
+                // THREE.CapsuleGeometry gives the cylindrical body ONE height
+                // segment: with the default radial density that is a wall of
+                // ~50:1 sliver quads — the exact stock that made refine's
+                // quality cascade flood (perf gauntlet #1). Build the same
+                // lathe profile with body subdivisions matched to the radial
+                // step so side quads come out roughly square.
+                const circumStep = (2 * Math.PI * params.radius) / params.radialSegments;
+                const bodySegments = Math.max(1, Math.min(256,
+                    Math.round(params.length / circumStep)));
+                const profile = [];
+                for (let i = 0; i <= params.capSegments; i++) {
+                    const a = -Math.PI / 2 + (i / params.capSegments) * (Math.PI / 2);
+                    profile.push(new THREE.Vector2(
+                        Math.cos(a) * params.radius,
+                        -params.length / 2 + Math.sin(a) * params.radius));
+                }
+                for (let i = 1; i < bodySegments; i++) {
+                    profile.push(new THREE.Vector2(
+                        params.radius,
+                        -params.length / 2 + (i / bodySegments) * params.length));
+                }
+                for (let i = 0; i <= params.capSegments; i++) {
+                    const a = (i / params.capSegments) * (Math.PI / 2);
+                    profile.push(new THREE.Vector2(
+                        Math.cos(a) * params.radius,
+                        params.length / 2 + Math.sin(a) * params.radius));
+                }
+                geometry = new THREE.LatheGeometry(profile, params.radialSegments);
                 break;
             }
         }
@@ -641,6 +673,7 @@ export class Viewer3D {
         // records live on material.userData).
         releasePaintBudget(entry.model);
         releaseSymmetryCache(entry);
+        releaseMorphBudget(entry);
         entry.model.traverse((child) => {
             if (child.isMesh && child._mvOriginalMaterial) {
                 const override = child.material;
@@ -668,6 +701,11 @@ export class Viewer3D {
         }
         this._objects = [];
         this._activeObjectId = null;
+        // Object ids RESTART after a clear: replicas replay logs from zero
+        // after an unload, and commands address objects by id — a counter
+        // that keeps counting makes every replayed id miss (perf gauntlet
+        // P0: 438/510 commands silently failed on backward seeks).
+        this._nextObjectId = 1;
         // Invalidate in-flight ADD loads: the scene they were adding into is gone.
         this._sceneGeneration++;
 
@@ -733,6 +771,7 @@ export class Viewer3D {
                 painted: painted.length > 0 || undefined,
                 sculpted: e.sculpted || undefined,
                 modified: e.modified || undefined,
+                morphs: morphSummary(e),
                 parentId: e.parentId != null ? e.parentId : undefined,
                 pivot: e.pivot.lengthSq() > 0
                     ? [e.pivot.x, e.pivot.y, e.pivot.z].map((v) => Math.round(v * 10000) / 10000)
@@ -5129,6 +5168,12 @@ export class Viewer3D {
         // Paint layers survive reset (clear_paint is their undo) — the object is
         // still export-dirty if any remain.
         entry.modified = paintedMeshNames(entry.model).length > 0;
+        // Morphs do NOT survive reset: their deltas reference the (possibly
+        // sculpted) morph base, and applying them to the restored ORIGINAL
+        // yields a shape nobody authored. Dropped loudly (049 review M6).
+        const morphNote = dropMorphs(this, entry, "reset");
+        if (morphNote) this._lastResetNote = morphNote;
+        else this._lastResetNote = null;
     }
 
     /**
@@ -5160,6 +5205,7 @@ export class Viewer3D {
         const wrapperInv = new THREE.Matrix4().copy(entry.wrapper.matrixWorld).invert();
         const local = new THREE.Matrix4();
 
+        let morphsTouched = false;
         model.traverse((child) => {
             if (child.isMesh && child.geometry) {
                 // Quantized attributes (KHR_mesh_quantization: normalized Int16/Uint16
@@ -5170,12 +5216,19 @@ export class Viewer3D {
                 this._dequantizeVectorAttributes(child.geometry);
                 local.multiplyMatrices(wrapperInv, child.matrixWorld);
                 child.geometry.applyMatrix4(local);
+                // three NEVER transforms morphAttributes: the morph base moves
+                // by the full affine matrix, the deltas by its linear part —
+                // or every stored morph points in the pre-bake frame.
+                if (transformMorphsForBake(this, entry, child.geometry, local)) {
+                    morphsTouched = true;
+                }
                 child.position.set(0, 0, 0);
                 child.rotation.set(0, 0, 0);
                 child.scale.set(1, 1, 1);
                 child.updateMatrix();
             }
         });
+        if (morphsTouched) rebuildMorphAttributes(this, entry);
 
         // Reset all intermediate groups and the model root (the wrapper is NOT part
         // of this traversal — placement survives).
@@ -5188,6 +5241,37 @@ export class Viewer3D {
             }
         });
         model.updateMatrixWorld(true);
+    }
+
+    /**
+     * Apply ONE extra matrix to every unique geometry of the active object,
+     * routing it through the morph transform hook. Bake ops (rotate / recenter
+     * / ground / auto-orient) previously wrote vertices directly AFTER
+     * _bakeWorldTransforms — the stored morph base never received their
+     * matrix, so a later capture_morph diffed the WHOLE mesh against a stale
+     * base (049 field bug B4: "baked rotates densify captures" — the deltas
+     * were silently encoding the rotation itself). Unique-geometry iteration
+     * also protects instanced glTF from double transforms.
+     */
+    _applyBakeMatrix(matrix) {
+        const entry = this._activeEntry();
+        if (!entry) return;
+        let morphsTouched = false;
+        const seen = new Set();
+        entry.model.traverse((child) => {
+            if (!child.isMesh || !child.geometry || seen.has(child.geometry)) return;
+            seen.add(child.geometry);
+            // applyMatrix4 transforms positions AND normals (normalMatrix) —
+            // pure translations leave normals untouched, rotations rotate them
+            // exactly (no lossy recompute of authored normals).
+            child.geometry.applyMatrix4(matrix);
+            if (transformMorphsForBake(this, entry, child.geometry, matrix)) {
+                morphsTouched = true;
+            }
+            child.geometry.computeBoundingBox();
+            child.geometry.computeBoundingSphere();
+        });
+        if (morphsTouched) rebuildMorphAttributes(this, entry);
     }
 
     /**
@@ -5249,14 +5333,9 @@ export class Viewer3D {
         const box = this._localBakedBox();
         const center = box.getCenter(new THREE.Vector3());
 
-        // Shift all vertices so center is at origin
-        this._currentModel.traverse((child) => {
-            if (child.isMesh && child.geometry) {
-                child.geometry.translate(-center.x, -center.y, -center.z);
-                child.geometry.computeBoundingBox();
-                child.geometry.computeBoundingSphere();
-            }
-        });
+        // Shift all vertices so center is at origin (morph-aware bake).
+        this._applyBakeMatrix(
+            new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z));
 
         this._modelModified = true;
     }
@@ -5289,13 +5368,8 @@ export class Viewer3D {
         const offsetZ = -center.z;
         const offsetY = -box.min.y; // Lift so lowest point touches local Y=0
 
-        this._currentModel.traverse((child) => {
-            if (child.isMesh && child.geometry) {
-                child.geometry.translate(offsetX, offsetY, offsetZ);
-                child.geometry.computeBoundingBox();
-                child.geometry.computeBoundingSphere();
-            }
-        });
+        this._applyBakeMatrix(
+            new THREE.Matrix4().makeTranslation(offsetX, offsetY, offsetZ));
 
         this._modelModified = true;
     }
@@ -5370,6 +5444,7 @@ export class Viewer3D {
         const entry = this._activeEntry();
         if (entry) {
             entry.originalState = null;
+            dropMorphs(this, entry, "simplify");   // vertex indexing changed
             entry.stats = this._computeStats(entry.model);
             this._lastStats = entry.stats;
             this._onInfoUpdate(entry.stats);
@@ -5411,24 +5486,13 @@ export class Viewer3D {
         const box = this._localBakedBox();
         const center = box.getCenter(new THREE.Vector3());
 
-        this._currentModel.traverse((child) => {
-            if (child.isMesh && child.geometry) {
-                const posAttr = child.geometry.attributes.position;
-                if (!posAttr) return;
-
-                for (let i = 0; i < posAttr.count; i++) {
-                    const v = new THREE.Vector3().fromBufferAttribute(posAttr, i);
-                    v.sub(center);
-                    v.applyMatrix4(rotMatrix);
-                    v.add(center);
-                    posAttr.setXYZ(i, v.x, v.y, v.z);
-                }
-                posAttr.needsUpdate = true;
-                child.geometry.computeVertexNormals();
-                child.geometry.computeBoundingBox();
-                child.geometry.computeBoundingSphere();
-            }
-        });
+        // T(center) · R · T(−center), morph-aware (field bug B4).
+        const m = new THREE.Matrix4()
+            .makeTranslation(center.x, center.y, center.z)
+            .multiply(rotMatrix)
+            .multiply(new THREE.Matrix4()
+                .makeTranslation(-center.x, -center.y, -center.z));
+        this._applyBakeMatrix(m);
 
         this._modelModified = true;
     }
@@ -5491,25 +5555,14 @@ export class Viewer3D {
         const rotMatrix = new THREE.Matrix4().makeBasis(ex, ey, ez);
         const invRot = rotMatrix.clone().invert();
 
-        // 6. Apply rotation to all vertices (centered at centroid)
-        this._currentModel.traverse((child) => {
-            if (child.isMesh && child.geometry) {
-                const posAttr = child.geometry.attributes.position;
-                if (!posAttr) return;
-
-                for (let i = 0; i < posAttr.count; i++) {
-                    const v = new THREE.Vector3().fromBufferAttribute(posAttr, i);
-                    v.sub(centroid);
-                    v.applyMatrix4(invRot);
-                    v.add(centroid); // Keep position, only rotate
-                    posAttr.setXYZ(i, v.x, v.y, v.z);
-                }
-                posAttr.needsUpdate = true;
-                child.geometry.computeVertexNormals();
-                child.geometry.computeBoundingBox();
-                child.geometry.computeBoundingSphere();
-            }
-        });
+        // 6. Apply rotation to all vertices about the centroid — morph-aware
+        // bake (field bug B4): T(centroid) · R⁻¹ · T(−centroid).
+        const m = new THREE.Matrix4()
+            .makeTranslation(centroid.x, centroid.y, centroid.z)
+            .multiply(invRot)
+            .multiply(new THREE.Matrix4()
+                .makeTranslation(-centroid.x, -centroid.y, -centroid.z));
+        this._applyBakeMatrix(m);
 
         this._modelModified = true;
     }
@@ -5526,8 +5579,18 @@ export class Viewer3D {
 
         const results = [];
 
+        // Deterministic start vectors (observation-seat review: Math.random
+        // seeds made auto_orient non-replayable on symmetric models — replicas
+        // could settle into a genuinely different basis). Three fixed,
+        // non-axis-aligned, mutually independent seeds behave like random
+        // starts for power iteration without the RNG.
+        const seeds = [
+            [0.7548776662, 0.5698402910, 0.3247179572],
+            [0.2887043661, 0.8312906820, 0.4756731583],
+            [0.5419185265, 0.1291383567, 0.8304773123],
+        ];
         for (let round = 0; round < 3; round++) {
-            let v = [Math.random(), Math.random(), Math.random()];
+            let v = seeds[round].slice();
             let eigenvalue = 0;
 
             for (let iter = 0; iter < 100; iter++) {
@@ -5727,6 +5790,7 @@ export class Viewer3D {
         const entry = this._activeEntry();
         if (entry) {
             entry.originalState = null;
+            dropMorphs(this, entry, "recompute_normals");
             entry.stats = this._computeStats(entry.model);
             this._lastStats = entry.stats;
             this._onInfoUpdate(entry.stats);
@@ -6071,10 +6135,13 @@ export class Viewer3D {
         exportScene.updateMatrixWorld(true);
 
         // Meshes: bake each mesh's node-relative transform into cloned geometry.
+        // morphedMeshes: entryId -> [{mesh, targetNames}] for weight tracks.
+        const morphedMeshes = new Map();
         for (const entry of this._visibleEntries()) {
             const node = nodeByEntry.get(entry.id);
             const nodeInv = new THREE.Matrix4().copy(node.matrixWorld).invert();
             entry.wrapper.updateMatrixWorld(true);
+            let meshIdx = 0;
             entry.model.traverse((child) => {
                 const staging = new THREE.Scene();
                 this._appendExportMesh(staging, child);
@@ -6084,6 +6151,29 @@ export class Viewer3D {
                     // the mesh node itself stays identity (TRS-safe).
                     const bake = new THREE.Matrix4().multiplyMatrices(nodeInv, child.matrixWorld);
                     mesh.geometry.applyMatrix4(bake);
+                    // applyMatrix4 never touches morphAttributes: deltas are
+                    // position DIFFERENCES — the affine part cancels, so they
+                    // transform by the bake's linear 3×3 (exact under
+                    // non-uniform scale; transformDirection would normalize).
+                    const morphs = mesh.geometry.morphAttributes
+                        && mesh.geometry.morphAttributes.position;
+                    if (morphs && morphs.length) {
+                        const L = new THREE.Matrix3().setFromMatrix4(bake);
+                        const v = new THREE.Vector3();
+                        for (const attr of morphs) {
+                            for (let i = 0; i < attr.count; i++) {
+                                v.fromBufferAttribute(attr, i).applyMatrix3(L);
+                                attr.setXYZ(i, v.x, v.y, v.z);
+                            }
+                        }
+                        // Weight tracks bind by NAME — duplicates misbind
+                        // (PropertyBinding.findNode takes the first match).
+                        mesh.name = `mv_mesh_${entry.id}_${meshIdx}`;
+                        let list = morphedMeshes.get(entry.id);
+                        if (!list) { list = []; morphedMeshes.set(entry.id, list); }
+                        list.push({ mesh, targetNames: morphs.map((a) => a.name) });
+                    }
+                    meshIdx++;
                     mesh.geometry.computeBoundingBox();
                     mesh.geometry.computeBoundingSphere();
                     mesh.matrixAutoUpdate = true;
@@ -6135,6 +6225,32 @@ export class Viewer3D {
                 tracks.push(new THREE.VectorKeyframeTrack(`${name}.position`, times, s.pos));
                 tracks.push(new THREE.QuaternionKeyframeTrack(`${name}.quaternion`, times, s.quat));
                 tracks.push(new THREE.VectorKeyframeTrack(`${name}.scale`, times, s.scale));
+            }
+            // Morph WEIGHT tracks (backlog 049): one NumberKeyframeTrack per
+            // morphed export mesh, values interleaved all-targets-per-sample
+            // in morphAttributes order (the exporter divides by the influence
+            // length). Sampled from the live entries' morphWeights, which
+            // sampleTimeline updates per step.
+            for (const [id, channels] of timeline.tracks) {
+                const meshList = morphedMeshes.get(id);
+                const entry = this._entryById(id);
+                if (!meshList || !entry) continue;
+                const hasMorphChannel = Object.keys(channels)
+                    .some((k) => k.startsWith("morph:"));
+                if (!hasMorphChannel) continue;
+                for (const { mesh, targetNames } of meshList) {
+                    const values = new Float32Array(steps * targetNames.length);
+                    for (let i = 0; i < steps; i++) {
+                        const t = (i / (steps - 1)) * duration;
+                        sampleTimeline(this, t);
+                        targetNames.forEach((tn, k) => {
+                            values[i * targetNames.length + k] =
+                                (entry.morphWeights && entry.morphWeights.get(tn)) || 0;
+                        });
+                    }
+                    tracks.push(new THREE.NumberKeyframeTrack(
+                        `${mesh.name}.morphTargetInfluences`, times, values));
+                }
             }
             if (tracks.length) {
                 clips.push(new THREE.AnimationClip("timeline", duration, tracks));
@@ -6238,6 +6354,24 @@ export class Viewer3D {
             // index
             if (srcGeo.index) geo.setIndex(srcGeo.index.clone());
 
+            // morph targets (backlog 049): copy relative position morphs with
+            // their NAMES (the Mesh constructor builds the dictionary the
+            // exporter reads for extras.targetNames). Influences start zeroed
+            // — the exporter writes CURRENT influences as the asset's default
+            // weights, and a playhead mid-smile must not become the default
+            // pose. In the STATIC path the mesh keeps its matrixWorld on the
+            // node, so deltas copy untransformed.
+            const srcMorphs = srcGeo.morphAttributes
+                && srcGeo.morphAttributes.position;
+            if (srcMorphs && srcMorphs.length) {
+                geo.morphAttributes.position = srcMorphs.map((attr) => {
+                    const clone = attr.clone();
+                    clone.name = attr.name;
+                    return clone;
+                });
+                geo.morphTargetsRelative = srcGeo.morphTargetsRelative === true;
+            }
+
             // material — new MeshStandardMaterial with only glTF-safe props.
             // Read the ORIGINAL material, never a viewer override: a solid/normals
             // render mode stashes the original on _mvOriginalMaterial, and exporting
@@ -6260,6 +6394,21 @@ export class Viewer3D {
 
             if (srcMat.normalMap) {
                 matParams.normalMap = this._prepTextureForGLB(srcMat.normalMap);
+            }
+            // Painted material channels (retro-texture fix: the exporter used
+            // to DROP roughness/metalness maps — painted gloss/metal vanished
+            // from every GLB). roughness+metalness share one canvas in glTF's
+            // native G/B packing, so the exporter merges them into a single
+            // metallicRoughnessTexture image.
+            if (srcMat.roughnessMap) {
+                matParams.roughnessMap = this._prepTextureForGLB(srcMat.roughnessMap);
+                matParams.roughness = srcMat.roughness !== undefined ? srcMat.roughness : 1;
+            }
+            if (srcMat.metalnessMap) {
+                matParams.metalnessMap = srcMat.metalnessMap === srcMat.roughnessMap
+                    ? matParams.roughnessMap   // shared canvas → shared export image
+                    : this._prepTextureForGLB(srcMat.metalnessMap);
+                matParams.metalness = srcMat.metalness !== undefined ? srcMat.metalness : 1;
             }
             if (srcMat.emissiveMap) {
                 matParams.emissiveMap = this._prepTextureForGLB(srcMat.emissiveMap);
@@ -6401,7 +6550,49 @@ export class Viewer3D {
         if (this._renderer && this._renderer.shadowMap) {
             this._renderer.shadowMap.needsUpdate = true;
         }
+        // Bulk replay (observation-seat fast-forward): commands mutate state
+        // but nothing draws until endBulkReplay() — rendering per replayed
+        // command re-uploads every painted canvas texture per frame, which is
+        // what made past-session replays crawl.
+        if (this._bulkReplay) return;
         this._resumeRenderLoop();
+    }
+
+    /** Suspend drawing during bulk command replay (observation seat). */
+    beginBulkReplay() {
+        this._bulkReplay = true;
+    }
+
+    /** Resume drawing after bulk replay and paint the accumulated state. */
+    endBulkReplay() {
+        this._bulkReplay = false;
+        // Settle deferred normals (finalizeSculpt skips the per-command
+        // recompute during bulk replay — the dominant catch-up cost on dense
+        // meshes). Everything dirty gets exactly one recompute here, BEFORE
+        // the first visible frame.
+        for (const e of this._objects || []) {
+            e.model.traverse((c) => {
+                if (c.isMesh && c.geometry && c.geometry.userData
+                    && c.geometry.userData._mvNormalsDirty) {
+                    c.geometry.computeVertexNormals();
+                    delete c.geometry.userData._mvNormalsDirty;
+                }
+            });
+        }
+        this.settleDeferredStats();
+        this.invalidate();
+    }
+
+    /** Recompute stats deferred during bulk replay (exact — fingerprint checks
+     *  and the first visible frame must see real numbers). */
+    settleDeferredStats() {
+        for (const e of this._objects || []) {
+            if (e._statsDirty) {
+                e.stats = this._computeStats(e.model);
+                this._lastStats = e.stats;
+                delete e._statsDirty;
+            }
+        }
     }
 
     _resumeRenderLoop() {

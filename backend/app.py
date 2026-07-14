@@ -12,6 +12,7 @@ import sys
 import argparse
 import asyncio
 import atexit
+import json
 import subprocess
 import platform
 import mimetypes
@@ -46,6 +47,8 @@ from backend.agent_bridge import (
     sse_format,
     write_session_file,
 )
+from backend.ai_pilot import AiPilotManager
+from backend.observe_hub import ObserveHub, PUBLISH_MAX_BYTES
 from backend.security import (
     SecurityConfig,
     PathGuard,
@@ -145,6 +148,15 @@ event_broadcaster = EventBroadcaster()
 # Reverse bridge: the latest "what the human is looking at" report from app tabs,
 # readable by agents (MCP get_app_state) to pick up the human's subject headless.
 app_state_store = AppStateStore()
+
+# Observation seat: per-performer command logs + cursor-based SSE (its OWN hub —
+# the EventBroadcaster drops frames for slow clients, which is fine for hints
+# and catastrophic for command replication).
+observe_hub = ObserveHub()
+
+# In-app AI pilot: Spotlight command bar → local-LLM agent whose tool calls
+# execute inside the initiating tab (backend/ai_pilot.py).
+ai_pilot = AiPilotManager(event_broadcaster)
 
 
 def _build_file_response(file_path: Path) -> FileResponse:
@@ -926,6 +938,137 @@ async def agent_state():
         "state": app_state_store.snapshot(),
         "clients": event_broadcaster.client_count,
     }
+
+
+@app.post("/api/observe/publish")
+async def observe_publish(request: Request):
+    """
+    Performer side of the observation seat: append one executed-command /
+    camera-telemetry / lifecycle / fingerprint event to the session's log.
+
+    Token-gated like every /api/* route. Body size is bounded (brush commands
+    are ~1.5 KB; only pathological input hits the cap). Publishing a session's
+    FIRST event also announces it on the agent-bridge SSE so app tabs can offer
+    "watch it" (lossy hints are fine on that channel).
+    """
+    raw = await request.body()
+    if len(raw) > PUBLISH_MAX_BYTES:
+        raise HTTPException(status_code=422,
+                            detail=f"publish body exceeds {PUBLISH_MAX_BYTES} bytes")
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="body must be JSON")
+    known_before = observe_hub.get(str((body.get("session") or {}).get("id", "")))
+    try:
+        out = observe_hub.publish(body)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    if known_before is None and out.get("ok"):
+        event_broadcaster.publish({
+            "type": "observe_session_started",
+            "session": (body.get("session") or {}).get("id"),
+            "label": (body.get("session") or {}).get("label"),
+        })
+    return out
+
+
+@app.get("/api/observe/sessions")
+async def observe_sessions():
+    """Active performer sessions an observer can join (or see why not)."""
+    return {"ok": True, "sessions": observe_hub.sessions()}
+
+
+class ObserveDeleteRequest(BaseModel):
+    """Delete one past session by id, or all past sessions (all_past)."""
+    id: Optional[str] = None
+    all_past: bool = False
+
+
+@app.post("/api/observe/delete")
+async def observe_delete(body: ObserveDeleteRequest):
+    """
+    Delete past observation sessions (UI: the × on recording rows / Clear all).
+    Live sessions refuse — end the performer first.
+    """
+    if body.all_past:
+        return observe_hub.delete_past()
+    if not body.id:
+        raise HTTPException(status_code=422, detail="id or all_past required")
+    out = observe_hub.delete(body.id)
+    if not out.get("ok"):
+        raise HTTPException(status_code=409, detail=out.get("error"))
+    return out
+
+
+@app.get("/api/observe/stream")
+async def observe_stream(session: str):
+    """
+    Cursor-based SSE for ONE observer: full replay from seq 0, `caught_up`,
+    then live entries — a single server-side generator, so there is no
+    client-side log/live stitching and no seq-gap race. Unjoinable and
+    desync conditions arrive as honest meta events, never silence.
+    """
+    async def stream():
+        async for event in observe_hub.stream(session):
+            if event.get("type") == "heartbeat":
+                yield ": heartbeat\n\n"
+            else:
+                yield sse_format(event)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# --- In-app AI pilot (Spotlight command bar → local-LLM agent in the tab) ---
+
+
+class AiInstructRequest(BaseModel):
+    """An instruction typed in the app's AI command bar."""
+    instruction: str
+    client_id: str = ""
+
+
+class AiResultRequest(BaseModel):
+    """A tab returning the result of one ai_command execution."""
+    id: str
+    result: dict
+
+
+@app.post("/api/ai/instruct")
+async def ai_instruct(body: AiInstructRequest):
+    """
+    Start (or course-correct) the in-app AI task. While a task runs, new
+    instructions are queued into its conversation at the next loop boundary —
+    the Spotlight bar doubles as the interrupt channel.
+    """
+    try:
+        return ai_pilot.instruct(body.instruction, body.client_id[:64])
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/api/ai/stop")
+async def ai_stop():
+    """Stop the running in-app AI task at the next safe boundary."""
+    return ai_pilot.stop()
+
+
+@app.get("/api/ai/status")
+async def ai_status():
+    """Current in-app AI task state + transcript tail (for the AI panel)."""
+    return ai_pilot.status()
+
+
+@app.post("/api/ai/result")
+async def ai_result(body: AiResultRequest):
+    """Tab-side answer for one ai_command (correlated by id)."""
+    return {"ok": True, "delivered": ai_pilot.deliver_result(body.id, body.result)}
 
 
 @app.get("/api/events")

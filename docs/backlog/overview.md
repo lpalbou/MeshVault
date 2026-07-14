@@ -3,18 +3,22 @@
 Durable planning memory for MeshVault. Records what exists, what is next, what was
 considered, and why priorities are ordered as they are. Treat stale text here as a bug.
 
-Last update: 2026-07-12 (050 + 053 + 054 COMPLETED for v0.8.0 through a
-3-cycle adversarial program — design reviews → live field gauntlets → fixes →
-final audit, verdict SHIP on all three: symmetry healing with the portrait
-iris genuinely repaired, the abstract3d→MeshVault pipeline run end-to-end
-from a real text prompt with a fresh-agent acceptance run, and the human
-sculpt/paint/keyframe UI over the agent command surface. Two engine bugs the
-gauntlets exposed and fixed: hierarchy-blind explode_view and the
-navmodechange one-way notification. Remaining planned wave: 048 (E2E suites
-into the repo — the /tmp harnesses grew to ~140 checks this cycle), 049
-(morph targets), 051 (cut-face capping), 052 (export quality knob).
-Longer-term context in 053/054: these capabilities are candidates for
-integration into blackpixel, the user's image+video app.)
+Last update: 2026-07-12 (051 + 049 COMPLETED for v0.9.0 through the same
+adversarial program — design review → implementation → static audit → live
+field gauntlet → fixes → regression. 051: cut-face capping via became-open
+rim classification, capped BY DEFAULT after the field verdict; three field
+bugs fixed (mod-2 rim rule + angular junction walk for re-splits through
+caps, UV-degenerate paint path so caps accept paint, median-rim-color anchor
+killing the one-texel color lottery). 049: morph targets via sculpt-pose
+capture — the portrait TALKS (field verdict: qualified yes; jaw/smile morphs,
+4 s keyed talk cycle, GLB round-trip driving the deformation); four field
+bugs fixed (GPU render-cost budget preventing the 8-morph SwiftShader wedge,
+imported GLB morphs drive-only addressable, morph-aware paint aim, morph-aware
+vertex bakes) plus the field's requested hinge pose brush. Earlier 2026-07-12:
+050 + 053 + 054 for v0.8.0 — symmetry healing, the abstract3d→MeshVault
+pipeline recipe, the human editing UI; 048 E2E suites in-repo. Longer-term
+context in 053/054: these capabilities are candidates for integration into
+blackpixel, the user's image+video app.)
 
 ---
 
@@ -33,15 +37,17 @@ Next free ID: **0055**.
 
 | State | Count | IDs |
 |-------|------:|-----|
-| completed | 35 | 001–005, 009–014, 017–021, 025, 026, 027, 029, 030, 031, 036, 037, 039, 042, 043, 044, 045, 046, 047, 048, 050, 053, 054 |
-| planned | 6 | 006, 007, 008, 049 (morph targets), 051 (cut-face capping), 052 (export quality knob) |
+| completed | 37 | 001–005, 009–014, 017–021, 025, 026, 027, 029, 030, 031, 036, 037, 039, 042, 043, 044, 045, 046, 047, 048, 049, 050, 051, 053, 054 |
+| planned | 4 | 006, 007, 008, 052 (export quality knob) |
 | proposed | 13 | 015, 016, 022 (urgency raised 2026-07-11), 023, 024 (partial — endpoint slice shipped in 044, CLI remains), 028, 032, 033, 034, 035, 038 (partial), 040 (parked), 041 (v1 done; v2 rides on 042's set_object_transform) |
 
-Recommended order for the remaining wave: 051 first (cut-face capping — the
-most visible artifact in every articulation render), then 049/052 by demand.
-048 landed: `tests/e2e/` carries 127 checks across 6 suites (own-server
-fixture, `scripts/e2e.sh`, release-workflow gate) — the `022` viewer refactor
-now has the behavior net its 2026-07-05 note demanded.
+051 + 049 landed (2026-07-12, v0.9.0): plane cuts CAP by default; the hinge
+pose brush joined the sculpt tools; morphs ride GLB exports and reloaded
+targets stay drivable. Remaining wave: 052 by demand, then the long-standing
+UI items (006–008). `tests/e2e/` now carries 8 suites incl. capping and
+morph field-fix regressions (own-server fixture, `scripts/e2e.sh`,
+release-workflow gate) — the `022` viewer refactor has the behavior net its
+2026-07-05 note demanded.
 
 Note: `047` (2026-07-11) — texture forensics (pick.uv, get_texture UV views,
 get_uv_islands, transform_uv island scoping + bleed dry-runs), screen-space
@@ -167,9 +173,8 @@ Parked (built, not wired): `parked/library_index.py`, `parked/library_search.js`
 
 ## Remaining planned
 
-Post-047 wave (planned 2026-07-11; 048/050/053/054 completed 2026-07-12):
-- `049` — Morph targets via sculpt-pose capture (the talking face)
-- `051` — Cap split-object cut faces (kill the black gashes)
+Post-047 wave (planned 2026-07-11; 048/050/053/054 completed 2026-07-12
+for v0.8.0; 049/051 completed 2026-07-12 for v0.9.0):
 - `052` — Export quality knob (texture format + JPEG quality)
 
 Editing track — gated behind the shipped Phase 0 (confinement, `010`/`012`) and the

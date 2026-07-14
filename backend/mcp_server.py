@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import secrets
 import tempfile
 import urllib.request
@@ -42,6 +43,7 @@ from backend.headless_viewer import (
     VIEW_PRESETS,
     HeadlessSession,
 )
+from backend.observe_publisher import HOOK_JS, ObservePublisher
 
 # Hard cap for server-side URL downloads (CORS fallback) — keeps a hostile/mistyped URL
 # from filling the disk. Large real-world GLBs are usually well under this.
@@ -65,13 +67,41 @@ class _Runtime:
         # Local file behind the currently loaded model (None for direct URL loads).
         # open_in_app uses it to push "what the agent is looking at" into the app.
         self.last_local_model: Path | None = None
+        # Observation seat: publish executed mutations so a human in the app
+        # can WATCH this agent session live (backend/observe_publisher.py).
+        # MESHVAULT_SESSION_LABEL names the session in the app's seat list
+        # (the REPL pilot sets it to its model name).
+        self.observer_pub = ObservePublisher(
+            label=os.environ.get("MESHVAULT_SESSION_LABEL", "mcp"))
+        self._observe_hooked = False
 
     @property
     def base_url(self):
         return self.session.base_url
 
     async def page(self):
-        return await self.session.page()
+        page = await self.session.page()
+        await self._ensure_observe_hook(page)
+        return page
+
+    async def _ensure_observe_hook(self, page):
+        """Install the in-page publish hook once per page instance.
+
+        The hook lives in the PAGE (window.mv executed events) because the MCP
+        has several dispatch paths into the viewer — only the page sees all of
+        them. The exposed binding relays into the ordered retrying publisher.
+        """
+        if self._observe_hooked and not page.is_closed():
+            return
+        self.observer_pub.start()
+        try:
+            await page.expose_function(
+                "__mvObservePublish", lambda event: self.observer_pub.enqueue(event))
+        except Exception:
+            pass   # already exposed on this page (restart re-runs this path)
+        installed = await page.evaluate(HOOK_JS)
+        if installed:
+            self._observe_hooked = True
 
     @property
     def viewer(self):
@@ -102,6 +132,7 @@ class _Runtime:
         return target
 
     async def close(self):
+        await self.observer_pub.close()   # publishes the lifecycle "end"
         await self.session.close()
         self._tmpdir.cleanup()
 
@@ -677,9 +708,11 @@ async def screenshot(
                 near-black). Sets IBL, key/fill/ambient lights, exposure, and
                 background; the preset stays active for the session afterwards.
         ssao: render through the SSAO/tone-mapping composer (default). Set False
-              for PROOF renders during sculpt/paint loops — combine with a small
-              size (e.g. 192x192) for a cheap "did that land?" check, and save
-              full-size composed captures for final verification.
+              only for a flat-shaded LOOK — it is NOT faster (measured: capture
+              time is sync-bound, and 192² costs the same as 1024²). For cheap
+              verification loops: pick ONE capture size per session (each NEW
+              size pays a one-time multi-second warm) and prefer quantified
+              reads (get_bounds, painted/meanAlpha) between shots.
         times: MOTION CONTACT SHEET — seek the scene timeline to each time
                (seconds, ≤12) and return ONE composite grid image with the time
                burned into each tile. THE cheap animation preview: one image,

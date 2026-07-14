@@ -328,6 +328,21 @@
                         <circle cx="11" cy="11" r="2"/>
                     </svg>
                 </button>
+                <!-- Observation seat (watch a live agent session) -->
+                <button id="observe-toggle" class="btn btn-icon viewer-tool-btn" title="Observation seat: watch a live agent session">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/>
+                        <circle cx="12" cy="12" r="3"/>
+                    </svg>
+                    <span id="observe-badge" class="observe-badge" style="display:none"></span>
+                </button>
+                <!-- In-app AI (Spotlight command bar, ⌘K) -->
+                <button id="ai-toggle" class="btn btn-icon viewer-tool-btn" title="AI: instruct a local agent to edit the scene (⌘K)">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2l1.9 5.6L20 9.5l-6.1 1.9L12 17l-1.9-5.6L4 9.5l6.1-1.9z"/>
+                        <path d="M19 15l.9 2.6L22.5 18.5l-2.6.9L19 22l-.9-2.6-2.6-.9 2.6-.9z" opacity="0.7"/>
+                    </svg>
+                </button>
                 <!-- Light controls toggle -->
                 <button id="light-toggle" class="btn btn-icon viewer-tool-btn" title="Light settings">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -342,6 +357,25 @@
                     <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
                 </svg>
             </button>
+
+            <!-- In-app AI progress panel -->
+            <div id="ai-panel" class="ai-panel" style="display: none;">
+                <div class="light-panel-header">
+                    <span>AI <span id="ai-status" class="ai-status">idle</span></span>
+                    <span>
+                        <button id="ai-stop" class="btn btn-small" title="Stop the running task at the next safe boundary">Stop</button>
+                        <button id="ai-panel-close" class="btn btn-small" title="Hide this panel">×</button>
+                    </span>
+                </div>
+                <div id="ai-feed" class="ai-feed"></div>
+            </div>
+
+            <!-- Spotlight-style AI command bar (⌘K) -->
+            <div id="ai-bar" class="ai-bar" style="display: none;">
+                <input id="ai-bar-input" type="text" spellcheck="false"
+                       placeholder="Tell the AI what to change in the scene…" />
+                <div id="ai-bar-hint" class="ai-bar-hint"></div>
+            </div>
 
             <!-- Material inspector panel -->
             <div id="materials-panel" class="materials-panel" style="display: none;">
@@ -428,6 +462,35 @@
                  the viewer container (top-left) — inside the toolbar it would
                  cover the button column, and sharing the lights anchor buried
                  whichever panel opened second. -->
+            <!-- Observation seat panel -->
+            <div id="observe-panel" class="light-panel observe-panel" style="display: none;">
+                <div class="observe-head">
+                    <span>Observation seat</span>
+                    <button id="observe-close" class="btn btn-icon btn-mini" title="Close">✕</button>
+                </div>
+                <div id="observe-sessions" class="observe-sessions"></div>
+                <div class="observe-speed-row">
+                    <label for="observe-speed">Catch-up / replay</label>
+                    <select id="observe-speed" class="observe-speed">
+                        <option value="instant" selected>Instant (jump to latest)</option>
+                        <option value="paced">Time-lapse (see the strokes)</option>
+                    </select>
+                </div>
+                <div id="observe-live" class="observe-live" style="display:none">
+                    <div id="observe-tool" class="observe-tool">
+                        <span id="observe-tool-swatch" class="observe-tool-swatch" style="display:none"></span>
+                        <span id="observe-tool-name">—</span>
+                        <span id="observe-tool-detail"></span>
+                    </div>
+                    <div class="observe-live-row">
+                        <label class="observe-follow">
+                            <input type="checkbox" id="observe-follow" checked>
+                            Follow agent camera
+                        </label>
+                        <button id="observe-leave" class="btn btn-small">Leave seat</button>
+                    </div>
+                </div>
+            </div>
             <div id="edit-panel" class="light-panel edit-panel" style="display: none;">
                 <div class="light-panel-header">
                     <div class="edit-tabs">
@@ -555,6 +618,17 @@
                 <span id="timeline-time" class="anim-time">0.0s / 0.0s</span>
                 <input type="number" id="timeline-duration" class="timeline-duration" min="0.1" step="0.5" title="Timeline duration (seconds; clamps to the last key)" />
                 <span id="timeline-empty-hint" class="timeline-empty-hint">pose the object, press ●</span>
+            </div>
+
+            <!-- Recording replay bar (observation seat) — playback over a
+                 buffered session log; record/key controls have no place here -->
+            <div id="observe-replay-bar" class="animation-bar timeline-bar" style="display: none;">
+                <span class="timeline-label" title="Recorded agent session">⏵ Replay</span>
+                <button id="observe-play" class="btn btn-sm anim-play" title="Play / pause the recording">▶</button>
+                <div class="timeline-scrub-wrap">
+                    <input type="range" id="observe-scrub" class="anim-scrub" min="0" max="0" value="0" step="1" title="Scrub through the recorded commands" />
+                </div>
+                <span id="observe-pos" class="anim-time">0 / 0</span>
             </div>
 
             <!-- Viewer info -->

@@ -18,6 +18,7 @@
  */
 
 import * as THREE from "three";
+import { applyMorphWeight, importedMorphNames } from "./morphs.js";
 
 export const TIMELINE_MAX_TRACKS = 64;      // objects with tracks
 export const TIMELINE_MAX_KEYS = 256;       // keys per channel
@@ -84,13 +85,14 @@ export function setKeyframe(viewer, opts) {
     const time = opts.time;
     if (!(time >= 0)) throw new Error("set_keyframe requires time >= 0 (seconds)");
 
+    const hasMorphs = opts.morphs && Object.keys(opts.morphs).length > 0;
     const hasExplicit = opts.position || opts.rotation || opts.quaternion
         || opts.scale !== undefined;
-    if (!hasExplicit && !opts.capture) {
+    if (!hasExplicit && !opts.capture && !hasMorphs) {
         throw new Error(
-            "set_keyframe: pass position/rotation/scale values, or capture:true "
-            + "to key the object's CURRENT pose (pose with set_object_transform "
-            + "or look_at first, then capture).");
+            "set_keyframe: pass position/rotation/scale values, morphs:{name: "
+            + "weight}, or capture:true to key the object's CURRENT pose (pose "
+            + "with set_object_transform or look_at first, then capture).");
     }
 
     if (!timeline.tracks.has(opts.id)) {
@@ -228,8 +230,35 @@ export function setKeyframe(viewer, opts) {
         written.push("scale");
     }
 
-    const keyCount = channels.position.length + channels.rotation.length
-        + channels.scale.length;
+    // Morph weight channels (backlog 049): morphs:{name: weight 0..1} keys the
+    // named morphs at `time` — captured AND imported (drive-only) alike, the
+    // same set applyMorphWeight can drive (049 field bug B2). Flat
+    // "morph:<name>" channel keys keep every Object.values consumer
+    // (durations, ticks, export scan) working.
+    if (opts.morphs) {
+        const entryMorphs = entry.morphs;
+        const imported = importedMorphNames(entry);
+        for (const [mName, w] of Object.entries(opts.morphs)) {
+            if ((!entryMorphs || !entryMorphs.has(mName)) && !imported.has(mName)) {
+                const have = [
+                    ...(entryMorphs ? entryMorphs.keys() : []), ...imported];
+                throw new Error(`No morph '${mName}' on object ${opts.id}`
+                    + (have.length ? ` — available: ${have.join(", ")}.`
+                                   : " — begin_morph/capture_morph first."));
+            }
+            const weight = Number(w);
+            if (!Number.isFinite(weight) || weight < 0 || weight > 1) {
+                throw new Error(`morphs.${mName} must be a weight 0..1.`);
+            }
+            const key = `morph:${mName}`;
+            if (!channels[key]) channels[key] = [];
+            upsert(channels[key], weight);
+            written.push(key);
+        }
+    }
+
+    const keyCount = Object.values(channels)
+        .reduce((s, keys) => s + keys.length, 0);
     const result = { objectId: opts.id, time, channels: written, keyCount,
                      duration: Math.round(effectiveDuration(timeline) * 1000) / 1000 };
     if (note) result.note = note;
@@ -241,10 +270,15 @@ export function deleteKeyframe(viewer, { id, time, channel } = {}) {
     requireEntry(viewer, id);
     const channels = timeline.tracks.get(id);
     if (!channels) throw new Error(`Object ${id} has no timeline tracks.`);
-    const names = channel ? [channel] : ["position", "rotation", "scale"];
+    // All-channels deletion must cover DYNAMIC channels too (morph:<name>),
+    // or a morph-only track would survive its own deletion.
+    const names = channel ? [channel] : Object.keys(channels);
     let removed = 0;
     for (const name of names) {
-        if (!channels[name]) throw new Error(`Unknown channel '${name}'. Use position|rotation|scale.`);
+        if (!channels[name]) {
+            throw new Error(`Unknown channel '${name}'. This track has: `
+                + `${Object.keys(channels).join("|")}.`);
+        }
         if (time === undefined) {
             removed += channels[name].length;
             channels[name] = [];
@@ -254,7 +288,7 @@ export function deleteKeyframe(viewer, { id, time, channel } = {}) {
             removed += before - channels[name].length;
         }
     }
-    if (!channels.position.length && !channels.rotation.length && !channels.scale.length) {
+    if (Object.values(channels).every((keys) => keys.length === 0)) {
         timeline.tracks.delete(id);
     }
     return { objectId: id, removed };
@@ -285,7 +319,8 @@ export function getTimeline(viewer) {
                         out.derived = true;
                     }
                 } else {
-                    out.v = k.v.map(r3);
+                    // morph:<name> channels carry SCALAR weights.
+                    out.v = Array.isArray(k.v) ? k.v.map(r3) : r3(k.v);
                 }
                 if (k.easing !== "linear") out.easing = k.easing;
                 return out;
@@ -357,6 +392,8 @@ const slerp4 = (a, b, u) => {
  * Evaluate the timeline at `t` and write every tracked object's wrapper.
  * Pure function of (tracks, t) — deterministic seeks for screenshots.
  */
+const lerp1 = (a, b, u) => a + (b - a) * u;
+
 export function sampleTimeline(viewer, t) {
     const timeline = tl(viewer);
     for (const [objectId, channels] of timeline.tracks) {
@@ -369,6 +406,18 @@ export function sampleTimeline(viewer, t) {
         if (q) entry.logical.q.set(q[0], q[1], q[2], q[3]);
         if (s) entry.logical.s.set(s[0], s[1], s[2]);
         viewer._composeWrapper(entry);
+        // Morph weight channels (uniform writes only — no per-frame allocation).
+        for (const name of Object.keys(channels)) {
+            if (!name.startsWith("morph:")) continue;
+            const w = sampleChannel(channels[name], t, lerp1);
+            if (w !== null) {
+                applyMorphWeight(viewer, entry, name.slice(6), w);
+                // The ledger must exist even when no set_morph ran (imported
+                // morphs keyed directly) — export weight-sampling reads it.
+                if (!entry.morphWeights) entry.morphWeights = new Map();
+                entry.morphWeights.set(name.slice(6), w);
+            }
+        }
     }
 }
 
@@ -472,6 +521,11 @@ export function serializeTimeline(viewer) {
     for (const [objectId, channels] of timeline.tracks) {
         for (const [channel, keys] of Object.entries(channels)) {
             if (!keys.length) continue;
+            // Morph channels are EXCLUDED from manifests: the morphs
+            // themselves are geometry data that .mvscene never carries (the
+            // GLB export is their persistence path) — a serialized weight
+            // track would reference targets that don't exist after load_scene.
+            if (channel.startsWith("morph:")) continue;
             tracks.push({
                 objectId,
                 channel,

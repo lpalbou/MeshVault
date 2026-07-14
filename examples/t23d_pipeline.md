@@ -130,7 +130,10 @@ viewer_execute {action:"detect_parts"}
   "just below mid-height" is a starting guess, not a measurement — the
   evidence run measured the chest seam at 43% where the naive default said
   62%. Then `split_object {axis:"y", at:<world>, side:"+"}`.
-  Cut faces are HOLLOW (documented) — keep sweeps ≤30° and orient cuts away
+  Plane cuts CAP by default (flat caps colored by the median rim texel;
+  `result.capped` reports measured post-cap openEdges per side — 0 on
+  watertight sources) so sweeps can open wide. `cap:false` opts out; then
+  cut faces are HOLLOW and sweeps should stay ≤30° or cuts oriented away
   from the hero camera.
 - Then: `set_pivot {id:<part>, point:<suggestedPivot or hinge edge>}` →
   verify separation → `set_parent {id:<part>, parent_id:<base>}` (in that

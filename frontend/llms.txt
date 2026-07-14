@@ -53,19 +53,45 @@ Key facts for agents:
   `pick`/`raycast` (screenshot/world coords → surface points — the hand-eye loop),
   and `batch` (≤32 commands per round-trip). Sculpt+paint persist via export_glb.
 - Repair & adaptive LoD: `inspect_region` (density survey, opportunity-sorted grid)
-  → `simplify_region` (boundary-locked regional decimation — adaptive resolution by
-  agent judgment), `fix_mesh` (degenerate/normals/flipped-face passes with issue
-  deltas), `inspect_texture` (texel density + worst spots), `blur_paint`/`clone_paint`,
+  → `refine_region` (conformal red-green densify — sculpt detail the facets can't
+  carry) / `simplify_region` (boundary-locked regional decimation) /
+  `regularize_region` (FULL remesh: split + collapse + valence flips + relax;
+  seams/rims locked; {stretchedEdges, valence567Share} returns). Sculpt results
+  carry a meshQuality trigger; sculpt {remesh:"auto"} remeshes the stroke region
+  automatically. `sculpt {tool:"dig"}` REMOVES material (crater/groove; depth
+  clamp + shell-piercing guard). symmetry:"x"|"y"|"z" on sculpt/paint (+strokes)
+  mirrors every stamp across the object's local plane (bilateral work in one
+  call, hinge angles negated). `merge_objects {ids, mode:union|concat, blend}`
+  FUSES objects into one sculptable skin (CSG union + seam fillets; primitives
+  are drafts — fuse, then sculpt across the old boundaries, then texture).
+  MATERIAL CHANNELS: paint/fill/stroke take channel:"roughness"|"metalness"
+  (+value 0..1)|"emissive" (+color)|"height" — per-texel light response,
+  exported natively. `paint_pattern {type: noise|grunge|cells|speckle|stripes|
+  gradient, seed, scale, channel?}` = deterministic world-space procedural
+  fills (one call replaces stamp batteries). `sculpt {tool:"noise", wavelength,
+  octaves, seed}` = seeded fBm micro-relief (feathers/bark/rock).
+  `deform_region {kind: taper|bend|twist|stretch, axis:{from,to}, factor|
+  angle_deg}` = closed-form spine deformers (a limb taper in one call).
+  `bake_normals {strength}` = height channel → tangent-space normal map
+  (paint relief with channel:"height", bake, zero triangles). `fix_mesh` (degenerate/normals/
+  flipped-face passes with issue deltas), `inspect_texture` (texel density + worst
+  spots), `blur_paint`/`clone_paint`,
   `detect_symmetry`/`mirror_paint` (heal from the object's own mirror counterpart),
   `undo_paint` (single-slot brush undo — a bad stamp is not a one-way door)
   (defect softening + world-space heal brush), texture tiers low/medium/high/xhigh
   (512→4096) on paint and on export.
 - Articulation & animation: `detect_parts`/`split_object` (plane cuts with suggested
-  pivots — fused image-to-3D meshes articulate this way), `set_parent`/`set_pivot`
+  pivots — fused image-to-3D meshes articulate this way; cuts CAP by default so
+  sweeps open wide without black gashes, cap:false for hollow), `set_parent`/`set_pivot`
   (hierarchies + rotation origins), `set_keyframe`/`play`/`seek_timeline` (scene
   timeline, deterministic seeks, short-arc + 360°-identity teaching), motion contact
   sheets (MCP screenshot times:[...]), animated GLB export (export_model), timeline
   UI bar for humans, `.mvscene` v2 persistence.
+- Morph targets (the talking face): `begin_morph` → sculpt a pose (hinge = the
+  rigid pose brush) → `capture_morph {name}` (base auto-restores) → `set_morph
+  {name, weight}` blends (imported glTF targets drivable too); `set_keyframe
+  {morphs:{jaw_open:0.8}}` animates weights alongside TRS; export_glb carries real
+  glTF morph targets + weight animation (reset/simplify/split drop morphs loudly).
 - REST screenshot (local server, no MCP needed): `GET /api/screenshot?path=/abs/
   model.glb&best_view=true&preset=studio` returns a PNG (token header required;
   metadata in the X-MeshVault-Screenshot header). Docs: docs/api.md.

@@ -32,6 +32,7 @@ import * as THREE from "three";
 import { MeshBVH } from "three-mesh-bvh";
 import {
     FALLOFFS,
+    assertNoMorphForHeal,
     assertNotSkinned,
     beginPaintOp,
     brushFootprint,
@@ -480,6 +481,7 @@ function resolvePlane(viewer, entry, opts) {
  */
 export function mirrorPaint(viewer, opts = {}) {
     assertNotSkinned(viewer);
+    assertNoMorphForHeal(viewer, "mirror_paint");
     const entry = viewer._activeEntry();
     if (!entry) throw new Error("No model loaded.");
     if (!opts.center || opts.center.length !== 3) {

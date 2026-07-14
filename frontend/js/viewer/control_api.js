@@ -18,10 +18,13 @@ import { describeScene } from "./describe_scene.js";
 import { meshStatistics } from "./mesh_stats.js";
 import { samplePoints } from "./sample_points.js";
 import {
+    bakeNormals,
     blurPaint,
     clearPaint,
     clonePaint,
+    deformRegion,
     fillPaint,
+    paintPattern,
     paintStamp,
     paintStroke,
     pick,
@@ -37,7 +40,10 @@ import {
     transformUV,
 } from "./sculpt.js";
 import { detectParts, splitObject } from "./articulation.js";
+import { mergeObjects } from "./merge.js";
 import { detectSymmetry, mirrorPaint } from "./symmetry.js";
+import { beginMorph, captureMorph, deleteMorph, setMorph } from "./morphs.js";
+import { refineRegion, regularizeRegion } from "./refine.js";
 import {
     fixMesh,
     inspectRegion,
@@ -54,6 +60,56 @@ import {
     setKeyframe,
     setTimelineDuration,
 } from "./timeline.js";
+
+/**
+ * Observation-seat replication classes (AUTHORED, per the adversarial review —
+ * `requiresModel` is not a mutation flag: `load` mutates without it,
+ * `describe_scene` has it and doesn't).
+ *
+ * MUTATING = must be replicated for an observer's replica to track the
+ * performer. Includes two "reads with state side effects": detect_parts caches
+ * the partition split_object's handshake validates against, detect_symmetry
+ * caches the plane mirror_paint consumes. Display state (lighting, render
+ * mode, clip, background...) is replicated so the replica LOOKS like what the
+ * performer sees. Camera commands are deliberately NOT mutating — the observer
+ * follows the performer's camera through sampled telemetry instead (agents
+ * also move the camera through non-command paths: capture_views, screenshot
+ * views, find_best_view).
+ */
+const MUTATING_ACTIONS = new Set([
+    "load", "unload", "add_model", "add_primitive",
+    "sculpt", "sculpt_stroke", "paint", "paint_stroke", "fill_paint",
+    "paint_pattern", "bake_normals", "deform_region",
+    "clear_paint", "blur_paint", "clone_paint", "mirror_paint", "undo_paint",
+    "batch",
+    "detect_parts", "detect_symmetry",           // reads WITH replay-critical caches
+    "split_object", "merge_objects", "set_parent", "set_pivot",
+    "simplify_region", "refine_region", "regularize_region", "fix_mesh", "simplify",
+    "transform_uv", "project_paint", "resize_texture",
+    "begin_morph", "capture_morph", "set_morph", "delete_morph",
+    "set_keyframe", "delete_keyframe", "clear_timeline", "set_timeline",
+    "play_timeline", "pause_timeline", "seek_timeline",
+    "set_active_object", "remove_object", "clone_object", "ground_object",
+    "place_object", "look_at", "set_object_visible", "set_object_opacity",
+    "set_object_transform", "reset_object_transform", "explode_view",
+    "set_lighting", "set_render_mode", "set_wireframe", "set_grid", "set_axes",
+    "set_normals", "set_clip", "set_fog", "set_environment", "set_background",
+    "set_scale", "rotate", "auto_upright",
+    "play_animation", "set_animation_time", "set_animation_speed",
+    "measure", "set_measure_mode", "clear_measurement",
+]);
+
+/** Commands whose EFFECT depends on the live camera (replay must carry an
+ *  env.camera envelope and pin it around execution). */
+const CAMERA_DEPENDENT_ACTIONS = new Set(["project_paint"]);
+
+export function isMutatingAction(action) {
+    return MUTATING_ACTIONS.has(action);
+}
+
+export function isCameraDependentAction(action) {
+    return CAMERA_DEPENDENT_ACTIONS.has(action);
+}
 
 export class ViewerControlAPI {
     /**
@@ -116,10 +172,30 @@ export class ViewerControlAPI {
         }
         const def = this._commands[command.action];
         if (!def) {
+            // Guessed actions cluster around a few intents — naming the real
+            // command breaks retry loops that a generic "list the commands"
+            // hint does not (a local 80B ping-ponged set_object_color ↔
+            // list_commands for 60 steps).
+            const guesses = {
+                color: "fill_paint {color} paints the ACTIVE object (set_active_object first); paint {center, radius, color} stamps a spot",
+                material: "set_render_mode changes display; fill_paint/paint change the texture",
+                texture: "fill_paint creates a paint layer; paint/paint_stroke draw on it",
+                move: "set_object_transform {id, position} places an object",
+                rotate: "set_object_transform {id, rotation} or the model-baking 'rotate'",
+                scale: "set_object_transform {id, scale} scales an object",
+                delete: "remove_object {id} removes an object",
+                remove: "remove_object {id} removes an object",
+                camera: "set_camera / orbit / frame_all move the view",
+            };
+            const a = String(command.action).toLowerCase();
+            let hint = "";
+            for (const [k, h] of Object.entries(guesses)) {
+                if (a.includes(k)) { hint = ` Did you mean: ${h}.`; break; }
+            }
             return {
                 ok: false,
-                error: `Unknown action '${command.action}'. Run the 'list_commands' `
-                    + "action to discover valid actions and their schemas.",
+                error: `Unknown action '${command.action}'.${hint} Run `
+                    + "'list_commands' for the full schema catalog.",
             };
         }
         // Commands that act on a model must fail clearly when none is loaded, so an
@@ -132,9 +208,19 @@ export class ViewerControlAPI {
         const validation = this._validate(def.params || {}, params);
         if (validation.error) return { ok: false, error: validation.error };
 
+        // Nesting depth: batch children execute through this same method — the
+        // observation-seat publisher must see the BATCH (top level) exactly once,
+        // never both the batch and its children (double execution on replay).
+        this._depth = (this._depth || 0) + 1;
         try {
             const result = await def.handler(validation.values);
-            this._emit("executed", { action: command.action, params });
+            this._emit("executed", {
+                action: command.action,
+                params,
+                result,
+                topLevel: this._depth === 1,
+                mutates: isMutatingAction(command.action),
+            });
             // Demand-driven rendering: any successful command may have changed what's
             // on screen — request a frame (no-op cost for pure reads; guarantees an
             // agent's next screenshot reflects THIS command).
@@ -144,6 +230,8 @@ export class ViewerControlAPI {
             const message = String(err && err.message ? err.message : err);
             this._emit("error", { action: command.action, error: message });
             return { ok: false, error: message };
+        } finally {
+            this._depth--;
         }
     }
 
@@ -224,6 +312,15 @@ export class ViewerControlAPI {
                     return { error: `Param '${key}' must be an object` };
                 }
             } else if (spec.type === "string") {
+                // Refuse arrays/objects instead of coercing: [1,0,0] would
+                // stringify to "1,0,0", which THREE.Color silently renders as
+                // WHITE — the agent then believes its red paint landed (found
+                // by the local-LLM pilot experiment).
+                if (typeof v === "object") {
+                    return { error: `Param '${key}' must be a string (got `
+                        + `${JSON.stringify(v)}). Colors are CSS strings like `
+                        + `"#ff0000".` };
+                }
                 v = String(v);
             }
             if (spec.enum && !spec.enum.includes(v)) {
@@ -490,41 +587,67 @@ export class ViewerControlAPI {
 
             // --- sculpting & painting (backlog 045) ---
             sculpt: {
-                description: "Apply ONE sculpting brush stamp to the ACTIVE object, in WORLD coordinates (get them from pick, get_bounds, or describe_scene mesh centers). tool: draw (displace along the surface's average normal, or `direction`), inflate (along each vertex's own normal), smooth (relax bumps), flatten (toward the local plane), pinch (pull toward center), grab (move by `direction`*strength). radius: world units — or radius_rel (0..1, fraction of the object's bounding-sphere radius; scale-free). strength: world-units displacement for draw/inflate/grab (default radius*0.25); 0..1 blend for smooth/flatten/pinch (default 0.5). falloff: smooth|linear|sharp. Returns {affected, maxDisplacement, newSize} — quantified feedback, steer WITHOUT a verification render each stamp. A missed brush is an ERROR (fix center/radius). Edits are seam-safe (welded) and instance-aware; `reset` restores the pre-sculpt geometry. Not supported on skinned models.",
+                description: "Apply ONE sculpting brush stamp to the ACTIVE object, in WORLD coordinates (get them from pick, get_bounds, or describe_scene mesh centers). tool: draw (displace along the surface's average normal, or `direction`), inflate (along each vertex's own normal), smooth (relax bumps), flatten (toward the local plane), pinch (pull toward center), grab (move by `direction`*strength), hinge (the POSE brush: rotate the region RIGIDLY about pivot+axis by angle_deg × falloff — jaw drops, wing flexes; center+radius select the region, pivot is the rotation origin, e.g. chin vs jaw hinge), dig (REMOVE material: flat-bottomed crater along ONE fixed axis — default the inward average normal, or `direction` pointing INTO the surface; flat_fraction 0..0.9 (default 0.5) sets the plateau; strength = plateau depth, clamped per stamp to (1−flat_fraction)×radius so the wall stays remeshable — read appliedDepth and re-issue for deeper cuts; a 13-ray double-sided probe REFUSES stamps that would pierce a thin shell, naming the max safe strength; dig displaces — cutting THROUGH is split_object territory; only welds FACING the dig axis move, a shell's back sheet is never dragged; with remesh:'auto' the region PRE-SPLITS to radius/5 before displacement so the crater isn't aliased. Deep digs: prefer ONE stamp at the clamp over many repeats — repeated stamps on curved surfaces can leave small rim spikes; the tidy recipe is a smooth ring over the rim (sculpt_stroke {tool:'smooth', path:{type:'circle', center, axis: the dig axis, radius: crater radius}}) then regularize_region. dig = remove volume; grab = move volume; negative-direction draw = shallow emboss only). radius: world units — or radius_rel (0..1, fraction of the object's bounding-sphere radius; scale-free). strength: world-units displacement for draw/inflate/grab/dig (default radius*0.25); 0..1 blend for smooth/flatten/pinch (default 0.5); hinge uses angle_deg instead. falloff: smooth|linear|sharp. tool:'noise' displaces along weld normals by SEEDED fBm (wavelength = feature size, octaves 1-6, ridged for crests, bias shifts add/remove, seed for replay-identical variation — organic micro-relief: feathers/bark/rock; sample refine_region to ~wavelength/4 first). symmetry:'x'|'y'|'z' MIRRORS every stamp across the object's local axis plane (direction/pivot/axis reflected, hinge angle negated) — bilateral work (faces, creatures, vehicles) in ONE call with exact symmetry. EVERY result now carries meshQuality {medianEdge before/after, outOfBandFraction, maxOverMedian, needsRemesh} — the facet-degradation trigger; remesh:'auto' runs the full regularize pipeline (split+collapse+flip+relax) over the stroke region automatically when it fires (geometry REPLACED: reset baseline moves, morphs suppress it loudly; default OFF so old recordings replay bit-identically). Returns {affected, maxDisplacement, newSize} — quantified feedback, steer WITHOUT a verification render each stamp. A missed brush is an ERROR (fix center/radius). Edits are seam-safe (welded) and instance-aware; `reset` restores the pre-sculpt geometry. Not supported on skinned models.",
                 params: {
-                    tool: { type: "string", default: "draw", enum: ["draw", "inflate", "smooth", "flatten", "pinch", "grab"] },
+                    tool: { type: "string", default: "draw", enum: ["draw", "inflate", "smooth", "flatten", "pinch", "grab", "hinge", "dig", "noise"] },
                     center: { type: "array", required: true },
                     radius: { type: "number", min: 0.000001 },
                     radius_rel: { type: "number", min: 0.000001, max: 1 },
                     strength: { type: "number" },
                     direction: { type: "array" },
+                    pivot: { type: "array" },
+                    axis: { type: "array" },
+                    angle_deg: { type: "number", min: -180, max: 180 },
+                    flat_fraction: { type: "number", min: 0, max: 0.9 },
                     falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+                    remesh: { type: "string", enum: ["auto", "off"] },
+                    max_triangles: { type: "number", min: 1000, max: 300000 },
+                    symmetry: { type: "string", enum: ["x", "y", "z"] },
+                    wavelength: { type: "number", min: 0.000001 },
+                    octaves: { type: "number", min: 1, max: 6 },
+                    seed: { type: "number" },
+                    ridged: { type: "boolean" },
+                    bias: { type: "number", min: -1, max: 1 },
                 },
                 requiresModel: true,
                 handler: (p) => sculptStamp(v, p),
             },
             sculpt_stroke: {
-                description: "Apply the sculpt brush along a stroke in ONE call — far cheaper than N sculpt calls. Give the stroke as explicit `points` (≤64 world-space [x,y,z]; overlap at spacing ≈ radius/2 for a continuous ridge) OR as a parametric `path` with server-side auto-spacing (no external math, no scalloping): {type:'circle', center, axis?=[0,1,0], radius, start_deg?, sweep_deg?=360} for rings/bands/arcs, or {type:'line', from, to}. Same brush params as sculpt.",
+                description: "Apply the sculpt brush along a stroke in ONE call — far cheaper than N sculpt calls. Give the stroke as explicit `points` (≤64 world-space [x,y,z]; overlap at spacing ≈ radius/2 for a continuous ridge) OR as a parametric `path` with server-side auto-spacing (no external math, no scalloping): {type:'circle', center, axis?=[0,1,0], radius, start_deg?, sweep_deg?=360} for rings/bands/arcs, or {type:'line', from, to}. Same brush params as sculpt (incl. hinge with pivot/axis/angle_deg; dig with flat_fraction/direction — a dig stroke carves a groove, stopping at the first stamp the piercing guard refuses and returning the work done with pierceRefusedAt). Results carry meshQuality; remesh:'auto' regularizes the stroke region when the degradation trigger fires. symmetry:'x'|'y'|'z' mirrors the whole stroke across the object's local plane (one call, exact bilateralism).",
                 params: {
                     points: { type: "array" },
                     path: { type: "object" },
-                    tool: { type: "string", default: "draw", enum: ["draw", "inflate", "smooth", "flatten", "pinch", "grab"] },
+                    tool: { type: "string", default: "draw", enum: ["draw", "inflate", "smooth", "flatten", "pinch", "grab", "hinge", "dig", "noise"] },
                     radius: { type: "number", min: 0.000001 },
                     radius_rel: { type: "number", min: 0.000001, max: 1 },
                     strength: { type: "number" },
                     direction: { type: "array" },
+                    pivot: { type: "array" },
+                    axis: { type: "array" },
+                    angle_deg: { type: "number", min: -180, max: 180 },
+                    flat_fraction: { type: "number", min: 0, max: 0.9 },
                     falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
+                    remesh: { type: "string", enum: ["auto", "off"] },
+                    max_triangles: { type: "number", min: 1000, max: 300000 },
+                    symmetry: { type: "string", enum: ["x", "y", "z"] },
+                    wavelength: { type: "number", min: 0.000001 },
+                    octaves: { type: "number", min: 1, max: 6 },
+                    seed: { type: "number" },
+                    ridged: { type: "boolean" },
+                    bias: { type: "number", min: -1, max: 1 },
                 },
                 requiresModel: true,
                 handler: (p) => sculptStroke(v, p),
             },
             paint: {
-                description: "Paint ONE brush stamp of color onto the ACTIVE object's texture (creates a real texture layer on first use; the model's existing texture becomes the base when possible). WORLD-space brush like sculpt; radius in world units or radius_rel (0..1 of bounding-sphere radius). color: CSS hex. opacity 0..1 = the MAX alpha of this call (painter semantics: overlapping stamps within one call never exceed it); hardness 0..1 = fraction of the radius at full opacity before falloff scales alpha to 0 at the rim. shape:'square' stamps a crisp axis-aligned quad in the surface's tangent plane (radius = half-side; use hardness 1 for exact edges) — checkers/panels/labels in ONE stamp. max_normal_angle (degrees): skip faces tilted more than this from the stamped face — stops paint wrapping around hard edges (e.g. 45 on a box top). Requires UV coordinates (primitives always have them; STL/PLY do not). Returns {painted, meanAlpha} — meanAlpha is the average applied alpha; < 0.05 means near-invisible paint (raise opacity/hardness) and is flagged in `note`. A missed brush is an ERROR. Paint & sculpt edits are NOT saved by save_scene — export_model (GLB) persists them. clear_paint undoes all paint.",
+                description: "Paint ONE brush stamp of color onto the ACTIVE object's texture (creates a real texture layer on first use; the model's existing texture becomes the base when possible). WORLD-space brush like sculpt; radius in world units or radius_rel (0..1 of bounding-sphere radius). color: CSS hex. opacity 0..1 = the MAX alpha of this call (painter semantics: overlapping stamps within one call never exceed it); hardness 0..1 = fraction of the radius at full opacity before falloff scales alpha to 0 at the rim. shape:'square' stamps a crisp axis-aligned quad in the surface's tangent plane (radius = half-side; use hardness 1 for exact edges) — checkers/panels/labels in ONE stamp. max_normal_angle (degrees): skip faces tilted more than this from the stamped face — stops paint wrapping around hard edges (e.g. 45 on a box top). Requires UV coordinates (primitives always have them; STL/PLY do not). Returns {painted, meanAlpha} — meanAlpha is the average applied alpha; < 0.05 means near-invisible paint (raise opacity/hardness) and is flagged in `note`. symmetry:'x'|'y'|'z' mirrors every stamp across the object's local axis plane (bilateral face markings in one call). channel:'roughness'|'metalness' (with value 0..1 — 0 polished/dielectric, 1 rough/metal), 'emissive' (with color) and 'height' (with value; data for bake-style workflows) paint MATERIAL RESPONSE instead of color — the realism lever: matte vs gloss vs metal per texel, exported natively in GLB. A missed brush is an ERROR. Paint & sculpt edits are NOT saved by save_scene — export_model (GLB) persists them. clear_paint undoes all paint.",
                 params: {
                     center: { type: "array", required: true },
                     radius: { type: "number", min: 0.000001 },
                     radius_rel: { type: "number", min: 0.000001, max: 1 },
-                    color: { type: "string", required: true },
+                    color: { type: "string" },
+                    channel: { type: "string", default: "albedo", enum: ["albedo", "roughness", "metalness", "emissive", "height"] },
+                    value: { type: "number", min: 0, max: 1 },
                     opacity: { type: "number", min: 0, max: 1 },
                     hardness: { type: "number", min: 0, max: 1 },
                     falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
@@ -532,18 +655,21 @@ export class ViewerControlAPI {
                     max_normal_angle: { type: "number", min: 1, max: 180 },
                     texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
                     undo_group: { type: "string" },
+                    symmetry: { type: "string", enum: ["x", "y", "z"] },
                 },
                 requiresModel: true,
                 handler: (p) => paintStamp(v, p),
             },
             paint_stroke: {
-                description: "Paint a stroke in ONE call. Give it as explicit `points` (≤64 world-space [x,y,z]; overlap at spacing ≈ radius/2) OR as a parametric `path` with server-side auto-spacing (smooth bands with zero external math): {type:'circle', center, axis?=[0,1,0], radius, start_deg?, sweep_deg?=360} for rings/bands/arcs (e.g. a hat band: circle around the crown's axis), or {type:'line', from, to}. Same params as paint (incl. shape/max_normal_angle).",
+                description: "Paint a stroke in ONE call. Give it as explicit `points` (≤64 world-space [x,y,z]; overlap at spacing ≈ radius/2) OR as a parametric `path` with server-side auto-spacing (smooth bands with zero external math): {type:'circle', center, axis?=[0,1,0], radius, start_deg?, sweep_deg?=360} for rings/bands/arcs (e.g. a hat band: circle around the crown's axis), or {type:'line', from, to}. Same params as paint (incl. shape/max_normal_angle/symmetry).",
                 params: {
                     points: { type: "array" },
                     path: { type: "object" },
                     radius: { type: "number", min: 0.000001 },
                     radius_rel: { type: "number", min: 0.000001, max: 1 },
-                    color: { type: "string", required: true },
+                    color: { type: "string" },
+                    channel: { type: "string", default: "albedo", enum: ["albedo", "roughness", "metalness", "emissive", "height"] },
+                    value: { type: "number", min: 0, max: 1 },
                     opacity: { type: "number", min: 0, max: 1 },
                     hardness: { type: "number", min: 0, max: 1 },
                     falloff: { type: "string", enum: ["smooth", "linear", "sharp"] },
@@ -551,14 +677,17 @@ export class ViewerControlAPI {
                     max_normal_angle: { type: "number", min: 1, max: 180 },
                     texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
                     undo_group: { type: "string" },
+                    symmetry: { type: "string", enum: ["x", "y", "z"] },
                 },
                 requiresModel: true,
                 handler: (p) => paintStroke(v, p),
             },
             fill_paint: {
-                description: "Flood the ACTIVE object's whole paint layer with one color (a fresh base coat before detailing).",
+                description: "Flood the ACTIVE object's whole paint layer with one color (a fresh base coat before detailing) — or a whole material CHANNEL: channel:'roughness'|'metalness'|'height' with value 0..1, or channel:'emissive' with color. Channel layers are created on first use (packed G/B metallicRoughness canvas — exports natively) and require/create the albedo layer.",
                 params: {
-                    color: { type: "string", required: true },
+                    color: { type: "string" },
+                    channel: { type: "string", default: "albedo", enum: ["albedo", "roughness", "metalness", "emissive", "height"] },
+                    value: { type: "number", min: 0, max: 1 },
                     texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
                 },
                 requiresModel: true,
@@ -568,6 +697,49 @@ export class ViewerControlAPI {
                 description: "Remove ALL paint layers from the ACTIVE object, restoring its pre-paint textures/colors (the paint analog of `reset`).",
                 requiresModel: true,
                 handler: () => clearPaint(v),
+            },
+            paint_pattern: {
+                description: "Fill the ACTIVE object (or a world-sphere `region`) with a PROCEDURAL pattern in ONE call — replaces hundred-stamp batteries (a falcon hull mosaic was 160 stamps; this is one). Patterns evaluate in WORLD space per texel: continuous across UV seams/islands, scale-consistent everywhere, and bit-deterministic given {seed, scale} (replays identical — integer-hash noise, no randomness). type: noise (fBm blend color→color2)| grunge (ridged fBm streaks; `contrast`)| cells (Worley cracks)| speckle (dot field; `density`)| stripes (bands along `direction`; `density` = duty)| gradient (color ramp along `direction`). scale = world units per feature (default: object size / 12). Works on material channels too: channel:'roughness' {value, value2} varies gloss procedurally (THE cheap realism move: worn metal = metalness pattern + roughness grunge), 'emissive', 'height'. opacity blends over the existing layer. Returns {painted, seed, scale}.",
+                params: {
+                    type: { type: "string", required: true, enum: ["noise", "grunge", "cells", "speckle", "stripes", "gradient"] },
+                    color: { type: "string" },
+                    color2: { type: "string" },
+                    channel: { type: "string", default: "albedo", enum: ["albedo", "roughness", "metalness", "emissive", "height"] },
+                    value: { type: "number", min: 0, max: 1 },
+                    value2: { type: "number", min: 0, max: 1 },
+                    seed: { type: "number" },
+                    scale: { type: "number", min: 0.000001 },
+                    octaves: { type: "number", min: 1, max: 6 },
+                    density: { type: "number", min: 0, max: 1 },
+                    contrast: { type: "number", min: 0.1, max: 10 },
+                    direction: { type: "array" },
+                    opacity: { type: "number", min: 0, max: 1 },
+                    region: { type: "object" },
+                    texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+                    undo_group: { type: "string" },
+                },
+                requiresModel: true,
+                handler: (p) => paintPattern(v, p),
+            },
+            bake_normals: {
+                description: "Derive a tangent-space NORMAL MAP from the painted HEIGHT channel (Sobel) — micro-relief that shades under light without geometry: paint relief with paint/paint_pattern {channel:'height'} (0.5 = flat, >0.5 raised, <0.5 recessed), then bake. strength scales the gradient (1 = subtle, 3-5 = pronounced). Re-run after further height painting (the bake overwrites). Exports as a standard glTF normalMap. Honest limit: height features crossing UV island borders can seam (Sobel clamps at canvas edges).",
+                params: {
+                    strength: { type: "number", min: 0.05, max: 10 },
+                },
+                requiresModel: true,
+                handler: (p) => bakeNormals(v, p),
+            },
+            deform_region: {
+                description: "Closed-form REGION DEFORMER along an axis spine — what grab salvos cannot do cleanly: kind:'taper' (cross-sections scale to `factor` at the tip — a mandible taper in ONE call), 'bend' (rotate progressively about `direction`, angle_deg at the tip), 'twist' (rotate cross-sections about the spine), 'stretch' (elongate by `factor` fraction). axis: {from, to} world points — from-side is ANCHORED (t=0), deformation eases (smoothstep) to full at `to` and continues capped slightly beyond. Welded (seams never tear), deterministic, reset-snapshot aware. Returns {affected, newSize}. regularize_region after strong tapers/bends (cross-sections compress facets).",
+                params: {
+                    kind: { type: "string", required: true, enum: ["taper", "bend", "twist", "stretch"] },
+                    axis: { type: "object", required: true },
+                    factor: { type: "number" },
+                    angle_deg: { type: "number", min: -180, max: 180 },
+                    direction: { type: "array" },
+                },
+                requiresModel: true,
+                handler: (p) => deformRegion(v, p),
             },
             batch: {
                 description: "Execute up to 32 commands sequentially in ONE round-trip (halves latency/tokens for sculpt-stroke sessions). commands: [{action, params}, ...]. Stops at the first failure unless continue_on_error. Returns {results:[{ok,...}], completed}. batch cannot nest.",
@@ -619,10 +791,38 @@ export class ViewerControlAPI {
                 handler: () => ({ objects: v.listObjects(), activeObjectId: v._activeObjectId }),
             },
             set_active_object: {
-                description: "Make an object ACTIVE: all single-object commands (describe_scene, get_mesh_stats, transforms, focus, animation) target the active object. The scene keeps rendering all visible objects. Returns just {activeObjectId} — use list_objects for the full roster.",
-                params: { id: { type: "number", required: true } },
+                description: "Make an object ACTIVE: all single-object commands (describe_scene, get_mesh_stats, transforms, focus, animation) target the active object. The scene keeps rendering all visible objects. Accepts `id` (from add_primitive/list_objects) or `name`. Returns just {activeObjectId} — use list_objects for the full roster.",
+                params: {
+                    id: { type: "number" },
+                    name: { type: "string" },
+                },
                 requiresModel: true,
-                handler: (p) => { v.setActiveObject(p.id); return { activeObjectId: p.id }; },
+                handler: (p) => {
+                    let id = p.id;
+                    if (id === undefined) {
+                        if (p.name === undefined) {
+                            throw new Error("set_active_object needs `id` or `name`");
+                        }
+                        // Name lookup is a convenience for conversational
+                        // agents ("activate the ball") — exact match first,
+                        // then case-insensitive, ambiguity is an error.
+                        const objs = v.listObjects().objects || [];
+                        const exact = objs.filter((o) => o.name === p.name);
+                        const loose = exact.length ? exact : objs.filter(
+                            (o) => String(o.name).toLowerCase() === String(p.name).toLowerCase());
+                        if (loose.length === 0) {
+                            throw new Error(`No object named '${p.name}' — list_objects shows: `
+                                + objs.map((o) => `${o.id}:${o.name}`).join(", "));
+                        }
+                        if (loose.length > 1) {
+                            throw new Error(`Ambiguous name '${p.name}' (ids `
+                                + loose.map((o) => o.id).join(", ") + ") — use id.");
+                        }
+                        id = loose[0].id;
+                    }
+                    v.setActiveObject(id);
+                    return { activeObjectId: id };
+                },
             },
             remove_object: {
                 description: "Remove ONE object from the scene (disposes its GPU resources). If it was active, the most recently added remaining object becomes active. Returns just {removed} — use list_objects for the roster.",
@@ -637,7 +837,7 @@ export class ViewerControlAPI {
                 handler: () => detectParts(v),
             },
             split_object: {
-                description: "Extract part(s) of the ACTIVE object into a NEW scene object — the articulation knife. Selection: parts:[partId,...] + partitionId (from detect_parts) OR a plane cut: {axis:'x'|'y'|'z', at:<world coordinate>, side:'+'|'-'} (side picks WHICH half is extracted, default '+' — cutting a LEFT wing needs side:'-') / {plane:{point,normal}} (oblique; the +normal side is extracted). Plane cuts classify whole triangles; CUT FACES ARE HOLLOW (capping would invent wrong UVs) — keep articulation sweeps ≲30° or orient cuts away from camera. Returns {created:[{objectId, suggestedPivot, ...}], remaining, openEdgesAdded} — suggestedPivot is the cut centroid: set_pivot there, set_parent, then rotate. The NEW part becomes active; keep_active:true keeps the SOURCE active instead (split→split sequences in one batch). Painted materials are deep-copied (budget charged). Refuses skinned/animated/instanced objects. After a split: old mesh ids + partIds are void; reset restores the SPLIT state.",
+                description: "Extract part(s) of the ACTIVE object into a NEW scene object — the articulation knife. Selection: parts:[partId,...] + partitionId (from detect_parts) OR a plane cut: {axis:'x'|'y'|'z', at:<world coordinate>, side:'+'|'-'} (side picks WHICH half is extracted, default '+' — cutting a LEFT wing needs side:'-') / {plane:{point,normal}} (oblique; the +normal side is extracted). Plane cuts classify whole triangles. Plane cuts CAP by default (cap:false opts out): flat caps with a median-rim-sampled color close the cut faces on both sides — only edges the cut itself opened; pre-existing holes are never sealed; result.capped reports loops/capTriangles/measured post-cap openEdges per side — letting articulation sweeps open wide without black gashes. Returns {created:[{objectId, suggestedPivot, ...}], remaining, openEdgesAdded, capped?} — suggestedPivot is the cut centroid: set_pivot there, set_parent, then rotate. The NEW part becomes active; keep_active:true keeps the SOURCE active instead (split→split sequences in one batch). Painted materials are deep-copied (budget charged). Refuses skinned/animated/instanced objects. After a split: old mesh ids + partIds are void; reset restores the SPLIT state.",
                 params: {
                     parts: { type: "array" },
                     partitionId: { type: "number" },
@@ -645,6 +845,7 @@ export class ViewerControlAPI {
                     axis: { type: "string", enum: ["x", "y", "z"] },
                     at: { type: "number" },
                     side: { type: "string", enum: ["+", "-"] },
+                    cap: { type: "boolean" },
                     name: { type: "string" },
                     keep_active: { type: "boolean", default: false },
                 },
@@ -673,7 +874,7 @@ export class ViewerControlAPI {
 
             // --- mesh/texture inspection + repair (backlog 046) ---
             inspect_region: {
-                description: "Measure mesh density WHERE IT MATTERS — the observation for adaptive simplification. Probe mode {center, radius|radius_rel}: {triangles, surfaceArea, triPerUnit2, edgeLength{min,median,p95}, dihedralMeanDeg, openEdges}. Grid mode {grid:2..5}: N³ cells over the object, sorted by simplification OPPORTUNITY (flat × dense = detail unjustified by curvature), each with center+radius ready to feed simplify_region. Decision rule: high triPerUnit2 + low dihedralMeanDeg = over-dense for what it represents.",
+                description: "Measure mesh density WHERE IT MATTERS — the observation step for ADAPTIVE RESOLUTION (both directions). Probe mode {center, radius|radius_rel}: {triangles, surfaceArea, triPerUnit2, edgeLength{min,median,p95}, dihedralMeanDeg, openEdges}. Grid mode {grid:2..5}: N³ cells over the object, sorted by simplification OPPORTUNITY (flat × dense = detail unjustified by curvature), each with center+radius ready to feed simplify_region. Decision rules: high triPerUnit2 + low dihedralMeanDeg = over-dense for what it represents → simplify_region; edgeLength.median far above your brush radius/5 = too coarse to sculpt detail → refine_region.",
                 params: {
                     center: { type: "array" },
                     radius: { type: "number", min: 0.000001 },
@@ -693,6 +894,33 @@ export class ViewerControlAPI {
                 },
                 requiresModel: true,
                 handler: (p) => simplifyRegion(v, p),
+            },
+            refine_region: {
+                description: "REFINE a brush region of the ACTIVE object — the other half of adaptive resolution (simplify_region coarsens; this densifies so you can sculpt/paint detail the current facets cannot carry). Conformal red-green subdivision: long edges (world length > target) whose midpoint lies in the brush split in BOTH incident triangles per pass — no cracks, no T-junctions, UV-seam midpoints weld exactly; paint layers are untouched and painting the refined area simply gains finer geometric control (paint is TEXTURE-space: refining sharpens how stamps hug relief, not texel resolution — resize_texture raises that; primitive POLE caps have near-degenerate UV fans where stamps can leave faint radial hairlines). Target: target_edge (world units) or detail_rel (fraction of the bounding-sphere radius; for sculpting aim ≈ brush radius / 5 — read inspect_region edgeLength.median first). max_triangles caps ADDED triangles; the op stops on PASS boundaries (still crack-free); budgetHit:true reports nextPassNeeds — passes are indivisible, so re-issue with max_triangles ≥ that number to continue. Returns {region:{trianglesBefore/After, edgeLength}, edgesSplit, verticesAdded, passes, targetEdge, nextPassNeeds?}. NOTE: geometry is REPLACED — reset baseline moves; morphs DROP loudly (export first). No-op (already fine enough) changes nothing and keeps the baseline.",
+                params: {
+                    center: { type: "array", required: true },
+                    radius: { type: "number", min: 0.000001 },
+                    radius_rel: { type: "number", min: 0.000001, max: 1 },
+                    target_edge: { type: "number", min: 0.000000001 },
+                    detail_rel: { type: "number", min: 0.000001, max: 0.5 },
+                    max_triangles: { type: "number", min: 1000, max: 300000 },
+                },
+                requiresModel: true,
+                handler: (p) => refineRegion(v, p),
+            },
+            regularize_region: {
+                description: "REMESH a brush region to a regular coherent graph — full incremental remeshing: SPLIT over-long edges (4/3 × target), COLLAPSE needle edges (4/5 × target; link-condition + fold-over + no-new-long-edge guards), FLIP edges to equalize valences (target 6 interior/4 boundary — poles shade as star artifacts), then tangential relaxation (shape-preserving to first order). Run AFTER heavy sculpting: brushes only move vertices, so triangle quality decays monotonically until this restores it. Seams, open rims, material-group boundaries and the region ring stay LOCKED (no cracks, no UV tears, openEdges invariant). Default target = the region's CURRENT median edge; target_edge/detail_rel override (explicit target on MIXED regions — a blended median lies). Returns {stretchedEdges {before, after}, edgesSplit, collapsed, flipped, relaxedVerts, valence567Share, edgeLength {before, after}} — clean ≈ stretchedEdges.after 0 and valence567Share ≥ 0.9. NOTE: vertices slide within the surface, painted texture drifts slightly — blur_paint or repaint to tidy. Geometry is REPLACED (reset baseline moves; morphs drop loudly). The sculpt loop: sculpt → regularize_region → paint (or sculpt {remesh:'auto'} to fuse the two).",
+                params: {
+                    center: { type: "array", required: true },
+                    radius: { type: "number", min: 0.000001 },
+                    radius_rel: { type: "number", min: 0.000001, max: 1 },
+                    target_edge: { type: "number", min: 0.000000001 },
+                    detail_rel: { type: "number", min: 0.000001, max: 0.5 },
+                    iterations: { type: "number", min: 1, max: 5 },
+                    max_triangles: { type: "number", min: 1000, max: 300000 },
+                },
+                requiresModel: true,
+                handler: (p) => regularizeRegion(v, p),
             },
             fix_mesh: {
                 description: "Targeted repair passes on the ACTIVE object. operations (default ['degenerate','normals']): degenerate = drop zero-area/collapsed triangles; normals = recompute vertex normals; flipped_faces = OPT-IN per-MESH winding reversal (only decidable on closed meshes with negative signed volume — per-face flip detection is unreliable and not offered). Returns per-op counts + issue deltas {openEdges, degenerate} so no re-describe is needed.",
@@ -828,6 +1056,17 @@ export class ViewerControlAPI {
                 requiresModel: true,
                 handler: (p) => previewUVTransform(v, p),
             },
+            merge_objects: {
+                description: "FUSE several objects into ONE welded surface — the advanced-sculpting bridge: assemble primitives (the draft) → merge_objects → sculpt/dig/refine ACROSS the old part boundaries → texture the fused skin. mode:'union' (default) is true CSG: overlapping volumes fuse where they intersect, interior shells disappear, the result is one manifold hull (requires CLOSED sources — open rims refuse with counts; fix_mesh or use mode:'concat'). mode:'concat' concatenates + position-welds (never refuses; interior walls survive). blend (world units) rounds the union seams into FILLETS via deterministic Laplacian relaxation around the intersection curves (≈ the joint radius you want, e.g. 0.05 on a 1-unit hull; returns {seams:{seamVerts, blended}}) — the 'local fusion' for organic joints. UVs re-atlas into per-source grid cells (no paint cross-talk later); source PAINT/textures are DROPPED (texture after fusion — disclosed in note). The fused object is a NEW id at identity placement (world baked); sources are removed. Manifests cannot rebuild a merge — export_glb persists it. Budget: combined sources ≤400k triangles.",
+                params: {
+                    ids: { type: "array", required: true },
+                    mode: { type: "string", default: "union", enum: ["union", "concat"] },
+                    blend: { type: "number", min: 0 },
+                    name: { type: "string" },
+                },
+                requiresModel: true,
+                handler: (p) => mergeObjects(v, p),
+            },
             explode_view: {
                 description: "EXPLODED VIEW for articulation proofs: offset every object outward from the scene centroid so separate parts read as separate parts (factor 1 ≈ clearly separated; 0.3 subtle). Returns per-object WORLD displacements and minGapWorld — the minimum pairwise AABB gap (negative = pairs still overlap, listed in `overlapping`: raise the factor BEFORE spending a screenshot). explode_view {factor: 0} RESTORES exact placements — always restore before save_scene/export. The proof loop: explode → check minGapWorld > 0 → screenshot → restore.",
                 params: { factor: { type: "number", required: true, min: 0, max: 5 } },
@@ -845,9 +1084,37 @@ export class ViewerControlAPI {
             },
 
             // --- timeline / keyframe animation (backlog 046) ---
-            set_keyframe: {
-                description: "Key an object's pose at `time` (seconds). Give explicit channels (position [x,y,z], rotation [x,y,z] Euler° or quaternion, scale) OR capture:true to key the object's CURRENT pose — the natural loop: pose with set_object_transform/look_at, then capture. With capture, `channels` narrows what gets keyed (e.g. ['rotation'] for a joint — avoids constant position/scale tracks bloating the export). Values are LOCAL (parent-relative) and rotation swings about the object's pivot. easing (out of this key): linear|step|ease_in|ease_out|ease_in_out. TEACHING: rotation interpolates the SHORT arc — a note fires when a segment exceeds 120° (use midpoint keys for full spins: 0/180/360). Setting a key pauses playback.",
+            // --- morph targets (backlog 049) ---
+            begin_morph: {
+                description: "Snapshot the ACTIVE object's CURRENT pose as the MORPH BASE — the shape your morphs deform FROM. The loop: begin_morph → sculpt a pose (the `hinge` tool is the pose brush: rigid rotation about pivot+axis — jaws, flaps) → capture_morph {name} (base auto-restores) → sculpt the next pose → capture… Then set_morph blends and set_keyframe {morphs:{name: w}} animates. Refused while captured morphs exist (mixing bases makes garbage — delete_morph first) and on assets that carry IMPORTED morph targets (capturing would discard them; drive those with set_morph instead). Not supported on skinned models.",
+                requiresModel: true,
+                handler: () => beginMorph(v),
+            },
+            capture_morph: {
+                description: "Capture the diff between the CURRENT (sculpted) pose and the morph base as a named morph target, then RESTORE the base pose. Deltas are computed per welded vertex (seams never tear), stored sparse (budget-capped, ≤8 morphs/object; a GPU render-cost budget also applies — every target is shaded every frame). Zero difference is an error (sculpt the pose first). Re-capturing an existing name replaces it. Morphs persist ONLY via export_glb (glTF morph targets) — not in .mvscene; reset/simplify/split DROP them loudly. Returns {deltaVertices, maxDelta, morphs, budget}.",
+                params: { name: { type: "string", required: true } },
+                requiresModel: true,
+                handler: (p) => captureMorph(v, p),
+            },
+            set_morph: {
+                description: "Blend a morph in: weight 0 (base) .. 1 (full pose). Works on CAPTURED morphs and on IMPORTED glTF morph targets alike (reloaded exports stay drivable — result.source says which). GPU-blended (real three.js morph targets) — cheap to call repeatedly. Sculpting is refused while any weight > 0 (brushes edit the BASE but you'd see the morphed surface); paint aims at the DISPLAYED morphed surface; blur/clone/mirror heal brushes refuse while morphed. Weights are keyframable: set_keyframe {id, time, morphs:{name: w}}. Returns all current weights.",
                 params: {
+                    name: { type: "string", required: true },
+                    weight: { type: "number", required: true, min: 0, max: 1 },
+                },
+                requiresModel: true,
+                handler: (p) => setMorph(v, p),
+            },
+            delete_morph: {
+                description: "Delete one captured morph (name) or ALL captured morphs (no name). Releases the morph budget and removes the morphs' timeline channels. IMPORTED (asset-authored) morph targets are drive-only and cannot be deleted. The morph base survives — capture again without a new begin_morph.",
+                params: { name: { type: "string" } },
+                requiresModel: true,
+                handler: (p) => deleteMorph(v, p),
+            },
+            set_keyframe: {
+                description: "Key an object's pose at `time` (seconds). Give explicit channels (position [x,y,z], rotation [x,y,z] Euler° or quaternion, scale) OR capture:true to key the object's CURRENT pose — the natural loop: pose with set_object_transform/look_at, then capture. With capture, `channels` narrows what gets keyed (e.g. ['rotation'] for a joint — avoids constant position/scale tracks bloating the export). morphs:{name: weight 0..1} keys captured MORPH weights at `time` (the talking-face channel — combine freely with TRS in one call; morph tracks export to glTF but are excluded from .mvscene manifests, like the morphs themselves). Values are LOCAL (parent-relative) and rotation swings about the object's pivot. easing (out of this key): linear|step|ease_in|ease_out|ease_in_out. TEACHING: rotation interpolates the SHORT arc — a note fires when a segment exceeds 120° (use midpoint keys for full spins: 0/180/360). Setting a key pauses playback.",
+                params: {
+                    morphs: { type: "object" },
                     id: { type: "number", required: true },
                     time: { type: "number", required: true, min: 0 },
                     position: { type: "array" },
@@ -1186,7 +1453,10 @@ export class ViewerControlAPI {
                 handler: async (p) => { const r = await v.simplifyModel(p.ratio); return r; },
             },
             recompute_normals: { description: "Merge vertices and recompute smooth normals.", requiresModel: true, handler: () => { v.recomputeNormals(); return true; } },
-            reset: { description: "Undo all transforms (restore original geometry).", requiresModel: true, handler: () => { v.resetModel(); return true; } },
+            reset: { description: "Undo all transforms (restore original geometry). Captured MORPHS are dropped (their deltas reference the pre-reset base — export_glb first to keep them); paint layers survive (clear_paint is their undo).", requiresModel: true, handler: () => {
+                v.resetModel();
+                return v._lastResetNote ? { note: v._lastResetNote } : true;
+            } },
 
             // --- animation ---
             play_animation: {

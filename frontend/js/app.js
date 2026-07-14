@@ -15,6 +15,8 @@ import { AgentLink } from "./agent_link.js";
 import { ScenePanel } from "./scene_panel.js";
 import { TimelinePanel } from "./timeline_panel.js";
 import { EditPanel } from "./edit_panel.js";
+import { ObserveSeat } from "./observe_seat.js";
+import { AiBar } from "./ai_bar.js";
 
 
 class App {
@@ -93,6 +95,60 @@ class App {
             getGizmo: () => this._scenePanel && this._scenePanel._gizmo,
             setMeasure: (active) => this._setMeasureMode(active),
         });
+
+        // Observation seat: watch a live agent (MCP) session — command
+        // replication + ghost-brush telemetry through the SAME control API.
+        this._observeSeat = new ObserveSeat(this._viewer, this._controlAPI, {
+            toast: (m, t) => this._showToast(m, t),
+            setUiLocked: (locked) => this._setObserveLock(locked),
+            pauseBridge: (paused) => { this._agentLink.observing = paused; },
+            onObservingChange: (on) => {
+                const btn = document.getElementById("observe-toggle");
+                if (btn) btn.classList.toggle("active", on);
+                const live = document.getElementById("observe-live");
+                if (live) live.style.display = on ? "flex" : "none";
+            },
+            // Recording replay bar (bottom, timeline-style): pos/total drive
+            // the scrubber; hidden outside recording playback.
+            onPlayback: (pos, total, playing, isRecording) => {
+                const bar = document.getElementById("observe-replay-bar");
+                if (!bar) return;
+                bar.style.display = isRecording && total > 0 ? "flex" : "none";
+                if (!isRecording) return;
+                const scrub = document.getElementById("observe-scrub");
+                const posEl = document.getElementById("observe-pos");
+                const play = document.getElementById("observe-play");
+                if (scrub && !scrub.matches(":active")) {
+                    scrub.max = String(total);
+                    scrub.value = String(pos);
+                }
+                if (posEl) posEl.textContent = `${pos} / ${total}`;
+                if (play) play.textContent = playing ? "⏸" : "▶";
+            },
+            // The tool readout lives in the observe panel (tool, size = area
+            // of influence, strength/opacity, paint color swatch).
+            onToolChange: (info) => {
+                const name = document.getElementById("observe-tool-name");
+                const detail = document.getElementById("observe-tool-detail");
+                const swatch = document.getElementById("observe-tool-swatch");
+                if (!name) return;
+                if (!info) {
+                    name.textContent = "—";
+                    detail.textContent = "";
+                    swatch.style.display = "none";
+                    return;
+                }
+                name.textContent = info.tool;
+                detail.textContent = info.detail || "";
+                if (info.color) {
+                    swatch.style.display = "inline-block";
+                    swatch.style.background = info.color;
+                } else {
+                    swatch.style.display = "none";
+                }
+            },
+        });
+        // (Observe UI wiring happens after _agentLink exists — see below.)
 
         // The registry is the source of truth for "is anything on screen":
         // objects created OUTSIDE the file-load flows (control-API primitives,
@@ -237,7 +293,17 @@ class App {
             showToast: (m, t) => this._showToast(m, t),
         });
         this._fileBrowser.setNavigateListener((path) => this._agentLink.syncDir(path));
+
+        // In-app AI: Spotlight bar (⌘K) + progress panel; its commands execute
+        // on THIS tab's control API via the agent-events stream.
+        this._aiBar = new AiBar({
+            api: this._controlAPI,
+            showToast: (m, t) => this._showToast(m, t),
+        });
+        this._agentLink.onAiEvent = (msg) => this._aiBar.handleEvent(msg);
+
         this._agentLink.connect();
+        this._initObserveUI();
 
         // Reverse bridge: report what the human is looking at (asset + camera) so
         // agents can pick up the session headless (MCP get_app_state).
@@ -1836,6 +1902,187 @@ class App {
             this._viewer.toggleMeasureMode();
             if (btn) btn.classList.remove("active");
         }
+    }
+
+    // ==========================================================
+    // Observation seat (watch a live agent session)
+    // ==========================================================
+
+    _initObserveUI() {
+        const btn = document.getElementById("observe-toggle");
+        const panel = document.getElementById("observe-panel");
+        const list = document.getElementById("observe-sessions");
+        if (!btn || !panel) return;
+
+        const refresh = async () => {
+            let sessions = [];
+            try { sessions = await this._observeSeat.sessions(); } catch { /* offline */ }
+            list.innerHTML = "";
+            // Live sessions get Watch; complete past sessions get Replay
+            // (recordings); anything else collapses to one summary line.
+            const live = sessions.filter((s) => s.joinable && s.alive);
+            const recordings = sessions.filter(
+                (s) => s.replayable && !(s.joinable && s.alive));
+            const dead = sessions.length - live.length - recordings.length;
+            if (!live.length && !recordings.length) {
+                list.innerHTML = "<div class='observe-empty'>No agent sessions. "
+                    + "Sessions appear here when an MCP agent starts working.</div>";
+            }
+            const deleteSession = async (id) => {
+                try {
+                    const r = await fetch("/api/observe/delete", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ id }),
+                    });
+                    if (!r.ok) {
+                        const d = await r.json().catch(() => ({}));
+                        this._showToast(`Delete failed: ${d.detail || r.status}`, "error");
+                    }
+                } catch { /* offline */ }
+                refresh();
+            };
+            const addRow = (s, isLive) => {
+                const row = document.createElement("div");
+                row.className = "observe-session-row";
+                const label = this._escapeHtml(s.label || s.model || s.id || "agent");
+                const watchers = s.observers ? ` · ${s.observers} watching` : "";
+                const info = `${s.commands} cmd${s.lossy ? " · lossy" : ""}${watchers}`;
+                row.innerHTML = `<span class='observe-dot${isLive ? " live" : ""}'></span>`
+                    + `<span class="observe-name" title="${label}">${label}</span>`
+                    + `<span class="observe-meta">${info}</span>`;
+                const join = document.createElement("button");
+                join.className = "btn btn-small";
+                join.textContent = isLive ? "Watch" : "Replay";
+                join.addEventListener("click", () => {
+                    const speed = document.getElementById("observe-speed");
+                    this._observeSeat.replaySpeed = speed ? speed.value : "instant";
+                    this._observeSeat.join(s.id);
+                });
+                row.appendChild(join);
+                if (!isLive) {
+                    // Past sessions are deletable (field request: broken/flooded
+                    // recordings cluttered the list). Live ones are not — the
+                    // backend refuses anyway; no dead button here.
+                    const del = document.createElement("button");
+                    del.className = "btn btn-small observe-del";
+                    del.textContent = "×";
+                    del.title = "Delete this recording";
+                    del.addEventListener("click", () => deleteSession(s.id));
+                    row.appendChild(del);
+                }
+                list.appendChild(row);
+            };
+            for (const s of live) addRow(s, true);
+            for (const s of recordings) addRow(s, false);
+            if (dead > 0) {
+                const past = document.createElement("div");
+                past.className = "observe-empty";
+                past.textContent = `${dead} past session${dead > 1 ? "s" : ""} `
+                    + "(log overwritten — not replayable)";
+                list.appendChild(past);
+            }
+            if (recordings.length || dead > 0) {
+                const clear = document.createElement("button");
+                clear.className = "btn btn-small observe-clear-all";
+                clear.textContent = "Clear past sessions";
+                clear.addEventListener("click", async () => {
+                    try {
+                        await fetch("/api/observe/delete", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ all_past: true }),
+                        });
+                    } catch { /* offline */ }
+                    refresh();
+                });
+                list.appendChild(clear);
+            }
+        };
+
+        let refreshTimer = null;
+        const setPanelOpen = (open) => {
+            panel.style.display = open ? "block" : "none";
+            if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+            if (open) {
+                refresh();
+                // Live list: a session starting while the panel is open must
+                // appear without reopening (field lesson).
+                refreshTimer = setInterval(refresh, 4000);
+            }
+        };
+
+        btn.addEventListener("click", () => {
+            setPanelOpen(panel.style.display === "none");
+        });
+        document.getElementById("observe-close").addEventListener("click", () => {
+            setPanelOpen(false);
+        });
+        document.getElementById("observe-leave").addEventListener("click", () => {
+            this._observeSeat.leave(true);
+            panel.style.display = "none";
+        });
+        // Replay bar wiring (recordings only).
+        const playBtn = document.getElementById("observe-play");
+        if (playBtn) {
+            playBtn.addEventListener("click", () => {
+                const seat = this._observeSeat;
+                if (seat._playTimer) seat.playbackPause();
+                else seat.playbackPlay();
+            });
+        }
+        const scrub = document.getElementById("observe-scrub");
+        if (scrub) {
+            scrub.addEventListener("change", () => {
+                this._observeSeat.playbackSeek(Number(scrub.value));
+            });
+        }
+
+        const follow = document.getElementById("observe-follow");
+        follow.addEventListener("change", () => {
+            // setFollow SNAPS to the performer's last known camera on engage —
+            // telemetry is deduped, so waiting for the next camera event made
+            // re-enabling look dead while the performer's camera was static.
+            this._observeSeat.setFollow(follow.checked);
+        });
+        // Grabbing the view detaches the follow camera (free-look wins).
+        this._viewer._renderer.domElement.addEventListener("pointerdown", () => {
+            if (this._observeSeat.observing && this._observeSeat.follow) {
+                this._observeSeat.follow = false;
+                follow.checked = false;
+                this._showToast("Follow camera off — free-look (re-enable in the panel)", "info");
+            }
+        });
+        // Discovery push: the hub announces new sessions on the agent bridge.
+        this._agentLink.onObserveSessionStarted = (msg) => {
+            const badge = document.getElementById("observe-badge");
+            if (badge) badge.style.display = "block";
+            this._showToast(
+                `An agent session is live${msg.label ? ` (${msg.label})` : ""} — `
+                + "watch it from the eye button.", "info");
+        };
+    }
+
+    /**
+     * Hard read-only seat (observation review M4): the replica shares the
+     * engine with every human panel — editing while observing corrupts the
+     * replay. Exit tool/measure modes, detach the gizmo, and fence the
+     * mutating panels behind pointer-events.
+     */
+    _setObserveLock(locked) {
+        if (locked) {
+            this._editPanel.exitToolMode();
+            this._setMeasureMode(false);
+            if (this._scenePanel && this._scenePanel._gizmo) {
+                try { this._scenePanel._gizmo.detach(); } catch { /* not attached */ }
+            }
+        }
+        for (const id of ["edit-toggle", "measure-toggle", "scene-panel",
+                          "edit-panel", "timeline-bar"]) {
+            const el = document.getElementById(id);
+            if (el) el.classList.toggle("observe-locked", locked);
+        }
+        document.body.classList.toggle("observing", locked);
     }
 
     // ==========================================================

@@ -361,8 +361,11 @@ async def run_pipeline(args, report: Report, glb: Path):
             b = await mv("get_bounds")
             axis_i = {"x": 0, "y": 1, "z": 2}[args.cut_axis]
             at = b["min"][axis_i] + args.cut_at_frac * b["size"][axis_i]
+            # cap:true closes the cut faces (backlog 051) — the sweep no longer
+            # exposes hollow black gashes at the hinge.
             sel = await mv("split_object", {"axis": args.cut_axis, "at": at,
-                                            "side": "+", "name": "lid"})
+                                            "side": "+", "name": "lid",
+                                            "cap": not args.no_cap})
             created = sel["created"][0]
             lid_id = created["objectId"]
             pivot = created.get("suggestedPivot")
@@ -381,20 +384,23 @@ async def run_pipeline(args, report: Report, glb: Path):
         explode = await mv("explode_view", {"factor": 1.6})
         await mv("explode_view", {"factor": 0})
         await mv("set_parent", {"id": lid_id, "parent_id": base_id})
+        capped = sel.get("capped")
         report.stage("articulate", numbers_before={"parts": plist,
                                                    "partitionId": parts.get("partitionId")},
                      decision=decision,
                      action=f"split -> lid #{lid_id} / base #{base_id}; pivot {pivot}; "
-                            f"openEdgesAdded {sel.get('openEdgesAdded')} "
-                            "(cut faces are hollow — sweep kept ≤30°)",
+                            f"openEdgesAdded {sel.get('openEdgesAdded')}"
+                            + (" — cut faces CAPPED (051)" if capped
+                               else " (cut faces hollow: --no-cap)"),
                      numbers_after={"minGapWorld": explode.get("minGapWorld"),
-                                    "objects": len(objs["objects"])},
+                                    "objects": len(objs["objects"]),
+                                    "capped": capped},
                      artifacts=[await shot("5_articulated.png")],
                      judgment=judgment, wall_s=time.monotonic() - t0)
 
         # ---- animate --------------------------------------------------------
         t0 = time.monotonic()
-        sweep = -abs(args.sweep_deg)          # ≤30°: hollow cut faces stay hidden
+        sweep = -abs(args.sweep_deg)
         for t, rot in [(0, [0, 0, 0]), (1.2, [sweep, 0, 0]), (2.4, [0, 0, 0])]:
             await mv("set_keyframe", {"id": lid_id, "time": t, "rotation": rot,
                                       "easing": "ease_in_out"})
@@ -412,8 +418,10 @@ async def run_pipeline(args, report: Report, glb: Path):
             await mv("seek_timeline", {"time": t})
             frames.append(await shot(f"6_motion_t{i}.png", azimuth=35))
         report.stage("animate", numbers_before=None,
-                     decision=f"lid sweep {sweep}° (≤30° hollow-face budget) + "
-                              "turntable keyed 0/90/180/270/360 (short-arc rule)",
+                     decision=f"lid sweep {sweep}° "
+                              + ("(caps allow wide opening) "
+                                 if not args.no_cap else "(hollow faces: keep ≤30°) ")
+                              + "+ turntable keyed 0/90/180/270/360 (short-arc rule)",
                      action="set_keyframe ×8 + set_timeline {duration:4}",
                      numbers_after={"tracks": tl.get("tracks"),
                                     "duration": tl.get("duration")},
@@ -481,7 +489,11 @@ def main():
                          "via pick); agents should read the real seam off a "
                          "screenshot instead of trusting this default")
     ap.add_argument("--sweep-deg", type=float, default=25.0,
-                    help="lid sweep amplitude (≤30°: split cut faces are hollow)")
+                    help="lid sweep amplitude (with caps the old ≤30° "
+                         "hollow-face budget no longer binds; kept moderate "
+                         "for a natural chest opening)")
+    ap.add_argument("--no-cap", action="store_true",
+                    help="leave cut faces hollow (pre-051 behavior)")
     args = ap.parse_args()
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")

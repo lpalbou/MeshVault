@@ -168,15 +168,19 @@ Rules an agent must know:
   is honored exactly. Unknown `params` keys are rejected; segments cap at 256/axis.
   Cylinder/cone caps are triangle fans — paintable, poor sculpting targets.
 - **Sculpt** (`sculpt`, `sculpt_stroke` ≤64 points/call): tools draw / inflate /
-  smooth / flatten / pinch / grab; `radius` world units or `radius_rel` (fraction of
-  the object's bounding-sphere radius — scale-free). Edits are seam-safe (welded
-  positions), instancing-aware, and correct under any placement. Quantified returns
-  ({affected, maxDisplacement, newSize}) let you steer without a render; a missed
-  brush is an ERROR that says how to fix it. `reset` restores pre-sculpt geometry.
-  Skinned models are refused. Strokes take explicit `points` OR a parametric
-  `path` ({type:"circle", center, axis, radius, sweep_deg?} / {type:"line", from,
-  to}) that the server samples at the correct density — rings, bands, arcs and
-  lines with zero external math.
+  smooth / flatten / pinch / grab / **hinge**; `radius` world units or `radius_rel`
+  (fraction of the object's bounding-sphere radius — scale-free). `hinge` is the
+  POSE brush (049 field ask): `{pivot, axis, angle_deg}` rotates the brush region
+  RIGIDLY about the pivot line, falloff-weighted — a jaw drop or wing flex in one
+  stamp where radial grabs translate a blob and smear the lips; `center`+`radius`
+  still select the region (chin), the pivot is the rotation origin (jaw hinge).
+  Edits are seam-safe (welded positions), instancing-aware, and correct under any
+  placement. Quantified returns ({affected, maxDisplacement, newSize}) let you
+  steer without a render; a missed brush is an ERROR that says how to fix it.
+  `reset` restores pre-sculpt geometry. Skinned models are refused. Strokes take
+  explicit `points` OR a parametric `path` ({type:"circle", center, axis, radius,
+  sweep_deg?} / {type:"line", from, to}) that the server samples at the correct
+  density — rings, bands, arcs and lines with zero external math.
 - **Paint** (`paint`, `paint_stroke`, `fill_paint`, `clear_paint`): real
   CanvasTexture layers over the existing texture (or authored base color). `opacity`
   is the MAX alpha per call (overlapping stamps never exceed it — no double-blend
@@ -223,8 +227,9 @@ viewer_execute { action: "clone_paint",
 viewer_execute { action: "detect_parts" }        → parts + partitionId (honesty
       notes: fused single-component meshes are NORMAL for image-to-3D output)
 viewer_execute { action: "split_object", params: { axis: "y", at: 1.29 } }
-    → {created: [{objectId, suggestedPivot, ...}], openEdgesAdded, note}
-      (cut faces are HOLLOW — sweeps ≲30°; the new part becomes ACTIVE)
+    → {created: [{objectId, suggestedPivot, ...}], openEdgesAdded, capped, note}
+      (plane cuts CAP by default — flat median-rim-colored caps close both
+      sides, sweeps open wide; cap:false opts back into HOLLOW faces)
 viewer_execute { action: "set_pivot", params: { id: 2, point: <suggestedPivot> } }
 viewer_execute { action: "set_parent", params: { id: 2, parent_id: 1 } }
 viewer_execute { action: "set_keyframe",
@@ -240,6 +245,32 @@ the NEW part is active — miss errors name the object your point actually sits
 on); full-turn rotation keys collapse to identity (key ≤120° steps); sculpt/
 paint/pick refuse while the timeline plays; `reset` after a split restores the
 SPLIT state.
+
+### Morph targets — the talking face (backlog 049)
+
+```
+viewer_execute { action: "begin_morph" }             → base pose snapshot
+   … sculpt the pose (hinge = the jaw/flap brush) …
+viewer_execute { action: "capture_morph", params: { name: "jaw_open" } }
+    → {deltaVertices, maxDelta, budget} — base auto-restores for the next pose
+viewer_execute { action: "set_morph", params: { name: "jaw_open", weight: 0.6 } }
+viewer_execute { action: "set_keyframe",
+                 params: { id: 1, time: 0.8, morphs: { jaw_open: 0.8 } } }
+export_model { path: "/abs/talk.glb" }               → glTF morph targets + weight tracks
+```
+
+Semantics an agent must know (all learned in live field tests): morphs ride
+`export_glb`/`export_model` — NOT `.mvscene`; `reset`/`simplify`/`split_object`
+DROP them loudly. Reloaded GLB morphs are **drive-only**: `set_morph` and
+keyframes work on them (`result.source: "imported"`), `capture_morph`/
+`delete_morph` don't, and `begin_morph` refuses so imported targets are never
+discarded. Sculpting refuses while ANY influence is nonzero (imported or
+captured); plain paint aims at the DISPLAYED morphed surface; blur/clone/mirror
+heal brushes refuse while morphed (their correspondences are base-space).
+Budgets: ≤8 morphs/object, a session delta budget, and a GPU render-cost budget
+(vertices × morphs — every target is shaded every frame; the teaching error
+says to simplify first or delete poses. On software renderers the ceiling is
+~512k vertex-morphs; exceeding it used to wedge the viewer beyond recovery).
 
 ### Render presets (`screenshot { preset }`)
 
@@ -285,6 +316,42 @@ detected as stale, removed, and reported as `stale session file (pid N dead)` in
 of sending pushes to whatever answers that port. To reproduce a camera pose manually,
 use the viewer command: `viewer_execute {action:"set_camera", params:{position,
 target, fov}}`.
+
+### Being watched (observation seat) and the local-LLM pilot
+
+While the app runs, every MCP session automatically publishes its executed
+mutations as an observe-seat session — a human clicks the eye icon in the app
+and watches your strokes live (persistent influence ring + tool readout).
+Set `MESHVAULT_SESSION_LABEL` in the server's environment to name your session
+in that list (default `mcp`).
+
+`examples/pilot/` ships a complete local-agent reference: a LangGraph REPL
+agent on LM Studio (Qwen-class models) that drives these tools with
+interruption support — type while it works to redirect it. See
+`examples/pilot/README.md`.
+
+### In-app AI (Spotlight command bar)
+
+The app embeds the same local-LLM loop with zero setup beyond LM Studio:
+press **⌘K** (or the sparkle toolbar button), type "add a red sphere and dig
+a crater into it", and a backend agent (`backend/ai_pilot.py`) executes every
+tool call **inside your own tab** — you watch your scene change live, no
+observation seat needed. The AI panel (top right) streams the transcript;
+Stop halts at the next safe boundary; typing a new ⌘K instruction while a
+task runs delivers it as a mid-task course correction.
+
+Configuration (environment of the `meshvault` process):
+
+- `MESHVAULT_AI_URL` — OpenAI-compatible server (default
+  `http://127.0.0.1:1234/v1`, LM Studio's default).
+- `MESHVAULT_AI_MODEL` — model id substring; default prefers whatever is
+  already loaded in LM Studio memory (memory-polite), falling back to a
+  Qwen-class model.
+
+Honest limits: the agent is text-only (screenshots are saved to
+`/tmp/meshvault_ai_shots`, it works from quantified results); one task runs
+at a time; a task dies honestly if its tab closes (three consecutive 60 s
+command timeouts).
 
 ### Interpreting `compare_models`
 

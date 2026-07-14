@@ -328,6 +328,82 @@ The decision loop for "this area is over-detailed for what it represents":
   never make the rims diverge) — read `achievedRatio` +
   `locked{ring,seams,borders}`: seam-dense regions decimate less than
   requested, and the return says why. Region cap 50k vertices.
+- `regularize_region { center, radius|radius_rel, target_edge?, detail_rel?,
+  iterations? }` — FULL incremental remesh of the region (Botsch–Kobbelt):
+  SPLIT over-long edges (4/3 × target), COLLAPSE needles (4/5 × target;
+  link-condition + fold-over + no-new-long-edge guards), FLIP edges toward
+  valence 6 (4 boundary; refused across seams/groups/UV-fold), then
+  tangential relaxation. Brushes only MOVE vertices, so quality decays
+  monotonically until this restores it. Same locks as simplify (seams, open
+  rims, boundary ring; openEdges invariant). Default target = the region's
+  CURRENT median edge; on MIXED regions pass an explicit target_edge — a
+  mixed median lies. Read `stretchedEdges{before,after}` (after ≈ 0),
+  `collapsed`, `flipped`, `valence567Share` (≥ 0.9 = regular graph). Texture
+  drifts slightly where vertices slid — blur_paint or repaint to tidy. The
+  sculpt loop: sculpt → regularize_region → paint — or fuse them: every
+  sculpt result carries meshQuality {outOfBandFraction, maxOverMedian,
+  needsRemesh}, and sculpt {remesh:"auto"} runs this pipeline over the stroke
+  region when the trigger fires (default OFF — replay compatibility; morphs
+  suppress it loudly).
+- `deform_region {kind: "taper"|"bend"|"twist"|"stretch", axis:
+  {from: [x,y,z], to: [x,y,z]}, factor? (taper: tip scale; stretch:
+  elongation fraction), angle_deg? (bend/twist), direction? (bend's
+  rotation axis, perpendicular to the spine)}` — closed-form region
+  deformation: `from` anchored, smoothstep to full effect at `to`.
+  Welded, deterministic; regularize_region after strong tapers/bends.
+- `bake_normals {strength: 0.05..10}` — Sobel-derive a tangent-space
+  normal map from the painted HEIGHT channel; wired to the material and
+  exported as a glTF normalMap. Paint height (0.5 flat), bake, re-run
+  after more height painting. Relief that costs no triangles — but
+  never changes the silhouette (use sculpt noise for that).
+- MATERIAL-CHANNEL painting: `paint`/`paint_stroke`/`fill_paint` accept
+  `channel: "albedo"|"roughness"|"metalness"|"emissive"|"height"` —
+  roughness/metalness take `value: 0..1` (0 polished/dielectric, 1
+  rough/metal) and share ONE packed canvas (glTF-native G/B — exports
+  losslessly, round-trip verified); emissive takes `color` (glow);
+  height is a data layer. Surfaces read REAL through light response:
+  worn metal = metalness 1 + roughness grunge; scorch = dark albedo +
+  roughness 0.9. clear_paint restores original response.
+- `paint_pattern {type: noise|grunge|cells|speckle|stripes|gradient,
+  color/color2 | value/value2 (channels), seed, scale, octaves?,
+  density?, contrast?, direction?, opacity?, region?: {center, radius}}`
+  — procedural fills evaluated in WORLD space per texel: continuous
+  across UV seams, scale-consistent, bit-deterministic per {seed,
+  scale}. One call replaces hundred-stamp batteries.
+- `sculpt {tool: "noise", wavelength, octaves: 1-6, seed, ridged?,
+  bias: -1..1}` — seeded fBm displacement along weld normals, sampled
+  at object-LOCAL coords (pattern sticks to the object; same seed =
+  same relief). refine_region to ~wavelength/4 first or it aliases.
+- `merge_objects {ids: [a, b, ...], mode?: "union"|"concat", blend?, name?}`
+  — FUSE several objects into ONE welded surface (the advanced-sculpting
+  bridge: assemble primitives as a draft, merge, then sculpt/dig/refine
+  ACROSS the old part boundaries, then texture the fused skin). union =
+  true CSG (three-bvh-csg): overlapping volumes fuse, interior shells
+  disappear; requires CLOSED sources (open rims refuse with counts) and
+  deliberate 10-20% part overlap (kissing surfaces make degenerate seams).
+  blend (world units) rounds the intersection seams into fillets
+  (deterministic Laplacian, smooth falloff — organic joints in one param;
+  returns {seams:{seamVerts, blended}}). concat = concatenate +
+  position-weld (never refuses; interior walls survive). UVs re-atlas per
+  source; source paint is DROPPED (texture after fusion). Result: NEW id,
+  identity placement (world baked), volatile in manifests — export_glb
+  persists. Budget ≤400k combined source triangles.
+- `symmetry: "x"|"y"|"z"` (sculpt, sculpt_stroke, paint, paint_stroke) —
+  every stamp lands twice: at the point and at its reflection across the
+  object's LOCAL axis plane; direction/pivot/axis are reflected and hinge
+  angles negated (reflections conjugate rotations). Bilateral anatomy and
+  markings in ONE call with exact symmetry — two hand-mirrored calls cost
+  double and drift. Keep refinement density symmetric before mirrored pulls.
+- `sculpt {tool:"dig", center, radius, strength?, direction?, flat_fraction?}`
+  — REMOVE material: flat-bottomed crater along one fixed inward axis
+  (plateau flat_fraction=0.5 + C2 shoulder). strength = plateau depth,
+  clamped per stamp to (1−flat_fraction)×radius (read appliedDepth; repeat
+  for deeper). A 13-ray double-sided probe REFUSES piercing a thin shell,
+  naming the max safe strength — through-cuts are split_object territory.
+  Only welds facing the dig axis move (back sheets never drag). With
+  remesh:"auto" the region pre-splits to radius/5 before displacement.
+  dig = remove volume; grab = move volume. A dig sculpt_stroke carves
+  grooves, stopping honestly at the first refused stamp (pierceRefusedAt).
 - `fix_mesh { operations? }` — default [degenerate, normals]; flipped_faces is
   opt-in (per-mesh winding reversal, closed meshes only). Returns per-op counts
   + issue deltas {openEdges, degenerate}.
@@ -401,11 +477,18 @@ Articulation (F-14 wings, robot arms, nodding heads):
 - `detect_parts` — mesh partition → material groups → welded components, with
   HONESTY notes: image-to-3D outputs are usually ONE fused component; partial
   detection (two of four wheels) is normal. Returns {parts, partitionId}.
-- `split_object { parts+partitionId | axis+at | plane }` — the articulation
-  knife for fused meshes. Plane cuts leave HOLLOW faces (keep sweeps ≲30° or
-  orient cuts away from camera); `suggestedPivot` = the cut centroid — exactly
-  where the hinge belongs. After a split, the NEW part becomes ACTIVE (brushes
-  target it — set_active_object back if painting the body).
+- `split_object { parts+partitionId | axis+at | plane, cap? }` — the
+  articulation knife for fused meshes. Plane cuts CAP BY DEFAULT: flat caps
+  colored by the median rim texel CLOSE the cut faces on both sides (only
+  edges the cut itself opened — pre-existing holes are never sealed;
+  `result.capped` reports loops / capTriangles / MEASURED post-cap openEdges
+  per side, 0 on watertight sources) — sweeps open wide without black gashes,
+  re-splitting a capped piece re-caps cleanly, and caps accept paint (they
+  recolor flatly — one texel). cap:false opts into HOLLOW faces (keep sweeps
+  ≲30° or orient cuts away from camera).
+  `suggestedPivot` = the cut centroid — exactly where the hinge belongs.
+  After a split, the NEW part becomes ACTIVE (brushes target it —
+  set_active_object back if painting the body).
 - `set_pivot { id, point }` — world point; rotation (transforms AND keyframes)
   swings about it afterwards. Never moves the object.
 - `set_parent { id, parent_id, keep_world?=true }` — hierarchy: rotating the
@@ -418,14 +501,40 @@ Articulation (F-14 wings, robot arms, nodding heads):
   screenshot). factor 0 restores EXACTLY; always restore before save/export.
   Proof loop: explode → minGapWorld > 0 → screenshot → restore.
 
+Morph targets (backlog 049 — the talking face; deformations rigid splits
+cannot do):
+
+- The loop: `begin_morph` (snapshot the BASE pose) → sculpt a pose (the
+  `hinge` sculpt tool is the pose brush: {pivot, axis, angle_deg} rotates the
+  region rigidly — a jaw drop in one stamp) → `capture_morph {name:"jaw_open"}`
+  (diff stored as a sparse morph, base auto-restored) → sculpt the next pose →
+  capture… ≤8 morphs/object, delta budget, plus a GPU render-cost budget
+  (vertices × morphs; every target is shaded every frame — the error says to
+  simplify first or delete poses).
+- `set_morph {name, weight 0..1}` blends (GPU, cheap); combinations add
+  linearly. Works on IMPORTED glTF targets too (reloaded exports stay
+  drivable; `result.source:"imported"` — capture/delete are for captured
+  morphs only, and begin_morph refuses while imported targets exist so they
+  can't be discarded). Sculpting is REFUSED while any influence > 0 (brushes
+  edit the BASE but you'd see the morphed surface — zero the weights first);
+  paint aims at the DISPLAYED morphed surface; blur/clone/mirror heal brushes
+  refuse while morphed. list_objects shows {morphs: {name: weight}}.
+- `delete_morph {name?}` removes one/all captured morphs. reset, simplify,
+  split and recompute_normals DROP all morphs loudly (deltas reference the
+  pre-op geometry/base) — export_glb FIRST to keep them.
+- Morphs persist ONLY via export_glb (real glTF morph targets + weight
+  animation; default weights zeroed) — never in .mvscene manifests.
+
 Animation (one scene timeline, seconds everywhere):
 
-- `set_keyframe { id, time, position?|rotation?|quaternion?|scale?, easing?,
-  capture?, channels? }` — pose-then-capture is the natural loop
+- `set_keyframe { id, time, position?|rotation?|quaternion?|scale?, morphs?,
+  easing?, capture?, channels? }` — pose-then-capture is the natural loop
   (set_object_transform / look_at, then capture:true; channels:["rotation"]
-  keeps joint tracks lean). Rotation TEACHING: interpolation takes the SHORT
-  arc and 360° = 0° (identity) — key full turns in steps ≤120°
-  (0/90/180/.../720); the command warns on both traps.
+  keeps joint tracks lean). morphs:{name: weight} keys captured morph weights
+  at `time` — TRS + morphs combine freely in one call (nod + talk). Rotation
+  TEACHING: interpolation takes the SHORT arc and 360° = 0° (identity) — key
+  full turns in steps ≤120° (0/90/180/.../720); the command warns on both
+  traps.
 - `seek_timeline { time }` — DETERMINISTIC: seek → screenshot captures exactly
   that frame. `play_timeline { loop? }` / `pause_timeline` / `get_timeline`
   (shows REQUESTED angles) / `delete_keyframe` / `clear_timeline` (restores

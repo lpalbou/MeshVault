@@ -168,8 +168,9 @@ A single, self-describing command surface designed to be driven by AI agents or 
   `inspect_region`/`simplify_region`/`fix_mesh`/`inspect_texture`/`blur_paint`/`clone_paint`/`resize_texture` (inspection + repair),
   `detect_symmetry`/`mirror_paint`/`undo_paint` (heal from the object's own mirror counterpart + single-slot brush undo, backlog 050),
   `render_texture`/`get_uv_islands`/`transform_uv`/`preview_uv_transform`/`project_paint` (texture forensics, backlog 047),
-  `detect_parts`/`split_object`/`set_parent`/`set_pivot`/`explode_view` (articulation),
-  `set_keyframe`/`delete_keyframe`/`get_timeline`/`clear_timeline`/`set_timeline`/`play_timeline`/`pause_timeline`/`seek_timeline` (scene timeline),
+  `detect_parts`/`split_object` (incl. `cap:true` cut-face capping, backlog 051)/`set_parent`/`set_pivot`/`explode_view` (articulation),
+  `begin_morph`/`capture_morph`/`set_morph`/`delete_morph` (sculpt-pose morph targets, backlog 049),
+  `set_keyframe` (TRS + `morphs` weight channels)/`delete_keyframe`/`get_timeline`/`clear_timeline`/`set_timeline`/`play_timeline`/`pause_timeline`/`seek_timeline` (scene timeline),
   `play_animation`/`pause_animation`/`set_animation_time`/`set_animation_speed` (authored clips),
   `measure`/`set_measure_mode`, `export_obj`/`export_glb` (animation + texture-size tiers),
   `screenshot`/`capture_views`/`turntable` (hero shots: resolution, transparency, fog/ground/SSAO control),
@@ -213,6 +214,21 @@ deterministic `seek_timeline` → screenshot), requested-Euler tracking (the
 render-loop integration (keep-alive while playing; rig sized once per play from
 the swept volume). The panel is a thin polling view — the render loop owns the
 only clock.
+
+### `viewer/capping.js` — cut-face capping (backlog 051)
+Became-open rim collection (welded edge multiplicity diff — never plane
+tolerances), loop walking with chain/bowtie disclosure, duplicated rim
+vertices, projected ear-clip + centroid-fan fallback, signed-area orientation
+in mesh-local space, rim-sampled UV collapse. Closure recounted via the shared
+`meshIssueCounts` semantics.
+
+### `viewer/morphs.js` — sculpt-pose morph targets (backlog 049)
+begin/capture/set/delete morph over an explicit per-entry base snapshot;
+per-weld sparse deltas (budgeted) materialized as relative three.js
+morphAttributes with dispose-on-content-change (r170's morph texture rebuilds
+only on count change); bake-time delta transforms (linear part); loud drops on
+reset/geometry replacement; flat `morph:<name>` scalar timeline channels; glTF
+morph-target + weight-track export in both GLB paths.
 
 ### `viewer/articulation.js` + `viewer/repair.js` — parts & repair (backlog 046)
 `detect_parts` (mesh partition → material groups → welded connected components,

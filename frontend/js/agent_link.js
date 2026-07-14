@@ -41,6 +41,17 @@ export class AgentLink {
         this._getLoadedAssetKey = deps.getLoadedAssetKey;
         this._toast = deps.showToast;
         this._eventSource = null;
+        // Observation seat (review B5): while this tab observes a performer,
+        // (a) open_asset pushes are IGNORED — they'd REPLACE the replica scene
+        // and break object-id alignment mid-replay; (b) reverse-bridge state
+        // reporting pauses — an observing tab would otherwise overwrite "what
+        // the human is looking at" with a mirror of the agent's own work.
+        this.observing = false;
+        this.onObserveSessionStarted = null;
+        // In-app AI bridge (ai_bar.js): receives ai_command / ai_progress
+        // messages — command execution must work even while observing is
+        // false/true, so it is a separate hook from the open_asset gate.
+        this.onAiEvent = null;
     }
 
     // ==========================================================
@@ -164,6 +175,7 @@ export class AgentLink {
         if (this._reportTimer) return;
         this._lastReport = "";
         this._reportTimer = setInterval(async () => {
+            if (this.observing) return;   // never report the replica as "the human"
             let report = null;
             try { report = getReport(); } catch { return; }
             if (!report) return;
@@ -196,7 +208,14 @@ export class AgentLink {
         this._eventSource.onmessage = (e) => {
             let msg;
             try { msg = JSON.parse(e.data); } catch { return; }
-            if (msg.type === "open_asset") this._handleOpen(msg);
+            if (msg.type === "open_asset") {
+                if (this.observing) return;   // the seat already mirrors the agent
+                this._handleOpen(msg);
+            } else if (msg.type === "observe_session_started") {
+                if (this.onObserveSessionStarted) this.onObserveSessionStarted(msg);
+            } else if (msg.type === "ai_command" || msg.type === "ai_progress") {
+                if (this.onAiEvent) this.onAiEvent(msg);
+            }
         };
     }
 

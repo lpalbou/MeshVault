@@ -13,7 +13,8 @@
  */
 
 import * as THREE from "three";
-import { ensureMutable } from "./sculpt.js";
+import { dropMorphs } from "./morphs.js";
+import { ensureMutable, ensureFreshNormals } from "./sculpt.js";
 
 const REGION_VERTEX_CAP = 50000;
 const INSPECT_TRIANGLE_BUDGET = 300000;
@@ -87,9 +88,11 @@ function weldMap(geometry) {
  * @param tris      triangle list [[a,b,c], ...] (raw indices)
  * @param locked    Set of raw vertex indices that must never move/disappear
  * @param keepRatio fraction of UNLOCKED vertices to keep
+ * @param minArea2  twice the minimum face area a collapse may produce
+ *                  (fix_mesh's degenerate threshold — shared rule)
  * @returns surviving triangle list (raw indices)
  */
-function collapseRegion(posAttr, tris, locked, keepRatio) {
+function collapseRegion(posAttr, tris, locked, keepRatio, minArea2 = 0) {
     // Adjacency + face lists per vertex (raw indices — seams were pre-locked).
     const faces = tris.map((t, i) => ({ v: [t[0], t[1], t[2]], alive: true, id: i }));
     const vertFaces = new Map();
@@ -138,6 +141,43 @@ function collapseRegion(posAttr, tris, locked, keepRatio) {
         return len * curvature;
     };
 
+    /**
+     * Collapse safety (field bug F1-1 — refined red-green topology has the
+     * irregular valences uniform meshes never show, and the naive collapse
+     * silently manufactured fins, duplicate faces and open edges there):
+     * 1. LINK CONDITION: every common neighbor of u and v must lie on a face
+     *    containing BOTH u and v (the straddle faces). Extra common neighbors
+     *    mean the collapse folds two fans onto each other — duplicate faces
+     *    that later dedup into open edges.
+     * 2. GEOMETRY: no rewritten face may drop under fix_mesh's degenerate
+     *    area threshold (emit==drop rule) or FLIP its normal (fold-over).
+     */
+    const _n1 = new THREE.Vector3(), _n2 = new THREE.Vector3();
+    const faceNormalAt = (a, b, c, out) => {
+        vp(a, _a); vp(b, _b); vp(c, _c);
+        _cb.subVectors(_c, _b); _ab.subVectors(_a, _b);
+        return out.copy(_cb.cross(_ab));   // NOT normalized: length = 2×area
+    };
+    const collapseSafe = (u, v) => {
+        const nu = neighbors.get(u), nv = neighbors.get(v);
+        if (!nu || !nv) return false;
+        let common = 0;
+        for (const w of nu) if (nv.has(w)) common++;
+        const uFaces = (vertFaces.get(u) || []).filter((f) => f.alive);
+        let straddle = 0;
+        for (const f of uFaces) if (f.v.includes(v)) straddle++;
+        if (common !== straddle) return false;   // link condition
+        for (const f of uFaces) {
+            if (f.v.includes(v)) continue;
+            const rew = f.v.map((x) => (x === u ? v : x));
+            faceNormalAt(f.v[0], f.v[1], f.v[2], _n1);
+            faceNormalAt(rew[0], rew[1], rew[2], _n2);
+            if (_n2.length() < minArea2) return false;       // degenerate result
+            if (_n1.dot(_n2) < 0) return false;              // fold-over
+        }
+        return true;
+    };
+
     const best = new Map();   // u -> {v, cost}
     const computeVertexCost = (u) => {
         if (locked.has(u)) { best.delete(u); return; }
@@ -166,6 +206,7 @@ function collapseRegion(posAttr, tris, locked, keepRatio) {
         const v = rec.v;
         best.delete(u);
         if (v === null) { removed++; continue; }
+        if (!collapseSafe(u, v)) continue;   // u stays (honest under-decimation)
 
         // Collapse u -> v: v NEVER MOVES (boundary-exactness invariant).
         const uFaces = (vertFaces.get(u) || []).filter((f) => f.alive);
@@ -205,6 +246,10 @@ function collapseRegion(posAttr, tris, locked, keepRatio) {
  */
 export function simplifyRegion(viewer, opts = {}) {
     const entry = requireActive(viewer);
+    // Bulk-replay normal deferral: the rebuild copies normal attributes.
+    entry.model.traverse((c) => {
+        if (c.isMesh && c.geometry) ensureFreshNormals(c.geometry);
+    });
     const radius = resolveRadius(viewer, opts, "simplify_region");
     const ratio = opts.ratio;
     if (!(ratio > 0 && ratio < 1)) {
@@ -300,7 +345,12 @@ export function simplifyRegion(viewer, opts = {}) {
         }
 
         before += selected.length;
-        const { tris: survivors, removed } = collapseRegion(pos, selected, locked, ratio);
+        // Degenerate threshold in fix_mesh's OWN scale (emit==drop rule).
+        geometry.computeBoundingBox();
+        const diag = geometry.boundingBox
+            ? geometry.boundingBox.getSize(new THREE.Vector3()).length() || 1 : 1;
+        const { tris: survivors, removed } = collapseRegion(
+            pos, selected, locked, ratio, 2 * diag * 1e-7);
         after += survivors.length;
         removedVerts += removed;
 
@@ -350,6 +400,7 @@ export function simplifyRegion(viewer, opts = {}) {
     // Geometry replaced: snapshot baseline moves, partitions invalidate.
     const hadEdits = !!entry.originalState;
     entry.originalState = null;
+    const morphNote = dropMorphs(viewer, entry, "simplify_region");
     entry.geometryRev++;
     entry._partition = null;
     entry.modified = true;
@@ -366,6 +417,7 @@ export function simplifyRegion(viewer, opts = {}) {
     if (hadEdits) {
         note = "reset baseline moved: earlier sculpt/bake edits are now permanent. " + note;
     }
+    if (morphNote) note = morphNote + " " + note;
     return {
         region: { trianglesBefore: before, trianglesAfter: after },
         object: { triangles: entry.stats.faces },
@@ -420,7 +472,7 @@ function recomputeInteriorNormals(geo, remap, lockedRaw) {
  *  degenerates here read 439 while stats read 0 for the identical geometry).
  *  Dropping degenerates (fix_mesh) then HONESTLY raises openEdges: the crack
  *  was real, previously bridged by zero-area faces. */
-function meshIssueCounts(geometry) {
+export function meshIssueCounts(geometry) {
     const pos = geometry.getAttribute("position");
     const index = geometry.getIndex();
     const triCount = triCountOf(geometry);

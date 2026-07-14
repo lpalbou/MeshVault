@@ -150,7 +150,9 @@ def test_articulation_timeline(mv_app):
               r["ok"] and len(r["result"]["parts"]) <= 1
               and "split_object" in r["result"]["note"],
               json.dumps(r.get("result", {}).get("note", ""))[:90])
-        r = mv("split_object", {"axis": "x", "at": 0.5})
+        # cap:False — this check verifies the HOLLOW disclosure path (plane
+        # cuts cap by default since the 051 field verdict).
+        r = mv("split_object", {"axis": "x", "at": 0.5, "cap": False})
         ok_split = r["ok"] and r["result"]["created"][0]["objectId"]
         check("plane split creates object", bool(ok_split), json.dumps(r.get("result", r))[:140])
         if ok_split:

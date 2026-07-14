@@ -4,6 +4,102 @@ This file captures critical implementation insights and design logics that are e
 
 ---
 
+## Mesh fusion: CSG union ships with T-junction stitching or it ships broken
+
+### Problem
+"Merge sphere1 with box1 so I can sculpt across them" sounds like one library call (three-bvh-csg union). The naive integration measured 918 open edges on a two-sphere union — the library clips each brush against the other INDEPENDENTLY, so along the intersection curve side A subdivides at A's edge crossings and side B at B's: mutual T-junctions by construction. Consequences: `get_mesh_stats` reports a torn mesh, dig's piercing guard mistrusts the shell, and a fused object can never be union-merged AGAIN (the closed-source pre-check refuses it).
+
+### Fix chain (each step necessary, measured on the two-sphere case)
+1. three's `mergeVertices` CANNOT stitch it — it hashes ALL attributes, and the per-source UV atlas cells deliberately differ at the seam. Weld by POSITION only: snap every vertex in a quantization cell (5× the issue-counter quantum) to the cell's first-seen representative.
+2. Stitch the T-junctions: detect open (use-count-1) canonical edges → find seam vertices lying ON them (parametric projection, perpendicular tolerance) → re-fan the owning triangle through the seam points (positions = the seam vertex's canonical position EXACTLY; UVs/normals interpolated along the OWNING side). Deterministic: fixed iteration order, parametric sort, canonical-id tie-break. 918 → 2 open edges.
+3. Tolerate trace residuals in the union pre-check (≤ max(8, 0.2%)) so fusion composes with itself.
+4. Skipping zero-area fan slivers is a false economy: it reopened 6 edges to remove 1 non-manifold edge. Keep the slivers; the sculpt engine's position-keyed weld is indifferent to them.
+
+### Field gauntlet addenda (three fusion builds, 2026-07-14)
+- **Union dirtiness scales with INTERSECTION COMPLEXITY, not source count**: 2 spheres → clean; 13 sources → 43 open edges; 18 sources with tangent overlaps → 313 open + 2,770 non-manifold. Tangent/kissing contacts are the poison — the skill's "overlap deliberately 10-20%" rule is load-bearing.
+- **`fix_mesh {degenerate}` on fused meshes PUNCHES HOLES** (2006 dropped triangles → open edges 51→570; independently reproduced 1163 → 43→887). CSG seam slivers are legitimate geometry. Warned in the merge note + skill.
+- **Tangent-face unions can silently inflate triangle counts ~×480** (X-Wing builder: coplanar box faces fused into confetti). Same root: don't union kissing faces, embed them.
+- **Refine budgets on fresh CSG output run ~3× the formula** (coarse union mesh + conformality cascades) — take `nextPassNeeds` from the refusal.
+- **Multi-candidate `compare_models` crashed the MCP server** ("Connection closed" after 152 s, 2 candidates); single-candidate runs took 320-687 s. compare_models is the new slowest tool in the box — investigate its registration loop before recommending it in-loop.
+- Outcome evidence the workflow works: owl chamferMeanNormalized 0.0255 → **0.0172 (−33%)** with fusion; the falcon's mandibles finally GROW from the hull; the fillet `blend` was cited by every builder as the single best parameter.
+
+### Design decisions that held
+- Seam FILLETS (`blend`) = Laplacian relaxation of the intersection-curve neighborhood with smooth falloff, seam vertices found via per-source BVH distance (< eps of ≥2 sources). Plain Laplacian is CORRECT here — a fillet wants volume rounding at the crease.
+- UV re-atlas into per-source grid cells before union: CSG interpolates UVs within each brush, so cells survive, and post-fusion painting never cross-talks between what used to be different objects.
+- Drop source paint loudly. Fusion is for the DRAFT stage; texture after fusing is the right order anyway (the field workflow: assemble → fuse → sculpt → texture).
+- Union refuses OPEN sources with a teaching error (CSG classification on open shells is silent garbage); `concat` mode (concatenate + position-weld) is the never-refusing fallback — the engine's position-keyed weld already makes coincident boundary vertices sculpt together.
+
+---
+
+## The five-agent performance gauntlet (2026-07-14) — measured causes only
+
+A five-front adversarial investigation (refine over-generation, sculpt hotspots, paint hotspots, replay residuals, probe/transport costs) after the field verdict "you should never have to add 100k triangles in a single sequence". Every fix below shipped with before/after numbers; scratch reports in /tmp/perf_agent_[1-5].md.
+
+1. **Refine flooding was mesh-quality-driven, not parameter-driven.** A r=0.3 refine on the shark capsule added 198k triangles — 93% OUTSIDE the requested ball — then deadlocked on an impossible budget refusal. Cause chain: capsule stock ships ~50:1 sliver side-quads (single-segment lathe body) → the ABSOLUTE 12° quality gate red-marked every sliver → red children of slivers are similar to their parents (re-trigger each pass) → the 2-marked closure transported marks region-blind. Fixes: cascade marks clamped to 1.5×r (beyond it, 2-marked triangles emit a conformal 1→3 split), the gate became RELATIVE (a green split not meaningfully worse than its parent stays green), capsule bodies get square quads by construction, and budget refusals diagnose flooding (marked ≫ over-target ⇒ "regularize first"). Shark scenario after: **416 triangles added, no refusal** (was 198k + deadlock). Uniform density was also refuted empirically: graded nested rings sculpt identically at 13% of the triangles.
+2. **Live sculpt time was 75-80% advisory surveys** (three full-mesh edge scans per command feeding `meshQuality`). Fixed: one f64 world-position cache + stamp-AABB box cull per survey, and the third scan derives from the post-survey's own lengths. The advisory feeds the remesh:auto trigger, so everything stays bit-identical (multiset-equal lengths verified).
+3. **Paint's candidate scan re-transformed every triangle per stamp** (46M reads for a 64-stamp stroke on 240k). A per-command Float64 centroid cache keeps candidate selection bit-identical at ~20× less cost. clone_paint gained mirror_paint's 600M correspondence budget + per-texel centroid prefilter (a r=0.4 heal ran 119 s with no way to know it wasn't hung).
+4. **SwiftShader canvas readback sync: 23.5 SECONDS.** A 2048² paint layer created without `willReadFrequently` stays GPU-backed; the first getImageData after any draw forces a multi-second sync (measured 23.5 s for a 64×64 read; 2 ms with the flag). Every canvas that BECOMES a paint layer now passes `{willReadFrequently: true}`. This single flag was most of the "first paint is frozen" pain.
+5. **Raycast/pick were linear scans while a BVH library sat in the bundle.** three-mesh-bvh was already a dependency (symmetry, heatmap) but never wired into `castInto`. Now: lazy `computeBoundsTree({indirect: true})` per geometry keyed on geometryRev. `indirect` is LOAD-BEARING — the default build reorders the geometry index, and several algorithms break ties by triangle iteration order (determinism). Morphed/skinned meshes skip acceleration (the BVH indexes BASE positions; three's default raycast handles displaced surfaces — caught by the morph suite). 25.9 → ~0.9 ms/ray measured.
+6. **Replay divergence P0: object ids survived unload.** `_clearAllObjects` never reset `_nextObjectId`, so any replica rebuild after an unload (backward seeks, re-joins) addressed objects by ids that no longer matched — 438/510 commands silently failed. One line: ids restart at 1 on clear.
+7. **Transport was innocent**: MCP protocol tax ~20-52 ms/call (batch amortizes it), SSE streaming ~1% of replay, telemetry microseconds. Screenshots are sync-bound, not pixel-bound (192²≈1024² cost; each NEW size pays a 2.4-28 s warm; `ssao:false` is NOT faster — docstring claim refuted and removed from guidance).
+
+### Rule
+Profile before optimizing, and profile the EPILOGUE (finalization, advisories, readbacks, syncs) before the algorithm. Four of the seven findings were per-command bookkeeping, not the core math. And when a budget refusal quotes an absurd number, treat it as a diagnosis of the INPUT (mesh quality, region shape), never as a dare to raise the budget.
+
+---
+
+## Replay speed lives in per-command finalization, not command count
+
+### Problem
+Observation-seat catch-up and recording replay of sculpt-heavy sessions were reported "extremely slow" (2026-07-14). The command COUNT was not the issue — the per-command finalization was: `computeVertexNormals()` over the whole geometry after EVERY replayed stamp (O(V) each, ~200 ms on a 60k-vert mesh), plus three full-mesh edge surveys per sculpt that only feed a returned advisory nobody reads during fast-forward.
+
+### Fix pattern (deferral with read-through freshness)
+Mark normals dirty during bulk replay instead of recomputing; EVERY reader calls `ensureFreshNormals()` first (sculpt direction defaults, inflate per-weld normals, refine/simplify/split attribute copies). Any command that needs normals sees exactly the values eager recompute would have produced — determinism verified by bit-identical position AND normal hashes across live vs bulk paths on a mixed sequence including a topology op. Settle all dirty geometries once in `endBulkReplay` BEFORE the first visible frame. Result: 8.6× on the sculpt benchmark.
+
+### The perceptual half
+Microtask-chained replay never yields a frame: progress banners UPDATE but never PAINT, so even a fast catch-up reads as a frozen tab. Yield (`setTimeout 0`) every N commands and move the progress UI — perceived speed is part of speed.
+
+### Rule
+When replay is slow, profile the per-command epilogue before touching the pipeline. Deferral is only legal with read-through freshness at every consumer — a deferred cache with even one stale reader silently diverges replicas, which is worse than slow.
+
+---
+
+## Sculpting is a probe-pull-reprobe loop, not coordinate playback
+
+### Problem
+Agent builds kept defaulting to primitive assembly + paint because sculpting "didn't work": pulls landed in air, fins came out as accordion folds, tapers touched nothing, and each bilateral feature cost double commands that drifted apart.
+
+### Root causes (shark experiment, 2026-07-14)
+1. **Brushes select by surface proximity** — a `pinch` centered on the medial axis of a 0.32-radius body gathers nothing. Every shaping brush must be CENTERED ON THE SURFACE (raycast-probed), pulling toward/away from the axis.
+2. **Pulls move the surface** — the second pull at the same coordinates sculpts where the crest WAS. Extrusions (fins/ears/limbs) only work as probe → pull → RE-PROBE loops with guarded acceptance (reject re-probe hits that jumped to another feature).
+3. **Sharp falloff on thin features crumples them** — a membrane pulled with `falloff:"sharp"` folds like an accordion because the falloff cliff shears adjacent rings. Pull with smooth falloff at descending radii, THEN `pinch` to thin the blade, then smooth the base seam.
+4. **Hand-mirrored bilateral calls drift and double cost** — fixed in the engine: `symmetry:"x"|"y"|"z"` mirrors stamps across the object's local plane with direction/pivot/axis reflected and hinge angles negated (reflection conjugates rotations). Refinement density must be mirrored too, or the reflected stamp lands on coarser facets and the sides diverge.
+
+### Rule
+The sculpt loop for SHAPES (not just detail) is: silhouette render → probe → soft pull → re-probe → … → pinch/sharpen → regularize → next feature. Assembly is for machines; stock + brushes is for anything alive. Both are legitimate; the skill's shark playbook carries the transferable sequence.
+
+---
+
+## The product is the MCP + skill — dogfood through them, not around them
+
+### Problem
+For weeks, live demos and performances (portrait repaint, Death Star, Mickey) drove the viewer's control API **directly in a headless page** — same commands, same observe hub, but not the MCP protocol path. Those runs proved the *engine*; they proved nothing about the *product*, which is "any external agent can build/edit 3D scenes through `meshvault-mcp` + the AI skill".
+
+### What only the true path found (2026-07-13, Falcon experiment)
+Running the same class of builds through the real stack — a stdio MCP client (X-Wing, Falcon agency) and a *genuinely foreign* agent (LM Studio pilot, qwen3-next-80b) — surfaced failure modes the expert-driven direct-page sessions could never hit:
+- **Colors as `[1,0,0]` arrays painted WHITE while returning ok:true** (String() coercion → THREE.Color fallback). An expert never passes arrays; a local LLM did immediately. Fixed: string params refuse arrays/objects with a teaching error.
+- **Invented actions caused 60-step retry ping-pong** (`set_object_color` ↔ `list_commands`). Fixed three ways: intent-keyword suggestions in the unknown-action error, a loop breaker in the agent runner, skill golden rule #0 (never repeat a failing call verbatim).
+- **`set_active_object` needed a `name` path** — conversational agents think in names, not ids.
+- **Prompt size is a latency budget on local models**: embedding the full skill cost 60–140 s *per turn* on an 80B; golden-rules-only cut a smoke task from 17 min to 2.6 min.
+- Protocol-level constraints (MCP result truncation, image content blocks, JIT model loading) that page.evaluate scripts bypass entirely.
+
+### Rule
+1. Every demo/performance/experiment script goes through `meshvault-mcp` (the stdio scaffold in the skill's Session setup). Driving the page directly is allowed only for *engine* debugging, never as evidence a capability "works for agents".
+2. Keep BOTH kinds of field runs: scripted expert runs validate the surface's ceiling; foreign-agent runs (local pilot) find the failure modes experts never trigger. The second kind is where the teaching-error work comes from.
+3. A capability does not exist until it has been exercised end-to-end through the MCP by something that is not its author.
+
+---
+
 ## GLB Export — UV origin vs `Texture.flipY` (Three.js / glTF 2.0)
 
 ### Problem
@@ -532,6 +628,154 @@ Renders illustrate; numbers decide. Proof packs live outside the repo
 (~/MeshVault_assets/proofs/ + INDEX.md) because GLBs and screenshots are
 artifacts, not source.
 
+## Cut-face capping (backlog 051, v0.9.0)
+
+### The rim is a topology diff, not a geometric neighborhood
+Plane cuts classify WHOLE triangles by centroid: no vertex lies on the plane,
+and rim vertices scatter up to a full triangle's extent off it. Any
+"vertices within tolerance of the plane" rim definition is therefore wrong
+twice — it misses real rim vertices AND catches pre-existing open boundaries
+the plane grazes (sealing holes the user didn't cut). The correct rim is the
+set of edges that BECAME open: welded edges with multiplicity 1 on one side
+and >0 on the other, from the pre-split classification. Pre-open edges never
+qualify by construction.
+
+### Duplicate cap vertices; the rim then locks itself
+Caps that reuse rim indices inherit side-wall normals (shading garbage) and
+side-wall UVs (stretched garbage), and writing cap UVs onto shared vertices
+corrupts the walls. Duplicated rim vertices (same position, cap normal, cap
+UV) fix all three — and as a free consequence the rim positions become
+multi-member welds, which simplify_region already hard-locks as seams: no new
+lock category needed after capping.
+
+### Ear-clip for quality, fan for closure — and RECOUNT
+Ear clipping with strictly-convex ears produces quality caps but legitimately
+fails on staircase rims with collinear runs (axis-aligned cuts through boxes);
+zero-area ears would emit degenerate triangles that fix_mesh later drops,
+REOPENING pinholes. A centroid fan closes every rim edge exactly once by
+construction (possibly self-intersecting on non-convex loops — cosmetic, not
+topological). Ship ear-clip → fan fallback, and report the MEASURED post-cap
+openEdges (shared welded semantics), never the assumption. Winding: orient
+each loop by projected signed area against the signed classification normal,
+in MESH-LOCAL space — closing a mesh ARMS fix_mesh's flipped_faces gate, so an
+inverted cap would flip the whole mesh's winding downstream.
+Two audit corrections that shipped before the field test:
+- EMIT thresholds must EQUAL downstream DROP thresholds: the ear-accept
+  epsilon originally sat ~3 orders of magnitude below fix_mesh's degenerate
+  cutoff (diag × 1e-7) — caps in the gap would be emitted here and dropped
+  there, silently reopening pinholes. Any producer/consumer pair around a
+  degeneracy threshold must share ONE rule.
+- Cap UVs collapse to ONE loop-anchor UV. Copying each cap vertex's own rim
+  UV makes cap triangles INTERPOLATE across the atlas — on fragmented
+  photogrammetry atlases that renders as smeared multi-island streaks, the
+  exact "stretched garbage" capping exists to kill. One anchor = one flat
+  sample of the adjacent surface.
+
+### Field corrections (051 live gauntlet): rims are mod-2, junctions are angular
+- **Rim membership is the mod-2 (Z₂) boundary rule, not "exactly one owner".**
+  Scanned doubled-shell geometry has cut edges owned by 3+ triangles; the
+  naive `sideCount === 1` rule left degree-1 dead ends no loop walk can close
+  (a 256-edge permanent hole on the chest re-split). A side's edge BECAME
+  boundary iff its side-count is ODD and the pre-split total was EVEN (odd
+  totals are pre-existing boundaries — still never sealed). Mod-2 boundaries
+  are cycles, so every rim vertex has even degree and a closed-loop
+  decomposition always exists.
+- **Loop walks continue by ANGLE at junctions.** Re-cutting through an
+  existing cap crosses the previous rim's welded ring at 4-degree junctions
+  (cap duplicates weld with wall vertices). Rejecting branches as bowties
+  skips whole rims; the planar boundary-tracing rule — leftmost turn in the
+  cap plane from the incoming direction — decomposes tangent/crossing
+  boundaries into simple non-crossing loops. Vertex revisits at junctions are
+  legitimate (each occurrence gets its own cap duplicate).
+- **Anchor color: median of the rim, not vertex[0].** A fragmented atlas
+  makes the arbitrary first rim vertex a color lottery (an olive-gray cap on
+  a wooden chest when its texel lands off-island). Sample all rim vertices'
+  texels through a small readback canvas (when the base texture is drawable)
+  and anchor at the vertex nearest the component-wise MEDIAN — deterministic
+  and plausible; unreadable textures (KTX2/GPU-only, tainted) fall back to
+  vertex[0].
+- **UV-degenerate triangles need their own paint path.** A cap's collapsed
+  UVs give zero UV-space area: the barycentric rasterizer emits no texels, so
+  caps rejected paint with "Brush touched no surface". Stamp such triangles'
+  single texel directly when the brush touches them in WORLD space (closest
+  point on triangle, not centroid — cap fans are huge and their centroids sit
+  outside small brushes). Painting a cap = flatly recoloring it, honestly
+  reflecting its one-texel nature.
+
+## Morph targets via sculpt-pose capture (backlog 049, v0.9.0)
+
+### r170's morph texture rebuilds on COUNT change only
+Texture-based morphs cache a DataArrayTexture keyed by morph count —
+re-capturing an existing morph (same count, new content) renders the OLD
+deltas forever. After any content change: `geometry.dispose()` (its dispose
+listener evicts the texture; three re-uploads next frame). Cheap at capture
+cadence.
+
+### applyMatrix4 never touches morphAttributes
+Vertex bakes (center/ground/rotate/orient) and export-time node-relative
+baking transform position/normal/tangent only. Morph deltas are position
+DIFFERENCES: the affine part cancels, so they transform by the bake matrix's
+linear 3×3 (exact under non-uniform scale; transformDirection would normalize
+and destroy magnitudes). The morph BASE transforms by the full matrix.
+
+### The base is its own snapshot, and reset must drop morphs
+Deltas are relative to an explicit sculpted base (entry.morphBase) — not the
+reset snapshot (the artist sculpts a base first) and not the UI undo slot
+(overwritten every gesture). Consequently `reset` (which restores ORIGINAL
+positions) must DROP morphs loudly: `original + (pose − sculptedBase)` is a
+shape nobody authored. Same for geometry-replacing ops (vertex indexing
+changes). "Morphs survive like pivots" is wrong — pivots don't reference
+geometry that reset changes.
+
+### Scalar timeline channels: flat keys, and audit every serializer
+Morph weights ride the existing per-object track as flat `morph:<name>` keys
+(nested objects break every Object.values consumer: durations, ticks, export
+scans). Flat is necessary but not sufficient — `k.v.map(...)` crashes on
+scalars in get_timeline/serializeTimeline, and delete-all-channels paths that
+hard-code ["position","rotation","scale"] leave morph-only tracks undeletable.
+When adding a channel KIND, grep every consumer of the channel dictionary.
+
+### Field corrections (049 live gauntlet): budgets, imports, and two spaces
+- **Morph GPU cost is per-FRAME, and unbudgeted it wedges the viewer.**
+  three's texture-based morph path shades EVERY target on EVERY vertex each
+  frame, independent of weights. 8 full-head morphs on 99k vertices made
+  each SwiftShader render outlive the command timeout — no rejection, no
+  recovery, session dead. Budget vertex×morph products at capture time,
+  sized to the MEASURED renderer (UNMASKED_RENDERER_WEBGL: ~512k software /
+  8M hardware) with a teaching error (delete poses / simplify BEFORE
+  begin_morph). Sparse-delta budgets don't catch this: the cost is dense.
+- **Imported glTF morphs are a second morph class: drive-only.** Reloaded
+  exports carry dense morphAttributes + mesh dictionaries but no sparse
+  masters — set_morph/keyframes must drive them by dictionary (they did not:
+  the field's "dead end" bug); capture/delete must refuse honestly; and
+  begin_morph must refuse while they exist (rebuildMorphAttributes
+  materializes OUR morphs only — capturing would silently discard the
+  asset's). Guards must check LIVE mesh influences, not just the session
+  weight ledger (paused clips and imported morphs displace the surface
+  outside it). Corollary: updateMorphTargets() no-ops on morph-FREE
+  geometry — clear dictionaries explicitly when dropping morphs, or deleted
+  names stay addressable as ghosts.
+- **Brushes must aim at DISPLAYED positions under active morphs.** pick and
+  raycast are morph-aware (three applies influences on CPU); the paint
+  rasterizer read BASE positions — aim-what-you-see broke exactly on the
+  open mouth (96 texels "painted", nothing visible where aimed). Compute
+  displayed positions (base + Σ weight × delta, relative AND absolute
+  conventions) for paint/heal footprints; refuse base-space donor brushes
+  (blur/clone/mirror) while morphed instead of silently mis-sourcing.
+- **Every vertex-writing bake must transform the morph base too.** rotate/
+  recenter/ground/auto-orient wrote vertices AFTER _bakeWorldTransforms with
+  their own matrices — the stored base never saw them, so the next capture
+  diffed ALL vertices against a stale base, silently encoding the rotation
+  into the morph. One shared morph-aware matrix-application path for all
+  bakes; as a bonus applyMatrix4 rotates authored normals exactly instead of
+  recomputing (and discarding) them.
+- **The pose brush the field asked for is a rotation, not a translation.**
+  Radial grabs translate a blob — chins drop but lips smear. `hinge`
+  {pivot, axis, angle_deg} rotates the brush region rigidly about a line
+  with falloff: selection (center+radius) and transform (pivot+axis+angle)
+  are DIFFERENT anatomy (chin vs jaw hinge under the ears). One stamp = a
+  believable jaw drop.
+
 ## Symmetry healing (backlog 050, v0.8.0)
 
 ### Reflected correspondence mirrors content BY ITSELF — a flip step is a bug
@@ -644,3 +888,130 @@ session-local) and never positionally against the loaded result (partial loads
 shift positions). Application is two-pass: create everything first, then wire
 parents/pivots/timeline through the index→id map, so forward references and
 per-object load failures degrade without corrupting the rest.
+
+## Adaptive resolution & the observation seat (v0.9.0)
+
+### The resolution trio: refine densifies, simplify coarsens, regularize equalizes
+`refine_region` (conformal red-green splits: 2-marked triangles close to red,
+thin 1-marked children upgrade to red under a ~12° floor) adds facets where
+detail is needed; `simplify_region` removes them where it is not; both lock
+seams, open rims and the boundary ring. The third failure class appeared in
+the field: heavy grab pulls neither add nor remove facets — they STRETCH them
+into long slivers that shade as streaks and smear later paint.
+`regularize_region` closes the trio: 4/3-target conformal splits (reusing the
+refine pass, so no new crack class) + Jacobi tangential relaxation (move each
+interior weld toward its neighbor average, subtract the normal component —
+shape preserved to first order, triangle shapes equalized). Relaxation moves
+vertices, so normals recompute on commit (the sculpt rule), and texture
+drifts slightly where vertices slid within the surface — disclosed in the
+result note, tidied with blur_paint/repaint.
+
+### The median of a mixed region lies
+Zero-config regularize targets the region's CURRENT median edge — correct on
+a homogeneous region ("equalize at the density you have"). But a brush that
+covers both a dense crop and a stretched curtain gets a blended median that
+marks tens of thousands of edges "stretched"; the split budget dies before
+the relaxation matters (field numbers: 36,303 → 35,659 after a full budget).
+Same region with an explicit coarse `target_edge`: 430 → 8. Statistics
+computed over deliberately mixed populations are not defaults, they are
+traps; the command description now teaches the explicit-target escape.
+
+### Command replication is the observation mechanism
+The observation seat replays the performer's top-level mutating commands
+through the observer's own deterministic engine (per-session ring log,
+cursor-based SSE, contiguous seqs, lossy honesty, fingerprint divergence
+checks). Native rendering quality for free; the cost is strict determinism —
+`capture:true` keyframes canonicalize to explicit values at publish,
+`project_paint` carries a camera envelope, and `auto_orient`'s power
+iteration needed fixed seeds (Math.random() was genuinely non-replayable).
+
+### Tool visibility: the ring is the tool; words belong in the panel
+The first ghost-brush design spawned a fading ring per stamp with a floating
+label sprite — reviewers could not tell WHAT tool was active (labels blinked
+away with the stamps) and the text cluttered the scene. The shipped model:
+ONE persistent cursor (ring + additive falloff disc, scaled to the resolved
+world-space radius = the actual area of influence) that GLIDES through the
+stroke's stamp points, faint per-stamp trail behind it, and the tool identity
+(name, radius, strength/opacity, color swatch) in a dedicated panel readout.
+Rule of thumb: geometry communicates WHERE and HOW BIG; the panel
+communicates WHAT and HOW STRONG. Text in the 3D scene serves neither.
+
+### Sync Playwright starves callbacks unless the main thread pumps
+`expose_function` callbacks (the observe publish relay, including liveness
+pings) are dispatched ONLY while the Python main thread is inside a Playwright
+call. A performer that waits by `time.sleep()` looks alive to itself while the
+hub sees its pings stop and honestly declares the session dead. Any wait loop
+in a sync-Playwright process must pump (`page.evaluate("1")`) each iteration.
+Async Playwright does not have this failure mode.
+
+### Session lists must never bury the live show
+The seat panel rendered every session the hub remembered, dead rehearsals
+included, each with an enabled Watch button — the one joinable session sat
+below the fold and the user "couldn't join" (their words, with screenshot).
+Liveness is part of joinability (a corpse session replays a prefix then hangs
+forever: the killed performer never publishes `end`), watchable rows sort
+first, dead history collapses to a count, and the list refreshes itself while
+open. A list UI whose primary row is findable only by scrolling past garbage
+is a broken UI regardless of how correct the data is.
+
+### Local-model pilots: serialize the tools, advise mid-loop
+Two field captures from the LM Studio pilot (Qwen 3.6-35B over LangGraph +
+MCP): (1) the model batched `describe_scene` alongside `add_primitive` in one
+turn — with parallel execution the describe raced ahead and answered from the
+PRE-add scene; MeshVault is stateful, so the pilot serializes all tool calls
+through one lock (read-after-write order is part of the API contract even if
+the transport allows concurrency). (2) A sculpt stamp on a deliberately
+coarse sphere "succeeded" with `affected: 1` — a spike, not a shape — and the
+model sailed on happily; quantified SUCCESS is not enough when the number is
+quietly pathological. Results now carry advisory `note`s (under-sampled brush
+→ the exact refine_region fix), and the pilot's prompt says "react to notes,
+not just errors". With the note in place the same model self-corrected:
+refine → re-pick → re-sculpt (1 → 25 vertices) → regularize (59 → 0
+stretched), no human help.
+
+### Brushes are metric maps on frozen topology — remeshing is not optional
+The three-adversary review's central finding: every sculpt tool only MOVES
+vertices, so triangle quality decays monotonically with editing — grab/hinge
+impose linear signed strain, flatten folds, pinch compresses into the weld
+quantum, smooth amplifies anisotropy. Splitting alone (the first
+regularize_region) cannot recover: needles need COLLAPSE, poles need FLIPS.
+The full Botsch–Kobbelt loop (split 4/3 → collapse 4/5 → flip to valence
+6/4 → tangential relax) with the no-new-long-edge collapse predicate (without
+it split and collapse ping-pong forever) is what "regular coherent graph"
+means operationally: stretchedEdges → 0 and valence567Share ≥ 0.9.
+
+### Remesh defaults are a replay-compatibility decision, not a UX one
+The observe fingerprint compares EXACT triangle counts. Making sculpt remesh
+by default would banner-diverge every existing recording replayed through a
+new engine. New geometry-changing behavior must arrive as an explicit
+parameter or command (replays carry it byte-for-byte), never as a changed
+default — and budgets must be counts, never wall-clock, and decision paths
+must avoid transcendentals (compare squared lengths/signed areas; acos is
+for reporting) or replays drift by ULPs. A double-replay position-HASH test
+now guards this (count fingerprints cannot see position drift).
+
+### Dig is a graph deformation along one fixed axis — every deviation bit us
+Four proof-run findings in one evening: (1) profile distance must be LATERAL
+(cylindrical) — with 3D distance, dug welds sit "far" and repeated stamps
+asymptote instead of deepening; (2) gathering at exactly R sawtooths the rim
+on curved domes (rim verts alternately miss) — gather 1.15R; (3) gathering
+WIDE (1.5R) reaches the receding flank of a closed surface — verts whose
+lateral distance is small only because the cylinder re-enters the dome — and
+tears it; (4) the back-sheet filter threshold matters: dot > 0 excluded the
+crater's own WALLS (normals hover near perpendicular) and left un-moved
+teeth; a true back sheet faces along the axis (dot ≈ +1), so 0.5 separates.
+And piercing probes must intersect DOUBLE-SIDED: the far wall of a shell
+faces away from the ray, so front-face-only raycasts report infinite
+headroom on every shell.
+
+### Displacement brushes have an honest ceiling on photogrammetry shells
+The haircut fields: grab can shorten, compact, bury and tidy a hair shell,
+but it RELOCATES surface — it cannot delete it. A hanging curtain pulled
+"away" reappears elsewhere (downward/inward pulls re-bunch into spikes; the
+working direction is toward the volume interior with an upward bias, sharp
+small brushes for thin fins). A true "cut everything below this line" needs
+geometry REMOVAL (split_object + discard), not displacement. Choreograph
+within the tool class or reach for the right one. Related field lesson:
+coarse probe detectors converge where fine ones stall — an 11-column ray scan
+found 123 targets and diluted 26 passes across them; the 5-column scan found
+the 42 worst and finished in 14.

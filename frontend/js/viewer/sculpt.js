@@ -19,6 +19,18 @@
  */
 
 import * as THREE from "three";
+import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
+import { hasActiveMorphInfluence } from "./morphs.js";
+// Runtime-only cycle with refine.js (it imports resolveRadius from here);
+// safe because both sides only reference each other inside function bodies.
+import { refineRegion, regularizeRegion } from "./refine.js";
+
+// BVH-accelerated probing: meshes WITH a boundsTree take the fast path,
+// everything else falls back to three's default linear raycast (the patched
+// function checks `this.geometry.boundsTree` itself).
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -31,6 +43,53 @@ const FALLOFFS = {
     sharp: (t) => (1 - t) * (1 - t),
 };
 export { FALLOFFS };
+
+// Scratch triangle for the UV-degenerate paint path (caps).
+const _degTri = new THREE.Triangle();
+
+/**
+ * DISPLAYED position attribute of a mesh: base positions plus any nonzero
+ * morph influences (049 field bug B3 — paint tested BASE positions, so
+ * "aim-what-you-see" broke exactly in the lipstick-on-open-mouth case: pick
+ * returned the morphed chin, the brush painted the base chin). Returns the
+ * raw attribute unless influences are active; then a materialized copy.
+ */
+export function displayedPositions(mesh) {
+    const g = mesh.geometry;
+    const pos = g.getAttribute("position");
+    const targets = g.morphAttributes && g.morphAttributes.position;
+    const infl = mesh.morphTargetInfluences;
+    if (!targets || !infl || !targets.length) return pos;
+    let any = false;
+    for (let i = 0; i < targets.length && i < infl.length; i++) {
+        if (infl[i]) { any = true; break; }
+    }
+    if (!any) return pos;
+    const arr = new Float32Array(pos.count * 3);
+    for (let i = 0; i < pos.count; i++) {
+        arr[i * 3] = pos.getX(i);
+        arr[i * 3 + 1] = pos.getY(i);
+        arr[i * 3 + 2] = pos.getZ(i);
+    }
+    const relative = g.morphTargetsRelative;
+    for (let mi = 0; mi < targets.length && mi < infl.length; mi++) {
+        const w = infl[mi];
+        if (!w) continue;
+        const ma = targets[mi];
+        for (let i = 0; i < pos.count; i++) {
+            if (relative) {
+                arr[i * 3] += ma.getX(i) * w;
+                arr[i * 3 + 1] += ma.getY(i) * w;
+                arr[i * 3 + 2] += ma.getZ(i) * w;
+            } else {
+                arr[i * 3] += (ma.getX(i) - pos.getX(i)) * w;
+                arr[i * 3 + 1] += (ma.getY(i) - pos.getY(i)) * w;
+                arr[i * 3 + 2] += (ma.getZ(i) - pos.getZ(i)) * w;
+            }
+        }
+    }
+    return new THREE.BufferAttribute(arr, 3);
+}
 
 /** Meshes of the ACTIVE object (sculpt/paint targets). */
 function activeMeshes(viewer) {
@@ -84,6 +143,49 @@ export function assertNotSkinned(viewer) {
             "The timeline is PLAYING — sculpt/paint on a moving object would bake "
             + "a transient pose into the geometry. pause_timeline (or seek_timeline) "
             + "first, then edit.");
+    }
+}
+
+/** Position-writing ops (sculpt, NOT paint) refuse while morphs are blended
+ *  in: the brush raycasts the DISPLAYED morphed surface but writes the BASE
+ *  positions — the edit would land somewhere the artist isn't looking at. */
+export function assertNoMorphInfluence(viewer) {
+    const entry = viewer._activeEntry();
+    if (!entry) return;
+    if (entry.morphWeights) {
+        for (const [name, w] of entry.morphWeights) {
+            if (w > 0) {
+                throw new Error(
+                    `Morph '${name}' is blended in (weight ${w}) — sculpting would `
+                    + "edit the BASE pose while you see the morphed surface. "
+                    + "set_morph {name, weight: 0} first (weights are keyframable; "
+                    + "the base is what brushes edit).");
+            }
+        }
+    }
+    // Imported morphs / paused clips can hold influences outside our ledger.
+    if (hasActiveMorphInfluence(entry)) {
+        throw new Error(
+            "A morph influence is nonzero on this object (imported morph or a "
+            + "clip pose) — sculpting would edit the BASE while you see the "
+            + "morphed surface. Zero the weights (set_morph) or set_animation_time "
+            + "to a rest frame first.");
+    }
+}
+
+/**
+ * Heal brushes (blur/clone/mirror) sample SOURCE texels through base-space
+ * correspondences (triangle scans, symmetry BVH) — under an active morph the
+ * displayed surface and those correspondences diverge, silently mis-sourcing
+ * the heal. Plain paint aims morph-aware; heals refuse until weights are 0.
+ */
+export function assertNoMorphForHeal(viewer, command) {
+    const entry = viewer._activeEntry();
+    if (entry && hasActiveMorphInfluence(entry)) {
+        throw new Error(
+            `${command} while a morph is blended in is not supported — heal `
+            + "correspondences are BASE-space and would mis-source. set_morph "
+            + "weights to 0, heal, then restore the pose.");
     }
 }
 
@@ -176,8 +278,24 @@ function gatherWelds(mesh, weld, centerWorld, radius, falloffFn) {
 }
 
 /** Area-weighted average world normal over affected welds (duplicates averaged). */
+/**
+ * Bulk-replay normal deferral: recomputing 200k-vertex normals after EVERY
+ * replayed command dominates catch-up time, yet most commands never read
+ * them (grab with explicit direction, pinch, smooth, paint). finalizeSculpt
+ * marks geometries dirty during bulk replay; every reader calls this first,
+ * so any read sees EXACTLY the values eager recompute would have produced —
+ * determinism (and replica fidelity) is preserved by construction.
+ */
+export function ensureFreshNormals(geometry) {
+    if (!geometry.getAttribute("normal")
+        || (geometry.userData && geometry.userData._mvNormalsDirty)) {
+        geometry.computeVertexNormals();
+        if (geometry.userData) delete geometry.userData._mvNormalsDirty;
+    }
+}
+
 function averageWorldNormal(mesh, weld, hits) {
-    if (!mesh.geometry.getAttribute("normal")) mesh.geometry.computeVertexNormals();
+    ensureFreshNormals(mesh.geometry);
     const nAttr = mesh.geometry.getAttribute("normal");
     const nm = new THREE.Matrix3().getNormalMatrix(mesh.matrixWorld);
     const n = new THREE.Vector3();
@@ -195,6 +313,7 @@ function averageWorldNormal(mesh, weld, hits) {
 
 /** World normal of one weld (duplicates averaged). */
 function weldWorldNormal(mesh, weld, c, nm, out) {
+    ensureFreshNormals(mesh.geometry);
     const nAttr = mesh.geometry.getAttribute("normal");
     out.set(0, 0, 0);
     for (const i of weld.members.get(c)) {
@@ -224,7 +343,15 @@ function stampGeometry(viewer, mesh, opts, stats) {
     const weld = getWeld(geometry);
     const falloffFn = FALLOFFS[opts.falloff || "smooth"];
     const center = opts._centerV;
-    const hits = gatherWelds(mesh, weld, center, opts.radius, falloffFn);
+    // dig selects CYLINDRICALLY (lateral distance from its axis) with a
+    // slightly widened spherical gather: exactly R alternately missed rim
+    // vertices on a curved dome (sawtooth rim, proof-run 2), while a wide
+    // 1.5R gather reached the RECEDING FLANK of closed surfaces — verts whose
+    // lateral distance is < R only because the cylinder re-enters the dome —
+    // and pulling those made rim teeth (proof-run 4). 1.15R covers the rim
+    // band; the 3D bound keeps the flank out.
+    const gatherR = opts.tool === "dig" ? opts.radius * 1.15 : opts.radius;
+    const hits = gatherWelds(mesh, weld, center, gatherR, falloffFn);
     if (hits.length === 0) return 0;
 
     const tool = opts.tool || "draw";
@@ -251,6 +378,30 @@ function stampGeometry(viewer, mesh, opts, stats) {
         for (const h of hits) {
             weldWorldNormal(mesh, weld, h.c, nm, n);
             const d = strength * h.w;
+            stats.maxDisplacement = Math.max(stats.maxDisplacement, Math.abs(d));
+            writeWeldWorld(mesh, weld, h.c, h.world.addScaledVector(n, d), inv, tmp);
+        }
+    } else if (tool === "noise") {
+        // Organic micro-relief (retro-sculpt lever #1): seeded fBm displacement
+        // along each weld's normal — feathers, bark, rock, fabric. Sampled at
+        // the weld's LOCAL (geometry-space) position so the pattern sticks to
+        // the object under placement changes, and at the PRE-stamp position so
+        // repeated stamps re-evaluate the same field (idempotent-ish, no walk).
+        const nm = new THREE.Matrix3().getNormalMatrix(mesh.matrixWorld);
+        const n = new THREE.Vector3();
+        const wavelength = opts.wavelength > 0 ? opts.wavelength : opts.radius / 2;
+        const invWl = 1 / wavelength;
+        const octaves = Math.max(1, Math.min(6, Math.floor(opts.octaves || 3)));
+        const seed = Math.floor(opts.seed !== undefined ? opts.seed : 1);
+        const ridged = !!opts.ridged;
+        const bias = Math.max(-1, Math.min(1,
+            opts.bias !== undefined ? Number(opts.bias) : 0));
+        for (const h of hits) {
+            weldWorldNormal(mesh, weld, h.c, nm, n);
+            const lx = pos.getX(h.c), ly = pos.getY(h.c), lz = pos.getZ(h.c);
+            const nv = fbm3(lx * invWl, ly * invWl, lz * invWl, seed, octaves, ridged);
+            const centered = (nv - 0.5) * 2 + bias;   // [-1,1] + bias
+            const d = strength * h.w * centered;
             stats.maxDisplacement = Math.max(stats.maxDisplacement, Math.abs(d));
             writeWeldWorld(mesh, weld, h.c, h.world.addScaledVector(n, d), inv, tmp);
         }
@@ -295,17 +446,246 @@ function stampGeometry(viewer, mesh, opts, stats) {
             stats.maxDisplacement = Math.max(stats.maxDisplacement, blended.distanceTo(h.world));
             writeWeldWorld(mesh, weld, h.c, blended, inv, tmp);
         }
+    } else if (tool === "hinge") {
+        // The pose brush (049 field ask): rotate the brush region RIGIDLY
+        // about a pivot+axis line, falloff-weighted — a jaw drop or wing
+        // flex in one stamp, where radial grabs translate a blob and smear
+        // the lips. center+radius SELECT the region; pivot+axis+angle_deg
+        // define the rotation (they are different points: chin vs jaw hinge).
+        if (!Array.isArray(opts.pivot) || opts.pivot.length !== 3
+            || !Array.isArray(opts.axis) || opts.axis.length !== 3) {
+            throw new Error("hinge needs pivot:[x,y,z] AND axis:[x,y,z] (world) "
+                + "— the rotation line (e.g. jaw hinge under the ears, axis "
+                + "[1,0,0] for a jaw drop). center+radius still select the "
+                + "region being posed; angle_deg sets the swing.");
+        }
+        const pivot = new THREE.Vector3(...opts.pivot);
+        const axis = new THREE.Vector3(...opts.axis);
+        if (axis.lengthSq() < 1e-12) throw new Error("hinge axis must be non-zero.");
+        axis.normalize();
+        const angleDeg = opts.angle_deg !== undefined ? Number(opts.angle_deg) : 15;
+        if (!Number.isFinite(angleDeg) || Math.abs(angleDeg) > 180) {
+            throw new Error("hinge angle_deg must be a number in [-180, 180].");
+        }
+        const angle = angleDeg * Math.PI / 180;
+        const q = new THREE.Quaternion();
+        for (const h of hits) {
+            q.setFromAxisAngle(axis, angle * h.w);
+            const target = h.world.clone().sub(pivot).applyQuaternion(q).add(pivot);
+            stats.maxDisplacement = Math.max(
+                stats.maxDisplacement, target.distanceTo(h.world));
+            writeWeldWorld(mesh, weld, h.c, target, inv, tmp);
+        }
+    } else if (tool === "dig") {
+        // Material REMOVAL: a flat-bottomed crater along ONE fixed axis
+        // (adversarial design B). Per-vertex inward normals converge at the
+        // medial axis and self-intersect on deep digs — a fixed axis makes
+        // the stamp a graph deformation that cannot self-intersect.
+        const flatFrac = Math.max(0, Math.min(0.9,
+            opts.flat_fraction !== undefined ? Number(opts.flat_fraction) : 0.5));
+        let axis;
+        const avgN = averageWorldNormal(mesh, weld, hits);
+        if (opts.direction) {
+            axis = new THREE.Vector3(...opts.direction);
+            if (axis.lengthSq() < 1e-12) throw new Error("dig direction must be non-zero.");
+            axis.normalize();
+            if (axis.dot(avgN) > 0) {
+                throw new Error("dig direction points OUT of the surface — digging "
+                    + "would extrude. Negate it, or omit direction to use the "
+                    + "inward average normal.");
+            }
+        } else {
+            axis = avgN.clone().negate();
+        }
+        if (strength <= 0) {
+            throw new Error("dig strength must be > 0 — dig always REMOVES along "
+                + "its axis; to ADD material use draw or inflate.");
+        }
+        // Depth cap: wall slope stays remeshable (≤ ~62°).
+        const depthCap = (1 - flatFrac) * opts.radius;
+        let depth = strength;
+        if (depth > depthCap) {
+            depth = depthCap;
+            stats.depthClampNote = `strength ${r4s(strength)} exceeds the per-stamp `
+                + `cap (1−flat_fraction)×radius = ${r4s(depthCap)} — applied `
+                + `${r4s(depthCap)}. Re-issue ≈${Math.ceil(strength / depthCap) - 1} `
+                + "more identical stamps for the rest (each re-reads the surface "
+                + "and re-guards piercing), or widen radius / lower flat_fraction.";
+        }
+
+        // Shell-piercing guard: 13 double-sided probes across the plateau
+        // disc measure the free depth under the crater; refuse a stamp that
+        // would keep less than 20% of the local thickness.
+        const freeDepth = digFreeDepth(mesh, center, axis, opts.radius, flatFrac);
+        if (freeDepth !== null) stats.freeDepth = freeDepth;
+        if (freeDepth !== null && depth > 0.8 * freeDepth) {
+            const err = new Error(
+                `dig would pierce through: the shell under this crater is only `
+                + `${r4s(freeDepth)} thick along the dig axis and depth `
+                + `${r4s(depth)} exceeds the safe cap 0.8 × ${r4s(freeDepth)} = `
+                + `${r4s(0.8 * freeDepth)}. Re-issue with strength ≤ `
+                + `${r4s(0.8 * freeDepth)} for a shallow relief; to actually `
+                + "REMOVE the shell here use split_object + delete (dig "
+                + "displaces — it cannot open a hole).");
+            err._mvPierce = true;
+            throw err;
+        }
+
+        // Crater profile: plateau + C2 smootherstep shoulder. The profile
+        // parameter t is the LATERAL distance from the dig axis (cylindrical,
+        // not spherical): a graph deformation along the axis must depend only
+        // on the position across it — with 3D distance, already-dug welds sit
+        // "far" from the center and repeated stamps asymptote instead of
+        // deepening linearly (first proof-run finding).
+        const nm = new THREE.Matrix3().getNormalMatrix(mesh.matrixWorld);
+        const wn = new THREE.Vector3();
+        const rel = new THREE.Vector3();
+        for (const h of hits) {
+            // Sheet filter: never drag the BACK sheet of a thin shell (the
+            // buried-spike failure class). Threshold 0.5, not 0: crater WALL
+            // normals hover near perpendicular to the axis (dot ≈ ±0.4), and
+            // skipping them on repeat stamps left un-moved teeth around the
+            // rim (proof-run 3); a true back sheet faces ALONG the axis
+            // (dot ≈ +1) and stays excluded.
+            weldWorldNormal(mesh, weld, h.c, nm, wn);
+            if (wn.dot(axis) > 0.5) { stats.skippedBackfacing++; continue; }
+            rel.copy(h.world).sub(center);
+            const along = rel.dot(axis);
+            const lat2 = rel.lengthSq() - along * along;
+            const t = Math.sqrt(Math.max(0, lat2)) / opts.radius;
+            if (t > 1) continue;
+            const u = Math.max(0, Math.min(1, (t - flatFrac) / (1 - flatFrac)));
+            const q5 = u * u * u * (6 * u * u - 15 * u + 10);   // smootherstep
+            const s5 = 1 - q5;
+            const d = depth * s5;
+            if (d <= 0) continue;
+            stats.maxDisplacement = Math.max(stats.maxDisplacement, d);
+            stats.appliedDepth = Math.max(stats.appliedDepth, d);
+            writeWeldWorld(mesh, weld, h.c, h.world.addScaledVector(axis, d), inv, tmp);
+        }
     } else {
-        throw new Error(`Unknown tool '${tool}'. Use draw|inflate|smooth|flatten|pinch|grab.`);
+        throw new Error(`Unknown tool '${tool}'. Use draw|inflate|smooth|flatten|pinch|grab|hinge|dig.`);
     }
     return hits.length;
 }
 
+const r4s = (v) => Math.round(v * 10000) / 10000;
+
+/**
+ * Free depth under a dig crater: 13 probes (center + 12 plateau-ring points)
+ * cast along the dig axis, DOUBLE-SIDED (the far wall of a shell faces away
+ * from the ray — front-face-only raycasts report infinite headroom on every
+ * shell). Manual Möller–Trumbore over candidate triangles: deterministic, no
+ * BVH build per stamp. Returns the minimum far-wall distance, or null when
+ * no probe found a far wall (solid/thick region).
+ */
+function digFreeDepth(mesh, center, axis, radius, flatFrac) {
+    const geometry = mesh.geometry;
+    const pos = geometry.getAttribute("position");
+    const index = geometry.getIndex();
+    const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+    const idxOf = (t, k) => (index ? index.getX(t * 3 + k) : t * 3 + k);
+    const m = mesh.matrixWorld;
+
+    // Candidate triangles: centroid within probe reach (2.5 R around center).
+    const reach = radius * 2.5;
+    const reach2 = reach * reach;
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    const candidates = [];
+    for (let t = 0; t < triCount; t++) {
+        a.fromBufferAttribute(pos, idxOf(t, 0)).applyMatrix4(m);
+        b.fromBufferAttribute(pos, idxOf(t, 1)).applyMatrix4(m);
+        c.fromBufferAttribute(pos, idxOf(t, 2)).applyMatrix4(m);
+        const cx = (a.x + b.x + c.x) / 3 - center.x;
+        const cy = (a.y + b.y + c.y) / 3 - center.y;
+        const cz = (a.z + b.z + c.z) / 3 - center.z;
+        if (cx * cx + cy * cy + cz * cz <= reach2) {
+            candidates.push([a.clone(), b.clone(), c.clone()]);
+        }
+    }
+    if (!candidates.length) return null;
+
+    // Deterministic tangent basis (stable-seed rule).
+    const seed = Math.abs(axis.x) < 0.9
+        ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1);
+    const u = seed.clone().addScaledVector(axis, -axis.dot(seed)).normalize();
+    const v = new THREE.Vector3().crossVectors(axis, u);
+
+    // Double-sided Möller–Trumbore. backOnly restricts hits to triangles
+    // facing ALONG the ray (dot(n, dir) > 0.3): a true far wall of a shell
+    // backfaces the ray, while the opposite wall of a GROOVE the dig is
+    // crossing is roughly perpendicular — counting it misread every groove
+    // crossing as a paper-thin shell (Death Star field bug: seam strokes
+    // refused over the trench with "0.0096 thick").
+    const rayHit = (orig, dir, minT, backOnly) => {
+        let best = Infinity;
+        const e1 = new THREE.Vector3(), e2 = new THREE.Vector3();
+        const pv = new THREE.Vector3(), tv = new THREE.Vector3(), qv = new THREE.Vector3();
+        const n = new THREE.Vector3();
+        for (const [pa, pb, pc] of candidates) {
+            e1.subVectors(pb, pa);
+            e2.subVectors(pc, pa);
+            pv.crossVectors(dir, e2);
+            const det = e1.dot(pv);
+            if (Math.abs(det) < 1e-12) continue;
+            const invDet = 1 / det;
+            tv.subVectors(orig, pa);
+            const uu = tv.dot(pv) * invDet;
+            if (uu < -1e-6 || uu > 1 + 1e-6) continue;
+            qv.crossVectors(tv, e1);
+            const vv = dir.dot(qv) * invDet;
+            if (vv < -1e-6 || uu + vv > 1 + 1e-6) continue;
+            const tt = e2.dot(qv) * invDet;
+            if (tt <= minT || tt >= best) continue;
+            if (backOnly) {
+                n.crossVectors(e1, e2).normalize();
+                if (n.dot(dir) <= 0.3) continue;
+            }
+            best = tt;
+        }
+        return best;
+    };
+
+    const eps = 1e-4 * radius;
+    let minFree = Infinity;
+    let found = 0;
+    for (let k = 0; k < 13; k++) {
+        let px = center.x, py = center.y, pz = center.z;
+        if (k > 0) {
+            const ang = (2 * Math.PI * (k - 1)) / 12;
+            const rr = flatFrac * radius;
+            px += rr * (Math.cos(ang) * u.x + Math.sin(ang) * v.x);
+            py += rr * (Math.cos(ang) * u.y + Math.sin(ang) * v.y);
+            pz += rr * (Math.cos(ang) * u.z + Math.sin(ang) * v.z);
+        }
+        const back = new THREE.Vector3(px, py, pz).addScaledVector(axis, -radius);
+        const entryT = rayHit(back, axis, eps, false);
+        if (entryT === Infinity) continue;
+        const entryPt = back.clone().addScaledVector(axis, entryT + eps);
+        const farT = rayHit(entryPt, axis, eps, true);
+        if (farT === Infinity) continue;
+        found++;
+        if (farT < minFree) minFree = farT;
+    }
+    return found > 0 ? minFree : null;
+}
+
 /** Finalize geometries once per COMMAND: normals, bounds, stats, repaint. */
 function finalizeSculpt(viewer, touchedGeometries) {
+    const bulk = !!viewer._bulkReplay;
     for (const geometry of touchedGeometries) {
         geometry.getAttribute("position").needsUpdate = true;
-        geometry.computeVertexNormals();
+        if (bulk) {
+            // Bulk replay (observe catch-up / recording fast-forward): defer
+            // the per-command normal recompute — it dominates replay time on
+            // dense meshes. Readers go through ensureFreshNormals, so any
+            // command that needs normals gets identical values; the rest is
+            // settled once at endBulkReplay.
+            if (!geometry.userData) geometry.userData = {};
+            geometry.userData._mvNormalsDirty = true;
+        } else {
+            geometry.computeVertexNormals();
+        }
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();
     }
@@ -314,8 +694,15 @@ function finalizeSculpt(viewer, touchedGeometries) {
         entry.modified = true;
         entry.sculpted = true;   // precise audit trail: geometry was edited
         entry.geometryRev++;     // invalidates detect_parts partitions
-        entry.stats = viewer._computeStats(entry.model);
-        viewer._lastStats = entry.stats;
+        if (bulk) {
+            // Stats dedup every vertex position (O(V) Map churn) — defer to
+            // endBulkReplay / the next fingerprint check, which settle EXACTLY
+            // (fingerprints must compare fresh numbers or they'd false-diverge).
+            entry._statsDirty = true;
+        } else {
+            entry.stats = viewer._computeStats(entry.model);
+            viewer._lastStats = entry.stats;
+        }
     }
     viewer.invalidate();
 }
@@ -465,10 +852,19 @@ export function snapshotActivePositions(viewer) {
 export function restorePositionsSnapshot(viewer, snap) {
     const entry = viewer._activeEntry();
     if (!snap || !entry || entry.id !== snap.entryId) return false;
+    // LIVENESS check first (adversarial review R3): the snapshot holds
+    // geometry OBJECT references — if a topology op (refine/regularize/
+    // simplify/split) replaced the mesh's geometry since the snapshot, the
+    // old object still matches its own count and the restore would write
+    // into an ORPHAN: "undone" toast, unchanged screen. Verify each snapshot
+    // geometry is still attached to a live mesh.
+    const live = new Set();
+    entry.model.traverse((c) => { if (c.isMesh && c.geometry) live.add(c.geometry); });
     const touched = [];
     for (const g of snap.geometries) {
+        if (!live.has(g.geometry)) continue;   // replaced — cannot undo into it
         const pos = g.geometry.getAttribute("position");
-        // Geometry replaced since the snapshot (simplify/split) — skip safely.
+        // Vertex count changed in place (paranoia guard) — skip safely.
         if (!pos || pos.count !== g.count) continue;
         for (let i = 0; i < g.count; i++) {
             pos.setXYZ(i, g.positions[i * 3], g.positions[i * 3 + 1],
@@ -498,36 +894,228 @@ export function resolveRadius(viewer, opts, command) {
         + "(fraction of the active object's bounding-sphere radius).");
 }
 
+/** Region edge-length survey over live meshes (world): median + max of edges
+ *  whose midpoint lies within `radius` of any stamp point. Cheap enough per
+ *  COMMAND (single pass over triangles); powers the quality advisory. */
+function regionEdgeSurvey(meshes, points, radius) {
+    if (!points.length) return null;
+    const r2 = radius * radius;
+    // Stamp-cloud AABB expanded by the radius: one box test culls the whole
+    // per-point loop for the vast majority of edges (perf gauntlet: the two
+    // surveys were 75-80% of every live sculpt command on dense meshes).
+    let bx0 = Infinity, by0 = Infinity, bz0 = Infinity;
+    let bx1 = -Infinity, by1 = -Infinity, bz1 = -Infinity;
+    for (const p of points) {
+        if (p[0] < bx0) bx0 = p[0]; if (p[0] > bx1) bx1 = p[0];
+        if (p[1] < by0) by0 = p[1]; if (p[1] > by1) by1 = p[1];
+        if (p[2] < bz0) bz0 = p[2]; if (p[2] > bz1) bz1 = p[2];
+    }
+    bx0 -= radius; by0 -= radius; bz0 -= radius;
+    bx1 += radius; by1 += radius; bz1 += radius;
+
+    const v = new THREE.Vector3();
+    const lens = [];
+    const seen = new Set();
+    for (const mesh of meshes) {
+        if (seen.has(mesh.geometry)) continue;
+        seen.add(mesh.geometry);
+        const pos = mesh.geometry.getAttribute("position");
+        const index = mesh.geometry.getIndex();
+        const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+        const idxOf = (t, k) => (index ? index.getX(t * 3 + k) : t * 3 + k);
+        const m = mesh.matrixWorld;
+        // World-position cache in f64: ONE transform per vertex instead of
+        // six per triangle. Float64 keeps every derived length bit-identical
+        // to the previous per-edge Vector3 math (the advisory feeds the
+        // remesh:auto trigger — replays must not flip it).
+        const wp = new Float64Array(pos.count * 3);
+        for (let i = 0; i < pos.count; i++) {
+            v.fromBufferAttribute(pos, i).applyMatrix4(m);
+            wp[i * 3] = v.x; wp[i * 3 + 1] = v.y; wp[i * 3 + 2] = v.z;
+        }
+        const seenEdge = new Set();
+        for (let t = 0; t < triCount; t++) {
+            for (let k = 0; k < 3; k++) {
+                const i = idxOf(t, k), j = idxOf(t, (k + 1) % 3);
+                const ax = wp[i * 3], ay = wp[i * 3 + 1], az = wp[i * 3 + 2];
+                const bx = wp[j * 3], by = wp[j * 3 + 1], bz = wp[j * 3 + 2];
+                const mx = (ax + bx) * 0.5, my = (ay + by) * 0.5, mz = (az + bz) * 0.5;
+                // Box cull BEFORE the dedup set: far edges skip both the Set
+                // ops and the point loop (identical lens content — anything
+                // within r of a stamp point is inside the expanded box).
+                if (mx < bx0 || mx > bx1 || my < by0 || my > by1
+                    || mz < bz0 || mz > bz1) continue;
+                const key = i < j ? i * 16777216 + j : j * 16777216 + i;
+                if (seenEdge.has(key)) continue;
+                seenEdge.add(key);
+                let inRegion = false;
+                for (const p of points) {
+                    const dx = mx - p[0], dy = my - p[1], dz = mz - p[2];
+                    if (dx * dx + dy * dy + dz * dz <= r2) { inRegion = true; break; }
+                }
+                if (inRegion) {
+                    const dx = ax - bx, dy = ay - by, dz = az - bz;
+                    lens.push(Math.sqrt(dx * dx + dy * dy + dz * dz));
+                }
+            }
+        }
+    }
+    if (!lens.length) return null;
+    lens.sort((a, b) => a - b);
+    return {
+        median: lens[Math.floor(lens.length / 2)],
+        max: lens[lens.length - 1],
+        count: lens.length,
+        lens,
+    };
+}
+
+/**
+ * Mirror-symmetry helper (symmetry:"x"|"y"|"z" — the LOCAL axis whose sign
+ * flips). Returns {point(p), vec(v)} mapping WORLD-space points/vectors to
+ * their reflections across the active object's local mirror plane, or null.
+ * The plane passes through the object's local origin — primitives are
+ * modeled centered, so this is the bilateral center by construction.
+ */
+export function buildSymmetry(viewer, sym) {
+    if (!sym) return null;
+    const axisIdx = { x: 0, y: 1, z: 2 }[String(sym).toLowerCase()];
+    if (axisIdx === undefined) {
+        throw new Error("symmetry must be 'x', 'y' or 'z' — the LOCAL axis "
+            + "whose sign flips across the object's mirror plane.");
+    }
+    const entry = viewer._activeEntry();
+    if (!entry) return null;
+    entry.model.updateMatrixWorld(true);
+    const W = entry.model.matrixWorld.clone();
+    const Winv = W.clone().invert();
+    const m3W = new THREE.Matrix3().setFromMatrix4(W);
+    const m3Winv = new THREE.Matrix3().setFromMatrix4(Winv);
+    return {
+        point: (p) => {
+            const v = new THREE.Vector3(p[0], p[1], p[2]).applyMatrix4(Winv);
+            v.setComponent(axisIdx, -v.getComponent(axisIdx));
+            v.applyMatrix4(W);
+            return [v.x, v.y, v.z];
+        },
+        vec: (d) => {
+            const v = new THREE.Vector3(d[0], d[1], d[2]).applyMatrix3(m3Winv);
+            v.setComponent(axisIdx, -v.getComponent(axisIdx));
+            v.applyMatrix3(m3W);
+            return [v.x, v.y, v.z];
+        },
+    };
+}
+
 function applyStamps(viewer, opts, points) {
     assertNotSkinned(viewer);
+    assertNoMorphInfluence(viewer);
     const meshes = activeMeshes(viewer);
     opts.radius = resolveRadius(viewer, opts, "sculpt");
     if (!FALLOFFS[opts.falloff || "smooth"]) {
         throw new Error(`Unknown falloff '${opts.falloff}'. Use smooth|linear|sharp.`);
     }
     const entry = viewer._activeEntry();
+
+    // Mirror-symmetric sculpting: every stamp lands twice — at the point and
+    // at its reflection across the object's local mirror plane — with
+    // direction/pivot/axis reflected and hinge angle NEGATED (a reflection
+    // conjugates rotations). Exact by construction, one round-trip; two
+    // hand-mirrored calls drift and cost double.
+    const sym = buildSymmetry(viewer, opts.symmetry);
+    let passes = [{ points, direction: opts.direction, pivot: opts.pivot,
+                    axis: opts.axis, angle_deg: opts.angle_deg }];
+    if (sym) {
+        passes.push({
+            points: points.map(sym.point),
+            direction: opts.direction ? sym.vec(opts.direction) : undefined,
+            pivot: opts.pivot ? sym.point(opts.pivot) : undefined,
+            axis: opts.axis ? sym.vec(opts.axis) : undefined,
+            angle_deg: opts.angle_deg !== undefined
+                ? -Number(opts.angle_deg) : undefined,
+        });
+        // Surveys, dig pre-split bounds, remesh union and the stamps count
+        // must all see the WHOLE affected region.
+        points = passes[0].points.concat(passes[1].points);
+    }
     // First mutation of this entry? Take the reset snapshot before touching
     // vertices (snapshots are lazy — see viewer _ensureResetSnapshot).
     viewer._ensureResetSnapshot(entry);
 
-    const stats = { maxDisplacement: 0 };
+    // Pre-stroke edge survey: the reference the quality trigger compares
+    // against (the review's trigger math uses the PRE-stroke median).
+    // BULK REPLAY: surveys are three full-mesh edge scans per command that
+    // only feed the returned ADVISORY — skip them when they cannot affect
+    // geometry (remesh:"auto" keeps them: its trigger decision is geometry).
+    const skipSurveys = !!viewer._bulkReplay && opts.remesh !== "auto";
+    let preSurvey = skipSurveys ? null
+        : regionEdgeSurvey(meshes, points, opts.radius);
+
+    // DIG pre-split (design spec: splits must come BEFORE displacement —
+    // aliasing is irreversible; displacing a coarse patch yields a faceted
+    // cone and refining afterwards refines the cone). Densify the region to
+    // the crater's needs when remesh is on and the mesh is coarser.
+    if (opts.tool === "dig" && opts.remesh === "auto" && preSurvey
+        && entry && !(entry.morphBase || (entry.morphs && entry.morphs.size))) {
+        const digTarget = opts.radius / 5;
+        if (preSurvey.median > digTarget * 1.3) {
+            const cx = points.reduce((a, p) => a + p[0], 0) / points.length;
+            const cy = points.reduce((a, p) => a + p[1], 0) / points.length;
+            const cz = points.reduce((a, p) => a + p[2], 0) / points.length;
+            let maxD = 0;
+            for (const p of points) {
+                const d = Math.sqrt((p[0] - cx) ** 2 + (p[1] - cy) ** 2 + (p[2] - cz) ** 2);
+                if (d > maxD) maxD = d;
+            }
+            try {
+                refineRegion(viewer, {
+                    center: [cx, cy, cz], radius: maxD + opts.radius,
+                    target_edge: digTarget,
+                    max_triangles: opts.max_triangles,
+                });
+                preSurvey = regionEdgeSurvey(meshes, points, opts.radius);
+            } catch { /* budget/no-op refusals: dig proceeds on what exists */ }
+        }
+    }
+
+    const stats = { maxDisplacement: 0, skippedBackfacing: 0,
+                    appliedDepth: 0, pierceRefused: null };
     let affected = 0;
     const touched = new Set();
     const seenGeometries = new Set();
 
-    for (const p of points) {
-        opts._centerV = new THREE.Vector3(...p);
-        seenGeometries.clear();
-        for (const mesh of meshes) {
-            // glTF instancing shares one geometry across meshes — stamp each
-            // geometry ONCE or instances get double displacement.
-            if (seenGeometries.has(mesh.geometry)) continue;
-            seenGeometries.add(mesh.geometry);
-            mesh.updateMatrixWorld(true);
-            const n = stampGeometry(viewer, mesh, opts, stats);
-            if (n > 0) {
-                affected += n;
-                touched.add(mesh.geometry);
+    outer:
+    for (const pass of passes) {
+        opts.direction = pass.direction;
+        opts.pivot = pass.pivot;
+        opts.axis = pass.axis;
+        opts.angle_deg = pass.angle_deg;
+        for (const p of pass.points) {
+            opts._centerV = new THREE.Vector3(...p);
+            seenGeometries.clear();
+            for (const mesh of meshes) {
+                // glTF instancing shares one geometry across meshes — stamp each
+                // geometry ONCE or instances get double displacement.
+                if (seenGeometries.has(mesh.geometry)) continue;
+                seenGeometries.add(mesh.geometry);
+                mesh.updateMatrixWorld(true);
+                let n = 0;
+                try {
+                    n = stampGeometry(viewer, mesh, opts, stats);
+                } catch (err) {
+                    // Dig piercing guard: a stroke stops at the refusing stamp
+                    // and returns the work done so far (refine's "throw only
+                    // when nothing was mutated" rule).
+                    if (err && err._mvPierce && touched.size > 0) {
+                        stats.pierceRefused = { point: p, message: err.message };
+                        break outer;
+                    }
+                    throw err;
+                }
+                if (n > 0) {
+                    affected += n;
+                    touched.add(mesh.geometry);
+                }
             }
         }
     }
@@ -538,13 +1126,14 @@ function applyStamps(viewer, opts, points) {
         throw new Error(
             "Brush touched no vertices. Check center (world coords — use pick, "
             + "raycast or get_bounds) and radius (or radius_rel); or the mesh is "
-            + "too coarse here (primitives: raise segment params)."
+            + "too coarse here — refine_region {center, radius, detail_rel} adds "
+            + "the facets first (target ≈ brush radius / 5)."
             + wrongObjectHint(viewer, points[0]));
     }
     finalizeSculpt(viewer, touched);
     const r4 = (v) => Math.round(v * 10000) / 10000;
     const s = entry && entry.stats ? entry.stats : null;
-    return {
+    const out = {
         tool: opts.tool || "draw",
         stamps: points.length,
         affected,
@@ -553,6 +1142,97 @@ function applyStamps(viewer, opts, points) {
         // WITHOUT paying a 10-60 s SwiftShader verification render every stamp.
         newSize: s ? [r4(s.width), r4(s.height), r4(s.depth)] : null,
     };
+    if (opts.tool === "dig") {
+        out.appliedDepth = r4(stats.appliedDepth);
+        out.skippedBackfacing = stats.skippedBackfacing;
+        if (stats.freeDepth !== undefined) out.freeDepth = r4(stats.freeDepth);
+        if (stats.depthClampNote) out.note = stats.depthClampNote;
+    }
+    if (stats.pierceRefused) {
+        out.pierceRefusedAt = stats.pierceRefused.point;
+        out.note = (out.note ? out.note + " " : "")
+            + `Stroke STOPPED at stamp near [${stats.pierceRefused.point.map(r4)}]: `
+            + stats.pierceRefused.message;
+    }
+
+    // MESH-QUALITY advisory (always reported — the trigger math from the
+    // adversarial review): fraction of region edges outside the healthy
+    // Botsch–Kobbelt band [4/5, 4/3] of the PRE-stroke median, and the
+    // worst-stretch ratio. Agents gate on these instead of guessing.
+    const postSurvey = skipSurveys ? null
+        : regionEdgeSurvey(meshes, points, opts.radius);
+    let triggerFired = false;
+    if (preSurvey && postSurvey) {
+        // Out-of-band fraction against the pre-stroke median, derived from
+        // the post-survey's OWN edge lengths — the previous third full-mesh
+        // scan re-collected the exact same in-region edge set (perf gauntlet:
+        // the three scans were 75-80% of every live sculpt command).
+        const lo = preSurvey.median * 0.8, hi = preSurvey.median * (4 / 3);
+        let out_ = 0;
+        const total = postSurvey.lens.length;
+        for (const len of postSurvey.lens) {
+            if (len < lo || len > hi) out_++;
+        }
+        const fOut = total > 0 ? out_ / total : 0;
+        const maxOverMedian = preSurvey.median > 0
+            ? postSurvey.max / preSurvey.median : 0;
+        triggerFired = fOut >= 0.25 || maxOverMedian >= 2;
+        out.meshQuality = {
+            medianEdge: { before: r4(preSurvey.median), after: r4(postSurvey.median) },
+            outOfBandFraction: Math.round(fOut * 1000) / 1000,
+            maxOverMedian: Math.round(maxOverMedian * 100) / 100,
+            needsRemesh: triggerFired,
+        };
+    }
+
+    // Opt-in integrated remeshing (remesh:"auto"): run the full regularize
+    // pipeline over the stroke region at command end. DEFAULT OFF — existing
+    // recordings replay old sculpt commands through new engines, and an
+    // implicit default-on would diverge every replica (review R1).
+    if (opts.remesh === "auto" && triggerFired) {
+        if (entry && (entry.morphBase || (entry.morphs && entry.morphs.size))) {
+            out.note = (out.note ? out.note + " " : "")
+                + "remesh:auto SUPPRESSED: morphs exist on this object (remesh "
+                + "would drop them). capture_morph/delete_morph first, or "
+                + "export_glb to keep them.";
+        } else {
+            // Union region: centroid of stamps, radius covering all of them.
+            const cx = points.reduce((a, p) => a + p[0], 0) / points.length;
+            const cy = points.reduce((a, p) => a + p[1], 0) / points.length;
+            const cz = points.reduce((a, p) => a + p[2], 0) / points.length;
+            let maxD = 0;
+            for (const p of points) {
+                const d = Math.sqrt((p[0] - cx) ** 2 + (p[1] - cy) ** 2 + (p[2] - cz) ** 2);
+                if (d > maxD) maxD = d;
+            }
+            try {
+                out.remesh = regularizeRegion(viewer, {
+                    center: [cx, cy, cz],
+                    radius: maxD + opts.radius,
+                    target_edge: preSurvey ? preSurvey.median : undefined,
+                    iterations: 2,
+                    max_triangles: opts.max_triangles,
+                });
+            } catch (err) {
+                out.note = (out.note ? out.note + " " : "")
+                    + `remesh:auto skipped: ${String(err.message).slice(0, 140)}`;
+            }
+        }
+    }
+
+    // Under-sampled brush advisory (field gap): a stamp that moved only a
+    // couple of vertices "succeeds" but produces a SPIKE, not a shape — and
+    // nothing said so. Displacing fewer than ~6 welds per stamp cannot form
+    // a curved feature at this radius.
+    if (affected / points.length < 6 && (opts.tool || "draw") !== "smooth") {
+        out.note = (out.note ? out.note + " " : "")
+            + `Only ${affected} vertex/vertices in ${points.length} stamp(s) — `
+            + "the mesh is coarser than the brush, so this reads as a spike, not "
+            + "a shape. refine_region {center, radius, detail_rel} first "
+            + "(target_edge ≈ brush radius / 5), then re-sculpt; regularize_region "
+            + "afterwards if edges stretched.";
+    }
+    return out;
 }
 
 /**
@@ -739,7 +1419,12 @@ function ensurePaintLayer(viewer, mesh, size) {
 
     const canvas = document.createElement("canvas");
     canvas.width = canvas.height = dim;
-    const ctx = canvas.getContext("2d");
+    // willReadFrequently is LOAD-BEARING under SwiftShader: paint layers are
+    // read back constantly (undo stashes, brush blends, clone sampling), and
+    // without the flag Chromium keeps the canvas GPU-accelerated — the first
+    // readback after ANY draw pays a multi-second GPU sync (measured: 23.5 s
+    // for a 64×64 getImageData on a fresh 2048² layer; 91 ms with the flag).
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
     // Base layer: existing texture if drawable, else the AUTHORED base color
     // (fall back to displayed color). Color is neutralized to white so the map
@@ -790,6 +1475,125 @@ function ensurePaintLayer(viewer, mesh, size) {
     return layer;
 }
 
+/**
+ * Material-CHANNEL layers (retro-texture lever #1): per-texel roughness/
+ * metalness/emissive/height painting. roughness+metalness share ONE canvas in
+ * glTF's native packing (G = roughness, B = metalness) so export merges to a
+ * single metallicRoughnessTexture image for free; emissive gets its own sRGB
+ * canvas; height is a data canvas (no material slot — bake_normals consumes
+ * it). Channel canvases match the albedo layer's size/orientation and charge
+ * the same texel budget.
+ */
+export function ensureChannelLayer(viewer, mesh, channel, albedoLayer) {
+    const stash = mesh._mvOriginalMaterial || mesh.material;
+    const material = Array.isArray(stash) ? stash[0] : stash;
+    if (!material) return null;
+    const store = material.userData._mvChannels
+        || (material.userData._mvChannels = {});
+    const key = (channel === "roughness" || channel === "metalness")
+        ? "rm" : channel;
+    if (store[key]) return store[key];
+
+    const dim = albedoLayer.size;
+    if (paintTexelsAllocated + dim * dim > PAINT_TEXEL_BUDGET) {
+        throw new Error(
+            `Paint memory budget exceeded (${Math.round(PAINT_TEXEL_BUDGET / 1e6)}M `
+            + "texels) while creating the channel layer — clear_paint unused "
+            + "layers or use a smaller texture_size.");
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = dim;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+    if (key === "rm") {
+        // Base: the authored metallicRoughness image when drawable (it already
+        // packs G/B), else the material's scalar defaults.
+        const prevRough = material.roughnessMap || null;
+        const img = prevRough && prevRough.image;
+        let drew = false;
+        if (img) {
+            try { ctx.drawImage(img, 0, 0, dim, dim); drew = true; } catch { /* GPU-only */ }
+        }
+        if (!drew) {
+            const g = Math.round(Math.max(0, Math.min(1, material.roughness ?? 0.7)) * 255);
+            const bl = Math.round(Math.max(0, Math.min(1, material.metalness ?? 0)) * 255);
+            ctx.fillStyle = `rgb(255,${g},${bl})`;
+            ctx.fillRect(0, 0, dim, dim);
+        }
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.colorSpace = THREE.NoColorSpace;   // data, not color
+        texture.flipY = albedoLayer.flipY;
+        texture.wrapS = albedoLayer.texture.wrapS;
+        texture.wrapT = albedoLayer.texture.wrapT;
+        applyLayerFiltering(texture, dim);
+        store.prevRM = {
+            roughnessMap: material.roughnessMap || null,
+            metalnessMap: material.metalnessMap || null,
+            roughness: material.roughness,
+            metalness: material.metalness,
+        };
+        // Maps MULTIPLY the scalars in three — scalars go to 1 so the canvas
+        // alone carries the values (the canvas was seeded with the old scalars).
+        material.roughnessMap = texture;
+        material.metalnessMap = texture;
+        material.roughness = 1;
+        material.metalness = 1;
+        material.needsUpdate = true;
+        paintTexelsAllocated += dim * dim;
+        store.rm = { canvas, ctx, texture, size: dim, flipY: texture.flipY,
+                     channel: "rm" };
+        return store.rm;
+    }
+    if (key === "emissive") {
+        ctx.fillStyle = "#000000";
+        ctx.fillRect(0, 0, dim, dim);
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.flipY = albedoLayer.flipY;
+        texture.wrapS = albedoLayer.texture.wrapS;
+        texture.wrapT = albedoLayer.texture.wrapT;
+        applyLayerFiltering(texture, dim);
+        store.prevEmissive = {
+            emissiveMap: material.emissiveMap || null,
+            emissive: material.emissive ? material.emissive.clone() : null,
+        };
+        material.emissiveMap = texture;
+        if (material.emissive) material.emissive.set(0xffffff);
+        material.needsUpdate = true;
+        paintTexelsAllocated += dim * dim;
+        store.emissive = { canvas, ctx, texture, size: dim,
+                           flipY: texture.flipY, channel: "emissive" };
+        return store.emissive;
+    }
+    // height: data-only canvas at mid-gray (relief can go both ways).
+    ctx.fillStyle = "rgb(128,128,128)";
+    ctx.fillRect(0, 0, dim, dim);
+    const texture = new THREE.CanvasTexture(canvas);   // for needsUpdate parity
+    texture.colorSpace = THREE.NoColorSpace;
+    texture.flipY = albedoLayer.flipY;
+    paintTexelsAllocated += dim * dim;
+    store.height = { canvas, ctx, texture, size: dim, flipY: texture.flipY,
+                     channel: "height" };
+    return store.height;
+}
+
+const PAINT_CHANNELS = ["albedo", "roughness", "metalness", "emissive", "height"];
+
+function resolveChannel(opts) {
+    const channel = opts.channel || "albedo";
+    if (!PAINT_CHANNELS.includes(channel)) {
+        throw new Error(`Unknown channel '${channel}'. Use ${PAINT_CHANNELS.join("|")}.`);
+    }
+    if (["roughness", "metalness", "height"].includes(channel)) {
+        const v = opts.value;
+        if (!(typeof v === "number" && v >= 0 && v <= 1)) {
+            throw new Error(`channel:'${channel}' needs value: 0..1 `
+                + "(0 = smooth/dielectric/low, 1 = rough/metal/high).");
+        }
+    }
+    return channel;
+}
+
 /** Remove paint layers from the active object, restoring pre-paint materials. */
 export function clearPaint(viewer) {
     const meshes = activeMeshes(viewer);
@@ -805,6 +1609,46 @@ export function clearPaint(viewer) {
         layer.texture.dispose();
         paintTexelsAllocated = Math.max(0, paintTexelsAllocated - layer.size * layer.size);
         delete material.userData._mvPaint;
+        // Channel layers ride the albedo layer's lifetime: restore the
+        // pre-paint material slots and refund their texels too.
+        const chans = material.userData._mvChannels;
+        if (chans) {
+            if (chans.rm) {
+                const prev = chans.prevRM || {};
+                material.roughnessMap = prev.roughnessMap || null;
+                material.metalnessMap = prev.metalnessMap || null;
+                if (prev.roughness !== undefined) material.roughness = prev.roughness;
+                if (prev.metalness !== undefined) material.metalness = prev.metalness;
+                chans.rm.texture.dispose();
+                paintTexelsAllocated = Math.max(
+                    0, paintTexelsAllocated - chans.rm.size * chans.rm.size);
+            }
+            if (chans.emissive) {
+                const prev = chans.prevEmissive || {};
+                material.emissiveMap = prev.emissiveMap || null;
+                if (material.emissive && prev.emissive) {
+                    material.emissive.copy(prev.emissive);
+                } else if (material.emissive) {
+                    material.emissive.set(0x000000);
+                }
+                chans.emissive.texture.dispose();
+                paintTexelsAllocated = Math.max(
+                    0, paintTexelsAllocated - chans.emissive.size * chans.emissive.size);
+            }
+            if (chans.height) {
+                chans.height.texture.dispose();
+                paintTexelsAllocated = Math.max(
+                    0, paintTexelsAllocated - chans.height.size * chans.height.size);
+            }
+            if (chans.normal) {
+                const prev = chans.prevNormal || {};
+                material.normalMap = prev.normalMap || null;
+                chans.normal.texture.dispose();
+                paintTexelsAllocated = Math.max(
+                    0, paintTexelsAllocated - chans.normal.size * chans.normal.size);
+            }
+            delete material.userData._mvChannels;
+        }
         cleared++;
     }
     // Paint fully undone: if the geometry was never sculpted/baked, the object is
@@ -842,6 +1686,11 @@ export function paintStroke(viewer, opts) {
 function paintPoints(viewer, opts, points) {
     assertNotSkinned(viewer);
     const meshes = activeMeshes(viewer);
+    const channel = resolveChannel(opts);
+    // Mirror-symmetric painting: same plane semantics as sculpt symmetry
+    // (face markings, squadron stripes — one call, exact bilateralism).
+    const sym = buildSymmetry(viewer, opts.symmetry);
+    if (sym) points = points.concat(points.map(sym.point));
     // One undo unit per COMMAND — or per GESTURE when undo_group is given.
     beginPaintOp("paint", opts.undo_group);
     const radius = resolveRadius(viewer, opts, "paint");
@@ -882,7 +1731,9 @@ function paintPoints(viewer, opts, points) {
         if (!uvAttr) { uvLess++; continue; }
         mesh.updateMatrixWorld(true);
         const m = mesh.matrixWorld;
-        const pos = geometry.getAttribute("position");
+        // Brush distances test the DISPLAYED surface (morph-aware, B3):
+        // aim-what-you-see must hold with a jaw open.
+        const pos = displayedPositions(mesh);
         const index = geometry.getIndex();
         const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
         const idxOf = (t, k) => (index ? index.getX(t * 3 + k) : t * 3 + k);
@@ -898,6 +1749,26 @@ function paintPoints(viewer, opts, points) {
         const acc = new Map();
         let minPX = Infinity, maxPX = -Infinity, minPY = Infinity, maxPY = -Infinity;
 
+        // Per-COMMAND centroid cache: the candidate scan used to re-read three
+        // attribute values and apply three matrix transforms per triangle PER
+        // STAMP — on a 64-stamp stroke over 240k triangles that is 46M
+        // transformed reads for values that cannot change within one command
+        // (perf gauntlet #3: the scan was 60-75% of stroke cost; the cache
+        // alone is ~20×). The cheap per-stamp loop below reads plain floats.
+        // Float64 keeps candidate selection bit-identical to the previous
+        // inline Vector3 math (borderline reach comparisons must not flip).
+        const centroids = new Float64Array(triCount * 4);   // cx cy cz reach
+        for (let t = 0; t < triCount; t++) {
+            a.fromBufferAttribute(pos, idxOf(t, 0)).applyMatrix4(m);
+            b.fromBufferAttribute(pos, idxOf(t, 1)).applyMatrix4(m);
+            c.fromBufferAttribute(pos, idxOf(t, 2)).applyMatrix4(m);
+            p.copy(a).add(b).add(c).divideScalar(3);
+            const triR = Math.max(a.distanceTo(p), b.distanceTo(p), c.distanceTo(p));
+            const o = t * 4;
+            centroids[o] = p.x; centroids[o + 1] = p.y; centroids[o + 2] = p.z;
+            centroids[o + 3] = radius * reachScale + triR;
+        }
+
         for (const pt of points) {
             center.set(pt[0], pt[1], pt[2]);
 
@@ -905,25 +1776,26 @@ function paintPoints(viewer, opts, points) {
             // ANCHOR: the triangle nearest the brush center. Its normal is the
             // stamp's reference frame for edge clamping and square orientation.
             const candidates = [];
-            let anchorD2 = Infinity;
+            let anchorD2 = Infinity, anchorT = -1;
             for (let t = 0; t < triCount; t++) {
-                const i0 = idxOf(t, 0), i1 = idxOf(t, 1), i2 = idxOf(t, 2);
-                a.fromBufferAttribute(pos, i0).applyMatrix4(m);
-                b.fromBufferAttribute(pos, i1).applyMatrix4(m);
-                c.fromBufferAttribute(pos, i2).applyMatrix4(m);
-                p.copy(a).add(b).add(c).divideScalar(3);
-                const triR = Math.max(a.distanceTo(p), b.distanceTo(p), c.distanceTo(p));
-                const reach = radius * reachScale + triR;
-                const d2 = p.distanceToSquared(center);
+                const o = t * 4;
+                const dx = centroids[o] - center.x;
+                const dy = centroids[o + 1] - center.y;
+                const dz = centroids[o + 2] - center.z;
+                const reach = centroids[o + 3];
+                const d2 = dx * dx + dy * dy + dz * dz;
                 if (d2 > reach * reach) continue;
                 candidates.push(t);
-                if (d2 < anchorD2) {
-                    anchorD2 = d2;
-                    e1.copy(b).sub(a); e2.copy(c).sub(a);
-                    refN.copy(e1.cross(e2)).normalize();
-                }
+                if (d2 < anchorD2) { anchorD2 = d2; anchorT = t; }
             }
             if (candidates.length === 0) continue;
+            if (anchorT >= 0) {
+                a.fromBufferAttribute(pos, idxOf(anchorT, 0)).applyMatrix4(m);
+                b.fromBufferAttribute(pos, idxOf(anchorT, 1)).applyMatrix4(m);
+                c.fromBufferAttribute(pos, idxOf(anchorT, 2)).applyMatrix4(m);
+                e1.copy(b).sub(a); e2.copy(c).sub(a);
+                refN.copy(e1.cross(e2)).normalize();
+            }
             if (square || cosClamp !== null) {
                 // Tangent frame from the anchor normal (stable for axis-aligned
                 // work: prefer world X as the first tangent, fall back to Z).
@@ -959,7 +1831,36 @@ function paintPoints(viewer, opts, points) {
                 if ((maxU - minU) * (maxV - minV) > dim * dim) continue;
 
                 const denom = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2);
-                if (Math.abs(denom) < 1e-9) continue;
+                if (Math.abs(denom) < 1e-9) {
+                    // UV-degenerate triangle (e.g. split-cut caps: the whole
+                    // cap collapses to ONE anchor UV). It still has real WORLD
+                    // area — if the brush touches it, stamp its single texel so
+                    // caps are paintable (051 field finding: caps rejected
+                    // paint with "touched no surface"). Distance = closest
+                    // point ON the triangle (cap fan triangles are huge; their
+                    // centroids sit outside small brushes that clearly hit them).
+                    _degTri.set(a, b, c);
+                    _degTri.closestPointToPoint(center, p);
+                    const d2c = p.distanceToSquared(center);
+                    if (d2c <= r2) {
+                        const tN = Math.sqrt(d2c) / radius;
+                        const soft = tN <= hardness
+                            ? 1 : falloffFn((tN - hardness) / Math.max(1e-6, 1 - hardness));
+                        const alpha = opacity * soft;
+                        if (alpha > 0.004) {
+                            const px = Math.max(0, Math.min(dim - 1, Math.round(u0)));
+                            const py = Math.max(0, Math.min(dim - 1, Math.round(v0)));
+                            const key = py * dim + px;
+                            const prev = acc.get(key);
+                            if (prev === undefined || alpha > prev) acc.set(key, alpha);
+                            if (px < minPX) minPX = px;
+                            if (px > maxPX) maxPX = px;
+                            if (py < minPY) minPY = py;
+                            if (py > maxPY) maxPY = py;
+                        }
+                    }
+                    continue;
+                }
 
                 for (let py = minV; py <= maxV; py++) {
                     for (let px = minU; px <= maxU; px++) {
@@ -1003,23 +1904,29 @@ function paintPoints(viewer, opts, points) {
             }
         }
 
-        // PHASE 2 — one blend pass over the touched region.
+        // PHASE 2 — one blend pass over the touched region, routed to the
+        // requested CHANNEL's canvas (albedo, packed roughness/metalness,
+        // emissive, or the height data layer).
         if (layer && acc.size > 0) {
+            const target = channel === "albedo"
+                ? layer : ensureChannelLayer(viewer, mesh, channel, layer);
+            if (!target) continue;
             // Blend in sRGB bytes: THREE.Color components are LINEAR working
             // space (r152+ color management), but the canvas is an sRGB texture.
             // Writing linear values paints every non-primary color darker than
             // requested (#00aa00 would land as rgb(0,103,0)). getHexString()
-            // converts back to sRGB.
+            // converts back to sRGB. (Data channels blend raw bytes instead.)
             const hex = parseInt(color.getHexString(), 16);
             const cr = (hex >> 16) & 255, cg = (hex >> 8) & 255, cb = hex & 255;
-            const dim = layer.size;
+            const vByte = Math.round(Math.max(0, Math.min(1, opts.value ?? 0)) * 255);
+            const dim = target.size;
             const w = maxPX - minPX + 1;
-            const img = layer.ctx.getImageData(minPX, minPY, w, maxPY - minPY + 1);
+            const img = target.ctx.getImageData(minPX, minPY, w, maxPY - minPY + 1);
             const data = img.data;
             // Gesture ledger: alpha already applied to each texel THIS gesture
             // (undo_group). A new slice only tops the texel up to its target —
             // total composite = max slice alpha, never the compounded product.
-            const ledger = gestureAlphaMap(opts.undo_group, layer);
+            const ledger = gestureAlphaMap(opts.undo_group, target);
             let painted = 0;
             for (const [key, alpha] of acc) {
                 let eff = alpha;
@@ -1032,18 +1939,27 @@ function paintPoints(viewer, opts, points) {
                 const px = key % dim;
                 const py = (key - px) / dim;
                 const o = ((py - minPY) * w + (px - minPX)) * 4;
-                data[o] = Math.round(data[o] * (1 - eff) + cr * eff);
-                data[o + 1] = Math.round(data[o + 1] * (1 - eff) + cg * eff);
-                data[o + 2] = Math.round(data[o + 2] * (1 - eff) + cb * eff);
+                if (channel === "albedo" || channel === "emissive") {
+                    data[o] = Math.round(data[o] * (1 - eff) + cr * eff);
+                    data[o + 1] = Math.round(data[o + 1] * (1 - eff) + cg * eff);
+                    data[o + 2] = Math.round(data[o + 2] * (1 - eff) + cb * eff);
+                } else if (channel === "roughness") {
+                    data[o + 1] = Math.round(data[o + 1] * (1 - eff) + vByte * eff);
+                } else if (channel === "metalness") {
+                    data[o + 2] = Math.round(data[o + 2] * (1 - eff) + vByte * eff);
+                } else {   // height (grayscale data)
+                    const nv = Math.round(data[o] * (1 - eff) + vByte * eff);
+                    data[o] = nv; data[o + 1] = nv; data[o + 2] = nv;
+                }
                 data[o + 3] = 255;
                 alphaSum += alpha;
                 painted++;
             }
-            stashPaintPatch("paint", layer, minPX, minPY, img.width, img.height);
-            layer.ctx.putImageData(img, minPX, minPY);
+            stashPaintPatch("paint", target, minPX, minPY, img.width, img.height);
+            target.ctx.putImageData(img, minPX, minPY);
             pixels += painted;
             rasterized += acc.size;
-            paintedLayers.add(layer);
+            paintedLayers.add(target);
         }
     }
 
@@ -1077,7 +1993,10 @@ function paintPoints(viewer, opts, points) {
         meanAlpha,
         meshes: paintedLayers.size,
         stamps: points.length,
-        color: "#" + color.getHexString(),
+        ...(channel === "albedo" || channel === "emissive"
+            ? { color: "#" + color.getHexString() }
+            : { value: opts.value }),
+        ...(channel !== "albedo" ? { channel } : {}),
     };
     const notes = [];
     if (meanAlpha < 0.05) {
@@ -1112,18 +2031,46 @@ function paintPoints(viewer, opts, points) {
     return result;
 }
 
-/** Flood the whole paint layer of every UV-mapped mesh with one color. */
+/** Flood the whole paint layer of every UV-mapped mesh with one color —
+ *  or a whole CHANNEL with one value (roughness/metalness/height) or color
+ *  (emissive). */
 export function fillPaint(viewer, opts) {
     assertNotSkinned(viewer);
     const meshes = activeMeshes(viewer);
+    const channel = resolveChannel(opts);
     const color = new THREE.Color(opts.color !== undefined ? String(opts.color) : "#808080");
     let filled = 0;
     for (const mesh of meshes) {
         if (!mesh.geometry.getAttribute("uv")) continue;
         const layer = ensurePaintLayer(viewer, mesh, opts.texture_size);
-        layer.ctx.fillStyle = "#" + color.getHexString();
-        layer.ctx.fillRect(0, 0, layer.size, layer.size);
-        layer.texture.needsUpdate = true;
+        if (channel === "albedo") {
+            layer.ctx.fillStyle = "#" + color.getHexString();
+            layer.ctx.fillRect(0, 0, layer.size, layer.size);
+            layer.texture.needsUpdate = true;
+        } else {
+            const target = ensureChannelLayer(viewer, mesh, channel, layer);
+            if (!target) continue;
+            if (channel === "emissive") {
+                target.ctx.fillStyle = "#" + color.getHexString();
+                target.ctx.fillRect(0, 0, target.size, target.size);
+            } else {
+                // rm shares one canvas: touch ONLY this channel's byte.
+                const img = target.ctx.getImageData(0, 0, target.size, target.size);
+                const d = img.data;
+                const v = Math.round(Math.max(0, Math.min(1, opts.value)) * 255);
+                const off = channel === "roughness" ? 1
+                    : channel === "metalness" ? 2 : 0;
+                if (channel === "height") {
+                    for (let i = 0; i < d.length; i += 4) {
+                        d[i] = v; d[i + 1] = v; d[i + 2] = v; d[i + 3] = 255;
+                    }
+                } else {
+                    for (let i = 0; i < d.length; i += 4) d[i + off] = v;
+                }
+                target.ctx.putImageData(img, 0, 0);
+            }
+            target.texture.needsUpdate = true;
+        }
         filled++;
     }
     if (filled === 0) {
@@ -1132,7 +2079,501 @@ export function fillPaint(viewer, opts) {
     const entry = viewer._activeEntry();
     if (entry) entry.modified = true;
     viewer.invalidate();
-    return { filledMeshes: filled, color: "#" + color.getHexString() };
+    return {
+        filledMeshes: filled,
+        ...(channel === "albedo" || channel === "emissive"
+            ? { color: "#" + color.getHexString() } : { value: opts.value }),
+        ...(channel !== "albedo" ? { channel } : {}),
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Procedural texture patterns (retro-texture lever #2): one command replaces
+// the 160-stamp mosaic batteries. Patterns evaluate in WORLD space per texel
+// (seam-continuous across UV islands, scale-consistent across the object),
+// with integer-hash value noise — no transcendentals, no Math.random, bit-
+// deterministic given {seed, scale} (replays identical).
+// ---------------------------------------------------------------------------
+
+/** Integer-hash → [0,1). xorshift-style avalanche over imul — deterministic. */
+function hash3(ix, iy, iz, seed) {
+    let h = (Math.imul(ix, 374761393) + Math.imul(iy, 668265263)
+        + Math.imul(iz, 1440662683) + Math.imul(seed, 144665)) | 0;
+    h = (h ^ (h >>> 13)) | 0;
+    h = Math.imul(h, 1274126177);
+    h = (h ^ (h >>> 16)) >>> 0;
+    return h / 4294967296;
+}
+
+const _sstep = (t) => t * t * (3 - 2 * t);
+
+/** Trilinear value noise at world point p (already scaled), in [0,1). */
+function valueNoise3(x, y, z, seed) {
+    const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
+    const fx = _sstep(x - ix), fy = _sstep(y - iy), fz = _sstep(z - iz);
+    let acc = 0;
+    for (let c = 0; c < 8; c++) {
+        const dx = c & 1, dy = (c >> 1) & 1, dz = (c >> 2) & 1;
+        const w = (dx ? fx : 1 - fx) * (dy ? fy : 1 - fy) * (dz ? fz : 1 - fz);
+        acc += w * hash3(ix + dx, iy + dy, iz + dz, seed);
+    }
+    return acc;
+}
+
+/** fBm over valueNoise3: `octaves` at lacunarity 2, gain 0.5. */
+function fbm3(x, y, z, seed, octaves, ridged) {
+    let sum = 0, amp = 0.5, freq = 1, norm = 0;
+    for (let o = 0; o < octaves; o++) {
+        let n = valueNoise3(x * freq, y * freq, z * freq, seed + o * 101);
+        if (ridged) n = 1 - Math.abs(n * 2 - 1);
+        sum += n * amp;
+        norm += amp;
+        amp *= 0.5;
+        freq *= 2;
+    }
+    return sum / norm;
+}
+
+/** Worley F1 (nearest jittered cell point), normalized ~[0,1]. */
+function worley3(x, y, z, seed) {
+    const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
+    let best = Infinity;
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+            for (let dz = -1; dz <= 1; dz++) {
+                const cx = ix + dx, cy = iy + dy, cz = iz + dz;
+                const px = cx + hash3(cx, cy, cz, seed);
+                const py = cy + hash3(cx, cy, cz, seed + 31);
+                const pz = cz + hash3(cx, cy, cz, seed + 62);
+                const d = (px - x) ** 2 + (py - y) ** 2 + (pz - z) ** 2;
+                if (d < best) best = d;
+            }
+        }
+    }
+    return Math.min(1, Math.sqrt(best));
+}
+
+const PATTERN_TYPES = ["noise", "speckle", "cells", "stripes", "gradient", "grunge"];
+
+/**
+ * paint_pattern — fill the object (or a region) with a procedural pattern.
+ * World-space evaluation per texel: continuous across UV seams and islands.
+ */
+export function paintPattern(viewer, opts = {}) {
+    assertNotSkinned(viewer);
+    const meshes = activeMeshes(viewer);
+    const channel = resolveChannel(opts);
+    const type = opts.type;
+    if (!PATTERN_TYPES.includes(type)) {
+        throw new Error(`paint_pattern type must be one of ${PATTERN_TYPES.join("|")}.`);
+    }
+    beginPaintOp("paint_pattern", opts.undo_group);
+    const seed = Math.floor(opts.seed !== undefined ? opts.seed : 1);
+    const octaves = Math.max(1, Math.min(6, Math.floor(opts.octaves || 3)));
+    const opacity = opts.opacity !== undefined
+        ? Math.max(0, Math.min(1, opts.opacity)) : 1;
+    const colorA = new THREE.Color(String(opts.color !== undefined ? opts.color : "#555555"));
+    const colorB = new THREE.Color(String(opts.color2 !== undefined ? opts.color2 : "#aaaaaa"));
+    const hexA = parseInt(colorA.getHexString(), 16);
+    const hexB = parseInt(colorB.getHexString(), 16);
+    const ar = (hexA >> 16) & 255, ag = (hexA >> 8) & 255, ab_ = hexA & 255;
+    const br = (hexB >> 16) & 255, bg = (hexB >> 8) & 255, bb = hexB & 255;
+    // Data channels map the pattern into [value, value2].
+    const v0 = opts.value !== undefined ? opts.value : 0;
+    const v1 = opts.value2 !== undefined ? opts.value2 : 1;
+    const density = Math.max(0, Math.min(1, opts.density !== undefined ? opts.density : 0.5));
+    const contrast = Math.max(0.1, opts.contrast !== undefined ? opts.contrast : 1);
+
+    // Region: whole object by default, or a world sphere.
+    const region = opts.region;
+    let regC = null, regR2 = 0;
+    if (region) {
+        if (!Array.isArray(region.center) || region.center.length !== 3
+            || !(region.radius > 0)) {
+            throw new Error("paint_pattern region needs {center: [x,y,z], radius}.");
+        }
+        regC = new THREE.Vector3(...region.center);
+        regR2 = region.radius * region.radius;
+    }
+
+    // Scale: world units per pattern feature. Default: bounding sphere / 12.
+    const entry = viewer._activeEntry();
+    let scale = opts.scale;
+    if (!(scale > 0)) {
+        const s = entry && entry.stats
+            ? Math.max(entry.stats.width, entry.stats.height, entry.stats.depth)
+            : 1;
+        scale = s / 12;
+    }
+    const inv = 1 / scale;
+
+    // Stripes/gradient direction.
+    const dir = new THREE.Vector3(...(opts.direction || [0, 1, 0]));
+    if (dir.lengthSq() < 1e-12) throw new Error("direction must be non-zero.");
+    dir.normalize();
+    let gFrom = null, gLen = 1;
+    if (type === "gradient") {
+        // Project along `direction` across the object's bounds by default.
+        const bb2 = entry && entry.stats ? entry.stats : { width: 1, height: 1, depth: 1 };
+        gLen = Math.abs(dir.x) * bb2.width + Math.abs(dir.y) * bb2.height
+            + Math.abs(dir.z) * bb2.depth || 1;
+    }
+
+    const patternValue = (x, y, z) => {
+        switch (type) {
+            case "noise":
+                return fbm3(x * inv, y * inv, z * inv, seed, octaves, false);
+            case "grunge": {
+                const n = fbm3(x * inv, y * inv, z * inv, seed, octaves, true);
+                return Math.max(0, Math.min(1, (n - 0.5) * contrast + 0.5));
+            }
+            case "cells":
+                return worley3(x * inv, y * inv, z * inv, seed);
+            case "speckle": {
+                const n = valueNoise3(x * inv * 2, y * inv * 2, z * inv * 2, seed);
+                return n < density ? 1 : 0;
+            }
+            case "stripes": {
+                const s = (x * dir.x + y * dir.y + z * dir.z) * inv;
+                const f = s - Math.floor(s);
+                return f < density ? 1 : 0;
+            }
+            case "gradient": {
+                const t = (x * dir.x + y * dir.y + z * dir.z) / gLen + 0.5;
+                return Math.max(0, Math.min(1, t));
+            }
+        }
+        return 0;
+    };
+
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    const pw = new THREE.Vector3();
+    let pixels = 0;
+    const paintedLayers = new Set();
+
+    for (const mesh of meshes) {
+        const geometry = mesh.geometry;
+        const uvAttr = geometry.getAttribute("uv");
+        if (!uvAttr) continue;
+        mesh.updateMatrixWorld(true);
+        const m = mesh.matrixWorld;
+        const pos = displayedPositions(mesh);
+        const index = geometry.getIndex();
+        const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+        const idxOf = (t, k) => (index ? index.getX(t * 3 + k) : t * 3 + k);
+
+        const layer = ensurePaintLayer(viewer, mesh, opts.texture_size);
+        const target = channel === "albedo"
+            ? layer : ensureChannelLayer(viewer, mesh, channel, layer);
+        if (!target) continue;
+        const dim = target.size;
+        const img = target.ctx.getImageData(0, 0, dim, dim);
+        const data = img.data;
+
+        for (let t = 0; t < triCount; t++) {
+            const i0 = idxOf(t, 0), i1 = idxOf(t, 1), i2 = idxOf(t, 2);
+            a.fromBufferAttribute(pos, i0).applyMatrix4(m);
+            b.fromBufferAttribute(pos, i1).applyMatrix4(m);
+            c.fromBufferAttribute(pos, i2).applyMatrix4(m);
+            if (regC) {
+                pw.copy(a).add(b).add(c).divideScalar(3);
+                const triR = Math.max(a.distanceTo(pw), b.distanceTo(pw), c.distanceTo(pw));
+                const d2 = pw.distanceToSquared(regC);
+                const reach = Math.sqrt(regR2) + triR;
+                if (d2 > reach * reach) continue;
+            }
+            const [u0, vv0] = uvToPixel(target, uvAttr.getX(i0), uvAttr.getY(i0));
+            const [u1, vv1] = uvToPixel(target, uvAttr.getX(i1), uvAttr.getY(i1));
+            const [u2, vv2] = uvToPixel(target, uvAttr.getX(i2), uvAttr.getY(i2));
+            const minU = Math.max(0, Math.floor(Math.min(u0, u1, u2)));
+            const maxU = Math.min(dim - 1, Math.ceil(Math.max(u0, u1, u2)));
+            const minV = Math.max(0, Math.floor(Math.min(vv0, vv1, vv2)));
+            const maxV = Math.min(dim - 1, Math.ceil(Math.max(vv0, vv1, vv2)));
+            if (maxU < minU || maxV < minV) continue;
+            if ((maxU - minU) * (maxV - minV) > dim * dim) continue;
+            const denom = (vv1 - vv2) * (u0 - u2) + (u2 - u1) * (vv0 - vv2);
+            if (Math.abs(denom) < 1e-9) continue;
+            for (let py = minV; py <= maxV; py++) {
+                for (let px = minU; px <= maxU; px++) {
+                    const w0 = ((vv1 - vv2) * (px + 0.5 - u2) + (u2 - u1) * (py + 0.5 - vv2)) / denom;
+                    const w1 = ((vv2 - vv0) * (px + 0.5 - u2) + (u0 - u2) * (py + 0.5 - vv2)) / denom;
+                    const w2 = 1 - w0 - w1;
+                    const tol = 0.75 / Math.max(1, Math.min(dim, 2048));
+                    if (w0 < -tol || w1 < -tol || w2 < -tol) continue;
+                    // World position of this texel (the seam-continuity core).
+                    pw.set(
+                        a.x * w0 + b.x * w1 + c.x * w2,
+                        a.y * w0 + b.y * w1 + c.y * w2,
+                        a.z * w0 + b.z * w1 + c.z * w2);
+                    if (regC && pw.distanceToSquared(regC) > regR2) continue;
+                    const val = patternValue(pw.x, pw.y, pw.z);
+                    const o = (py * dim + px) * 4;
+                    if (channel === "albedo" || channel === "emissive") {
+                        const cr = ar + (br - ar) * val;
+                        const cg2 = ag + (bg - ag) * val;
+                        const cb2 = ab_ + (bb - ab_) * val;
+                        data[o] = Math.round(data[o] * (1 - opacity) + cr * opacity);
+                        data[o + 1] = Math.round(data[o + 1] * (1 - opacity) + cg2 * opacity);
+                        data[o + 2] = Math.round(data[o + 2] * (1 - opacity) + cb2 * opacity);
+                    } else {
+                        const vb = Math.round((v0 + (v1 - v0) * val) * 255);
+                        if (channel === "roughness") {
+                            data[o + 1] = Math.round(data[o + 1] * (1 - opacity) + vb * opacity);
+                        } else if (channel === "metalness") {
+                            data[o + 2] = Math.round(data[o + 2] * (1 - opacity) + vb * opacity);
+                        } else {
+                            const nv = Math.round(data[o] * (1 - opacity) + vb * opacity);
+                            data[o] = nv; data[o + 1] = nv; data[o + 2] = nv;
+                        }
+                    }
+                    data[o + 3] = 255;
+                    pixels++;
+                }
+            }
+        }
+        stashPaintPatch("paint_pattern", target, 0, 0, dim, dim);
+        target.ctx.putImageData(img, 0, 0);
+        target.texture.needsUpdate = true;
+        paintedLayers.add(target);
+    }
+    if (pixels === 0) {
+        throw new Error("Pattern touched no texels — check the region "
+            + "{center, radius} (world coords) and that the object has UVs.");
+    }
+    const entry2 = viewer._activeEntry();
+    if (entry2) entry2.modified = true;
+    viewer.invalidate();
+    return {
+        painted: pixels,
+        type, seed, scale: Math.round(scale * 10000) / 10000,
+        meshes: paintedLayers.size,
+        ...(channel !== "albedo" ? { channel } : {}),
+        note: "Pattern evaluated in WORLD space — continuous across UV seams; "
+            + "same seed + scale replays identically.",
+    };
+}
+
+/**
+ * bake_normals — Sobel-derive a tangent-space normal map from the painted
+ * HEIGHT channel (the other half of the height workflow: paint relief with
+ * any brush/pattern into channel:"height", then bake it into shading-visible
+ * micro-relief that survives simplify and exports as a standard normalMap).
+ */
+export function bakeNormals(viewer, opts = {}) {
+    assertNotSkinned(viewer);
+    const meshes = activeMeshes(viewer);
+    const strength = Math.max(0.05, Math.min(10,
+        opts.strength !== undefined ? Number(opts.strength) : 1));
+    let baked = 0;
+    for (const mesh of meshes) {
+        const stash = mesh._mvOriginalMaterial || mesh.material;
+        const material = Array.isArray(stash) ? stash[0] : stash;
+        const chans = material && material.userData._mvChannels;
+        const height = chans && chans.height;
+        if (!height) continue;
+
+        const dim = height.size;
+        if (!chans.normal) {
+            if (paintTexelsAllocated + dim * dim > PAINT_TEXEL_BUDGET) {
+                throw new Error("Paint memory budget exceeded while creating "
+                    + "the normal-map layer — clear_paint unused layers.");
+            }
+            const canvas = document.createElement("canvas");
+            canvas.width = canvas.height = dim;
+            const ctx = canvas.getContext("2d", { willReadFrequently: true });
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.colorSpace = THREE.NoColorSpace;
+            texture.flipY = height.flipY;
+            applyLayerFiltering(texture, dim);
+            chans.prevNormal = { normalMap: material.normalMap || null };
+            material.normalMap = texture;
+            material.normalScale = new THREE.Vector2(1, 1);
+            material.needsUpdate = true;
+            paintTexelsAllocated += dim * dim;
+            chans.normal = { canvas, ctx, texture, size: dim,
+                             flipY: height.flipY, channel: "normal" };
+        }
+        const target = chans.normal;
+        const src = height.ctx.getImageData(0, 0, dim, dim).data;
+        const out = target.ctx.getImageData(0, 0, dim, dim);
+        const d = out.data;
+        const hAt = (x, y) => {
+            const cx = Math.max(0, Math.min(dim - 1, x));
+            const cy = Math.max(0, Math.min(dim - 1, y));
+            return src[(cy * dim + cx) * 4] / 255;
+        };
+        for (let y = 0; y < dim; y++) {
+            for (let x = 0; x < dim; x++) {
+                // Sobel gradients (clamped at borders — UV island edges may
+                // show seams if height features cross them; disclosed).
+                const gx = (hAt(x + 1, y - 1) + 2 * hAt(x + 1, y) + hAt(x + 1, y + 1))
+                    - (hAt(x - 1, y - 1) + 2 * hAt(x - 1, y) + hAt(x - 1, y + 1));
+                const gy = (hAt(x - 1, y + 1) + 2 * hAt(x, y + 1) + hAt(x + 1, y + 1))
+                    - (hAt(x - 1, y - 1) + 2 * hAt(x, y - 1) + hAt(x + 1, y - 1));
+                const nx = -gx * strength, ny = -gy * strength, nz = 1;
+                const inv = 1 / Math.hypot(nx, ny, nz);
+                const o = (y * dim + x) * 4;
+                d[o] = Math.round((nx * inv * 0.5 + 0.5) * 255);
+                d[o + 1] = Math.round((ny * inv * 0.5 + 0.5) * 255);
+                d[o + 2] = Math.round((nz * inv * 0.5 + 0.5) * 255);
+                d[o + 3] = 255;
+            }
+        }
+        target.ctx.putImageData(out, 0, 0);
+        target.texture.needsUpdate = true;
+        baked++;
+    }
+    if (baked === 0) {
+        throw new Error("No height channel to bake — paint relief first with "
+            + "paint/paint_pattern {channel:'height', value...}, then bake_normals.");
+    }
+    const entry = viewer._activeEntry();
+    if (entry) entry.modified = true;
+    viewer.invalidate();
+    return { bakedMeshes: baked, strength,
+             note: "Tangent-space normal map derived from the height channel "
+                 + "(exports as a standard glTF normalMap). Re-run after "
+                 + "further height painting; height features crossing UV "
+                 + "island borders can seam." };
+}
+
+// ---------------------------------------------------------------------------
+// Region deformers (retro-sculpt lever #2): taper/bend/twist/stretch along an
+// axis spine — closed-form per-weld transforms (no RNG, welded-safe). What
+// grab salvos could never do cleanly: a mandible taper is ONE call.
+// ---------------------------------------------------------------------------
+
+export function deformRegion(viewer, opts = {}) {
+    assertNotSkinned(viewer);
+    assertNoMorphInfluence(viewer);
+    const kinds = ["taper", "bend", "twist", "stretch"];
+    const kind = opts.kind;
+    if (!kinds.includes(kind)) {
+        throw new Error(`deform_region kind must be ${kinds.join("|")}.`);
+    }
+    const axis = opts.axis;
+    if (!axis || !Array.isArray(axis.from) || axis.from.length !== 3
+        || !Array.isArray(axis.to) || axis.to.length !== 3) {
+        throw new Error("deform_region needs axis: {from: [x,y,z], to: [x,y,z]} "
+            + "(world) — the spine the deformation runs along (t=0 at from, "
+            + "1 at to; from-side stays put).");
+    }
+    const A = new THREE.Vector3(...axis.from);
+    const B = new THREE.Vector3(...axis.to);
+    const AB = B.clone().sub(A);
+    const len = AB.length();
+    if (len < 1e-9) throw new Error("axis.from and axis.to coincide.");
+    const dir = AB.clone().divideScalar(len);
+
+    const factor = opts.factor !== undefined ? Number(opts.factor) : 0.5;
+    const angleDeg = opts.angle_deg !== undefined ? Number(opts.angle_deg) : 30;
+    if (kind === "taper" && !(factor > 0 && factor <= 4)) {
+        throw new Error("taper factor must be in (0, 4] — the cross-section "
+            + "scale at t=1 (0.5 = half as wide at the tip).");
+    }
+    if ((kind === "bend" || kind === "twist")
+        && !(Number.isFinite(angleDeg) && Math.abs(angleDeg) <= 180)) {
+        throw new Error("angle_deg must be in [-180, 180].");
+    }
+    if (kind === "stretch" && !(factor > -0.95 && factor <= 4)) {
+        throw new Error("stretch factor must be in (-0.95, 4] — fractional "
+            + "elongation at t=1 (0.3 = 30% longer).");
+    }
+    // Bend needs a plane normal: rotation axis perpendicular to the spine.
+    let bendAxis = null;
+    if (kind === "bend") {
+        const d = opts.direction;
+        if (!Array.isArray(d) || d.length !== 3) {
+            throw new Error("bend needs direction: [x,y,z] — the world axis to "
+                + "rotate ABOUT (perpendicular to the spine; e.g. [0,0,1] to "
+                + "bend a vertical spine sideways in X).");
+        }
+        bendAxis = new THREE.Vector3(...d);
+        bendAxis.addScaledVector(dir, -bendAxis.dot(dir));   // orthogonalize
+        if (bendAxis.lengthSq() < 1e-12) {
+            throw new Error("bend direction is parallel to the spine — give a "
+                + "perpendicular axis.");
+        }
+        bendAxis.normalize();
+    }
+    const ease = (t) => t * t * (3 - 2 * t);   // smoothstep
+
+    const entry = viewer._activeEntry();
+    viewer._ensureResetSnapshot(entry);
+    const meshes = activeMeshes(viewer);
+    const tmp = new THREE.Vector3();
+    const rel = new THREE.Vector3();
+    const q = new THREE.Quaternion();
+    let affected = 0;
+    const touched = new Set();
+    const seen = new Set();
+    for (const mesh of meshes) {
+        if (seen.has(mesh.geometry)) continue;
+        seen.add(mesh.geometry);
+        ensureMutable(mesh.geometry);
+        const weld = getWeld(mesh.geometry);
+        mesh.updateMatrixWorld(true);
+        const m = mesh.matrixWorld;
+        const inv = new THREE.Matrix4().copy(m).invert();
+        const pos = mesh.geometry.getAttribute("position");
+        let moved = 0;
+        for (const c of weld.members.keys()) {
+            tmp.fromBufferAttribute(pos, c).applyMatrix4(m);   // world
+            const t = tmp.clone().sub(A).dot(dir) / len;
+            if (t <= 0 || t > 1.5) continue;   // from-side anchored; far cap
+            const tc = Math.min(1, t);
+            const e = ease(tc);
+            const before = tmp.clone();
+            if (kind === "taper") {
+                const s = 1 + (factor - 1) * e;
+                // Scale the perpendicular component about the axis line.
+                const axialD = tmp.clone().sub(A).dot(dir);
+                const onAxis = A.clone().addScaledVector(dir, axialD);
+                rel.copy(tmp).sub(onAxis).multiplyScalar(s);
+                tmp.copy(onAxis).add(rel);
+            } else if (kind === "twist") {
+                const axialD = tmp.clone().sub(A).dot(dir);
+                const onAxis = A.clone().addScaledVector(dir, axialD);
+                q.setFromAxisAngle(dir, (angleDeg * Math.PI / 180) * e);
+                rel.copy(tmp).sub(onAxis).applyQuaternion(q);
+                tmp.copy(onAxis).add(rel);
+            } else if (kind === "bend") {
+                q.setFromAxisAngle(bendAxis, (angleDeg * Math.PI / 180) * e);
+                rel.copy(tmp).sub(A).applyQuaternion(q);
+                tmp.copy(A).add(rel);
+            } else {   // stretch
+                tmp.addScaledVector(dir, len * factor * e);
+            }
+            if (tmp.distanceToSquared(before) < 1e-18) continue;
+            // Write to every duplicate of the weld (seam-safe).
+            tmp.applyMatrix4(inv);
+            for (const i of weld.members.get(c)) {
+                pos.setXYZ(i, tmp.x, tmp.y, tmp.z);
+            }
+            moved++;
+        }
+        if (moved > 0) {
+            affected += moved;
+            touched.add(mesh.geometry);
+        }
+    }
+    if (touched.size === 0) {
+        throw new Error("Deformation touched no vertices — check the axis "
+            + "(world coords; t=0 at `from` is anchored, deformation grows "
+            + "toward `to`)." );
+    }
+    finalizeSculpt(viewer, touched);
+    const s = entry && entry.stats ? entry.stats : null;
+    const r4v = (v) => Math.round(v * 10000) / 10000;
+    return {
+        kind, affected,
+        axisLength: r4v(len),
+        ...(kind === "taper" || kind === "stretch" ? { factor } : { angle_deg: angleDeg }),
+        newSize: s ? [r4v(s.width), r4v(s.height), r4v(s.depth)] : null,
+        note: "Deformation eases from ZERO at axis.from to full at axis.to "
+            + "(smoothstep). regularize_region after strong tapers/bends — "
+            + "cross-sections compress facets.",
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,7 +2610,8 @@ export function brushFootprint(mesh, layer, center, radius, hardness, falloffFn)
     if (!uvAttr) return null;
     mesh.updateMatrixWorld(true);
     const m = mesh.matrixWorld;
-    const pos = geometry.getAttribute("position");
+    // Displayed (morph-aware) positions: heal brushes aim what the eye sees.
+    const pos = displayedPositions(mesh);
     const index = geometry.getIndex();
     const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
     const idxOf = (t, k) => (index ? index.getX(t * 3 + k) : t * 3 + k);
@@ -1235,6 +2677,7 @@ export function brushFootprint(mesh, layer, center, radius, hardness, falloffFn)
  */
 export function blurPaint(viewer, opts = {}) {
     assertNotSkinned(viewer);
+    assertNoMorphForHeal(viewer, "blur_paint");
     const meshes = activeMeshes(viewer);
     beginPaintOp("blur_paint", opts.undo_group);
     const radius = resolveRadius(viewer, opts, "blur_paint");
@@ -1315,6 +2758,7 @@ export function blurPaint(viewer, opts = {}) {
  */
 export function clonePaint(viewer, opts = {}) {
     assertNotSkinned(viewer);
+    assertNoMorphForHeal(viewer, "clone_paint");
     const meshes = activeMeshes(viewer);
     beginPaintOp("clone_paint", opts.undo_group);
     const radius = resolveRadius(viewer, opts, "clone_paint");
@@ -1346,8 +2790,12 @@ export function clonePaint(viewer, opts = {}) {
         const idxOf = (t, k) => (index ? index.getX(t * 3 + k) : t * 3 + k);
 
         // Source candidate triangles (centroid prefilter around `from`) + the
-        // source anchor normal for the 45° agreement check.
+        // source anchor normal for the 45° agreement check. Each candidate
+        // keeps its centroid + reach so the per-texel loop can reject far
+        // triangles on squared distance BEFORE the exact closest-point test
+        // (mirror_paint's pattern — exactness preserved, ~10-50× fewer tests).
         const srcTris = [];
+        const srcData = [];
         let srcNormal = null, srcD2 = Infinity;
         const e1 = new THREE.Vector3(), e2 = new THREE.Vector3();
         for (let t = 0; t < triCount; t++) {
@@ -1359,6 +2807,7 @@ export function clonePaint(viewer, opts = {}) {
             const d2 = p.distanceToSquared(from);
             if (d2 > (radius * 1.5 + triR) ** 2) continue;
             srcTris.push(t);
+            srcData.push({ t, cx: p.x, cy: p.y, cz: p.z, reach: triR });
             if (d2 < srcD2) {
                 srcD2 = d2;
                 e1.copy(b).sub(a); e2.copy(c).sub(a);
@@ -1370,6 +2819,19 @@ export function clonePaint(viewer, opts = {}) {
         const foot = brushFootprint(mesh, layer, to, radius,
             opts.hardness !== undefined ? opts.hardness : 0.6, falloffFn);
         if (!foot || foot.size === 0) continue;
+
+        // Correspondence budget — parity with mirror_paint (perf gauntlet:
+        // sampleSource is O(texels × source triangles); a radius-0.4 heal on
+        // a 240k mesh ran 119 s with no way to know it wasn't hung).
+        const work = foot.size * srcTris.length;
+        if (work > 600e6) {
+            throw new Error(
+                `clone_paint region too large: ${foot.size.toLocaleString()} texels × `
+                + `${srcTris.length.toLocaleString()} source triangles ≈ `
+                + `${Math.round(work / 1e6)}M correspondence tests (budget 600M). `
+                + "Use a smaller radius/radius_rel (heal in passes) or a lower "
+                + "texture_size.");
+        }
 
         // Destination anchor normal (nearest tri to `to`).
         let dstNormal = null, dstD2 = Infinity;
@@ -1403,10 +2865,17 @@ export function clonePaint(viewer, opts = {}) {
         const target = new THREE.Vector3();
         const sampleSource = (world) => {
             target.set(world[0] + offset.x, world[1] + offset.y, world[2] + offset.z);
-            let bestD = Infinity, bestUV = null;
+            let bestD = Infinity, bestDist = Infinity, bestUV = null;
             const closest = new THREE.Vector3();
             const triangle = new THREE.Triangle();
-            for (const t of srcTris) {
+            for (const s of srcData) {
+                // Conservative rejection: the closest point of a triangle is
+                // at least (centroidDist − reach) away — skip without the
+                // exact test when that bound cannot beat the current best.
+                const dx = s.cx - target.x, dy = s.cy - target.y, dz = s.cz - target.z;
+                const bound = bestDist + s.reach;
+                if (dx * dx + dy * dy + dz * dz > bound * bound) continue;
+                const t = s.t;
                 const i0 = idxOf(t, 0), i1 = idxOf(t, 1), i2 = idxOf(t, 2);
                 tri.a.fromBufferAttribute(pos, i0).applyMatrix4(m);
                 tri.b.fromBufferAttribute(pos, i1).applyMatrix4(m);
@@ -1416,6 +2885,7 @@ export function clonePaint(viewer, opts = {}) {
                 const d = closest.distanceToSquared(target);
                 if (d < bestD) {
                     bestD = d;
+                    bestDist = Math.sqrt(d);
                     triangle.getBarycoord(closest, bary);
                     const u = uvAttr.getX(i0) * bary.x + uvAttr.getX(i1) * bary.y + uvAttr.getX(i2) * bary.z;
                     const vv = uvAttr.getY(i0) * bary.x + uvAttr.getY(i1) * bary.y + uvAttr.getY(i2) * bary.z;
@@ -1493,7 +2963,9 @@ export function resizeTexture(viewer, opts = {}) {
         before = before || layer.size;
         const canvas = document.createElement("canvas");
         canvas.width = canvas.height = size;
-        const ctx = canvas.getContext("2d");
+        // Becomes the live paint layer — same readback-sync trap as
+        // ensurePaintLayer (23.5 s first getImageData without the flag).
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
         ctx.imageSmoothingEnabled = filter !== "nearest";
         ctx.imageSmoothingQuality = "high";
         ctx.drawImage(layer.canvas, 0, 0, size, size);
@@ -1556,7 +3028,8 @@ export function clonePaintLayer(material) {
     }
     const canvas = document.createElement("canvas");
     canvas.width = canvas.height = layer.size;
-    const ctx = canvas.getContext("2d");
+    // Becomes a live paint layer — keep it CPU-side (readback-sync trap).
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
     ctx.drawImage(layer.canvas, 0, 0);
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
@@ -1632,9 +3105,52 @@ export function raycast(viewer, origin, direction) {
     return castInto(viewer, raycaster);
 }
 
+/**
+ * Probe acceleration (perf gauntlet #5): agents fire hundreds of raycast/pick
+ * probes per build, and three's default Mesh.raycast is a linear triangle scan
+ * (26 ms/ray at 240k tris). A lazily built MeshBVH answers the same query in
+ * ~5 µs. `indirect: true` is LOAD-BEARING: the default build reorders the
+ * geometry index for locality, which would change triangle iteration order —
+ * and several engine algorithms break ties by that order (determinism).
+ * Probes are READS (never replicated), so the accelerated path itself has no
+ * replay surface; the cache keys on the entry's geometryRev (sculpt bumps it,
+ * topology ops replace the geometry object entirely).
+ */
+function ensureRaycastBVH(viewer, meshes) {
+    for (const mesh of meshes) {
+        const g = mesh.geometry;
+        if (!g || !g.getAttribute("position")) continue;
+        // Morphed/skinned surfaces DISPLAY displaced positions that a
+        // base-position BVH knows nothing about — three's default raycast
+        // handles both; acceleration would miss the displayed surface
+        // (regression caught by the morph suite). Drop any stale tree so
+        // acceleratedRaycast falls back to the default path.
+        if (mesh.isSkinnedMesh
+            || (mesh.morphTargetInfluences && mesh.morphTargetInfluences.length)) {
+            if (g.boundsTree && g.disposeBoundsTree) g.disposeBoundsTree();
+            continue;
+        }
+        if (g.getAttribute("position").count < 3000) continue;   // scan is faster
+        const entry = viewer._entryForNode(mesh);
+        const rev = entry ? entry.geometryRev : 0;
+        if (g.boundsTree && g.userData && g.userData._mvBVHRev === rev) continue;
+        try {
+            if (g.boundsTree && g.disposeBoundsTree) g.disposeBoundsTree();
+            g.computeBoundsTree({ indirect: true });
+            if (!g.userData) g.userData = {};
+            g.userData._mvBVHRev = rev;
+        } catch { /* soup edge cases: the default linear raycast still works */ }
+    }
+}
+
 function castInto(viewer, raycaster) {
     viewer._scene.updateMatrixWorld(true);
-    const hits = raycaster.intersectObjects(viewer._visibleMeshes(), false);
+    const meshes = viewer._visibleMeshes();
+    ensureRaycastBVH(viewer, meshes);
+    // Nearest-hit only (castInto returns hits[0]): lets the BVH terminate
+    // early instead of collecting every intersection along the ray.
+    raycaster.firstHitOnly = true;
+    const hits = raycaster.intersectObjects(meshes, false);
     if (hits.length === 0) {
         return { hit: false,
                  hint: "Ray hit nothing. frame_all or orbit first so the target is "

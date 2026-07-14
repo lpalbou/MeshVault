@@ -9,7 +9,10 @@
  */
 
 import * as THREE from "three";
-import { clonePaintLayer } from "./sculpt.js";
+import { clonePaintLayer, ensureFreshNormals } from "./sculpt.js";
+import { capGeometry } from "./capping.js";
+import { meshIssueCounts } from "./repair.js";
+import { dropMorphs } from "./morphs.js";
 
 const DETECT_TRIANGLE_BUDGET = 300000;
 const MAX_PARTS = 24;
@@ -195,9 +198,49 @@ export function detectParts(viewer) {
              partitionId: entry.geometryRev, note };
 }
 
-/** Build a sub-geometry from a triangle subset (fresh attributes, no userData). */
+/**
+ * Texel sampler over a mesh's drawable base texture (cap anchor color picking
+ * — 051 field fix B3). Returns (u, v) -> [r, g, b] | null, or null when the
+ * texture is unreadable (KTX2/GPU-only) or absent.
+ */
+function rimColorSampler(mesh) {
+    const stash = mesh._mvOriginalMaterial || mesh.material;
+    const mat = Array.isArray(stash) ? stash[0] : stash;
+    const map = mat && mat.map;
+    const img = map && map.image;
+    const drawable = img && ((typeof HTMLImageElement !== "undefined" && img instanceof HTMLImageElement)
+        || (typeof HTMLCanvasElement !== "undefined" && img instanceof HTMLCanvasElement)
+        || (typeof ImageBitmap !== "undefined" && img instanceof ImageBitmap));
+    if (!drawable) return null;
+    // A small readback canvas is plenty for a median-of-rim decision.
+    const W = Math.min(img.width || 256, 512);
+    const H = Math.min(img.height || 256, 512);
+    let data;
+    try {
+        const cv = document.createElement("canvas");
+        cv.width = W; cv.height = H;
+        const ctx = cv.getContext("2d");
+        ctx.drawImage(img, 0, 0, W, H);
+        data = ctx.getImageData(0, 0, W, H).data;
+    } catch {
+        return null;   // tainted canvas etc. — anchor falls back to first vertex
+    }
+    const flipY = map.flipY !== false;
+    return (uu, vv) => {
+        const x = Math.max(0, Math.min(W - 1, Math.round(uu * W)));
+        const y = Math.max(0, Math.min(H - 1, Math.round((flipY ? 1 - vv : vv) * H)));
+        const o = (y * W + x) * 4;
+        return [data[o], data[o + 1], data[o + 2]];
+    };
+}
+
+/** Build a sub-geometry from a triangle subset (fresh attributes, no userData).
+ *  Returns {geometry, remap} — remap (orig index -> new index) lets callers
+ *  carry vertex references (rim edges) into the new indexing. */
 function extractSubGeometry(mesh, tris) {
     const src = mesh.geometry;
+    // Bulk-replay normal deferral: attribute copies must see fresh values.
+    ensureFreshNormals(src);
     const index = src.getIndex();
     const idxOf = (t, k) => (index ? index.getX(t * 3 + k) : t * 3 + k);
     const names = Object.keys(src.attributes);
@@ -226,11 +269,21 @@ function extractSubGeometry(mesh, tris) {
     geo.setIndex(newIndex);
     geo.computeBoundingBox();
     geo.computeBoundingSphere();
-    return geo;
+    return { geometry: geo, remap };
 }
 
-/** Count welded boundary edges added by separating `tris` from the rest. */
-function cutEdgeCount(mesh, selected) {
+/**
+ * Classify welded edges of a split into BECAME-OPEN rims (the 051 review's
+ * correct rim definition — plane-distance tolerances cannot work under
+ * whole-triangle classification, and pre-existing open boundaries must never
+ * be treated as cut rims; they never qualify here by construction).
+ *
+ * Returns { cut, partRim, remRim } — cut = welded edges crossing the split
+ * (the historical openEdgesAdded number); partRim/remRim = [[a,b]...] RAW
+ * vertex-index pairs, each representative taken from a triangle on ITS side
+ * (so the indices survive that side's extractSubGeometry remap).
+ */
+function classifyCutEdges(mesh, selected) {
     const geometry = mesh.geometry;
     const pos = geometry.getAttribute("position");
     const index = geometry.getIndex();
@@ -249,30 +302,52 @@ function cutEdgeCount(mesh, selected) {
     };
     const inSel = new Uint8Array(triCount);
     for (const t of selected) inSel[t] = 1;
-    const edges = new Map();   // "a_b" -> {sel, out}
+    const edges = new Map();   // key -> {sel, out, repSel: [a,b]|null, repOut}
     for (let t = 0; t < triCount; t++) {
-        const cs = [canonOf(idxOf(t, 0)), canonOf(idxOf(t, 1)), canonOf(idxOf(t, 2))];
+        const raw = [idxOf(t, 0), idxOf(t, 1), idxOf(t, 2)];
+        const cs = raw.map(canonOf);
         for (let k = 0; k < 3; k++) {
             const a = Math.min(cs[k], cs[(k + 1) % 3]);
             const b = Math.max(cs[k], cs[(k + 1) % 3]);
             const key = a * 16777216 + b;
             let e = edges.get(key);
-            if (!e) { e = { sel: 0, out: 0 }; edges.set(key, e); }
-            if (inSel[t]) e.sel++; else e.out++;
+            if (!e) { e = { sel: 0, out: 0, repSel: null, repOut: null }; edges.set(key, e); }
+            if (inSel[t]) {
+                e.sel++;
+                if (!e.repSel) e.repSel = [raw[k], raw[(k + 1) % 3]];
+            } else {
+                e.out++;
+                if (!e.repOut) e.repOut = [raw[k], raw[(k + 1) % 3]];
+            }
         }
     }
     let cut = 0;
+    const partRim = [];
+    const remRim = [];
     for (const e of edges.values()) {
         if (e.sel > 0 && e.out > 0) cut++;
+        // Z2 boundary rule (051 field fix B1): a side's edge BECOMES boundary
+        // when its use count is ODD, provided it was not boundary before
+        // (total EVEN — pre-existing open edges have odd totals and must
+        // never be treated as cut rims). The naive `sel === 1` special case
+        // missed doubled-shell edges (sel:1/out:3 on the scanned chest lip),
+        // leaving degree-1 dead ends no loop walk could ever close. Mod-2
+        // boundaries are cycles, so every rim vertex has even degree and a
+        // closed-loop decomposition always exists.
+        if ((e.sel + e.out) % 2 === 0) {
+            if (e.sel % 2 === 1 && e.out > 0) partRim.push(e.repSel);
+            if (e.out % 2 === 1 && e.sel > 0) remRim.push(e.repOut);
+        }
     }
-    return cut;
+    return { cut, partRim, remRim };
 }
 
 /**
  * split_object — extract parts of the ACTIVE object into NEW scene objects.
  * Selection: detect_parts partIds (+ partitionId handshake) OR a plane cut
  * ({axis, at} convenience / {plane: {point, normal}} general). Plane cuts are
- * whole-triangle classification (no capping — cut faces are HOLLOW).
+ * whole-triangle classification; cut faces are hollow unless cap:true closes
+ * them (backlog 051 — see viewer/capping.js).
  */
 export function splitObject(viewer, opts = {}) {
     const entry = requireActive(viewer);
@@ -314,6 +389,7 @@ export function splitObject(viewer, opts = {}) {
     const selections = new Map();   // mesh -> Set(tri)
     let suggestedPivot = null;
     let mode;
+    let splitNormal = null;   // signed classification normal (plane cuts)
 
     if (opts.parts && opts.parts.length) {
         mode = "parts";
@@ -366,6 +442,7 @@ export function splitObject(viewer, opts = {}) {
             normal = new THREE.Vector3(...pl.normal).normalize();
             if (normal.lengthSq() < 1e-12) throw new Error("plane.normal must be non-zero.");
         }
+        splitNormal = normal.clone();
         // Classify by triangle CENTROID side (whole triangles; no cutting).
         const v = new THREE.Vector3();
         const centroid = new THREE.Vector3();
@@ -397,9 +474,22 @@ export function splitObject(viewer, opts = {}) {
     }
 
     // ---- build all geometries FIRST (atomicity) -----------------------------
-    const built = [];   // {mesh, extracted, remainder|null}
+    // Field-proven default (051): plane cuts cap unless the caller opts out;
+    // parts-mode has no cut face, so its default is no-cap and only an
+    // EXPLICIT cap:true earns the teaching error.
+    const wantCap = opts.cap !== undefined ? !!opts.cap : mode === "plane";
+    if (opts.cap === true && mode !== "plane") {
+        throw new Error("cap:true applies to PLANE cuts only (parts-mode splits "
+            + "separate existing components — there is no cut face to cap).");
+    }
+    const built = [];   // {mesh, extracted, remainder|null, capPart, capRem}
     let selectedTotal = 0;
     let openEdgesAdded = 0;
+    const capReport = wantCap
+        ? { part: { loops: 0, capTriangles: 0, skippedEdges: 0, fallbackFans: 0 },
+            remaining: { loops: 0, capTriangles: 0, skippedEdges: 0, fallbackFans: 0 },
+            uvModes: new Set() }
+        : null;
     const pivotAccum = new THREE.Vector3();
     let pivotCount = 0;
 
@@ -409,7 +499,12 @@ export function splitObject(viewer, opts = {}) {
         const triCount = triCountOf(mesh.geometry);
         const selected = [...set];
         selectedTotal += selected.length;
-        openEdgesAdded += mode === "plane" ? cutEdgeCount(mesh, selected) : 0;
+
+        let rims = null;
+        if (mode === "plane") {
+            rims = classifyCutEdges(mesh, selected);
+            openEdgesAdded += rims.cut;
+        }
 
         const box = triangleBox(mesh, selected);
         pivotAccum.add(box.getCenter(new THREE.Vector3()));
@@ -417,11 +512,46 @@ export function splitObject(viewer, opts = {}) {
 
         const rest = [];
         for (let t = 0; t < triCount; t++) if (!set.has(t)) rest.push(t);
-        built.push({
-            mesh,
-            extracted: extractSubGeometry(mesh, selected),
-            remainder: rest.length ? extractSubGeometry(mesh, rest) : null,
-        });
+        const ext = extractSubGeometry(mesh, selected);
+        const rem = rest.length ? extractSubGeometry(mesh, rest) : null;
+        let extracted = ext.geometry;
+        let remainder = rem ? rem.geometry : null;
+
+        if (wantCap && rims) {
+            // The signed classification normal, in MESH-LOCAL space (covector
+            // transform — a world-space cap basis skews under node scale).
+            const nLocal = splitNormal.clone().applyMatrix3(
+                new THREE.Matrix3().setFromMatrix4(mesh.matrixWorld).transpose())
+                .normalize();
+            const sampleRimColor = rimColorSampler(mesh);
+            // Extracted side sits on +n: its cap closes facing BACK toward the
+            // plane (−n); the remainder's cap faces +n.
+            const partEdges = rims.partRim
+                .map(([a, b]) => [ext.remap.get(a), ext.remap.get(b)])
+                .filter(([a, b]) => a !== undefined && b !== undefined);
+            const r1 = capGeometry(extracted, partEdges, nLocal.clone().negate(),
+                                   { sampleRimColor });
+            extracted = r1.geometry;
+            capReport.part.loops += r1.report.loops;
+            capReport.part.capTriangles += r1.report.capTriangles;
+            capReport.part.skippedEdges += r1.report.skippedEdges;
+            capReport.part.fallbackFans += r1.report.fallbackFans;
+            capReport.uvModes.add(r1.report.uvMode);
+            if (remainder && rem) {
+                const remEdges = rims.remRim
+                    .map(([a, b]) => [rem.remap.get(a), rem.remap.get(b)])
+                    .filter(([a, b]) => a !== undefined && b !== undefined);
+                const r2 = capGeometry(remainder, remEdges, nLocal,
+                                       { sampleRimColor });
+                remainder = r2.geometry;
+                capReport.remaining.loops += r2.report.loops;
+                capReport.remaining.capTriangles += r2.report.capTriangles;
+                capReport.remaining.skippedEdges += r2.report.skippedEdges;
+                capReport.remaining.fallbackFans += r2.report.fallbackFans;
+                capReport.uvModes.add(r2.report.uvMode);
+            }
+        }
+        built.push({ mesh, extracted, remainder });
     }
     if (!built.length) throw new Error("Selection resolved to no triangles.");
 
@@ -499,6 +629,7 @@ export function splitObject(viewer, opts = {}) {
         sourceRemoved = true;
     } else {
         entry.originalState = null;    // geometry replaced — snapshot baseline moves
+        dropMorphs(viewer, entry, "split_object");
         entry.geometryRev++;
         entry._partition = null;
         entry.modified = true;
@@ -523,14 +654,47 @@ export function splitObject(viewer, opts = {}) {
         suggestedPivot: suggestedPivot ? vec3(suggestedPivot) : null,
         bounds: viewer._placementSummary(newEntry).bounds,
     }];
+    if (wantCap) created[0].capTriangles = capReport.part.capTriangles;
     const result = { created, remaining, mode };
     if (mode === "plane") {
         result.openEdgesAdded = openEdgesAdded;
-        result.note = "Cut faces are HOLLOW (capping would invent wrong UVs). "
-            + "Keep articulation sweeps small (≲30°) or orient cuts away from "
-            + "the camera. suggestedPivot = the cut region centroid — set_pivot "
-            + "there, then rotate. Old describe_scene mesh ids are void; "
-            + "reset now restores the SPLIT state, not the pre-split mesh.";
+        if (wantCap) {
+            // Closure is RECOUNTED with the shared welded semantics, never
+            // assumed (ear-clip/fan both close by construction, but "one
+            // metric, one meaning" demands the reported value be measured).
+            const partOpen = meshesOf(newEntry).reduce(
+                (s, m) => s + meshIssueCounts(m.geometry).openEdges, 0);
+            capReport.part.openEdges = partOpen;
+            if (!sourceRemoved) {
+                capReport.remaining.openEdges = meshesOf(entry).reduce(
+                    (s, m) => s + meshIssueCounts(m.geometry).openEdges, 0);
+            }
+            // Measured per-mesh modes, not an assumption (a UV-less mesh in a
+            // multi-mesh cut must not report "rim-sample").
+            const modes = [...capReport.uvModes];
+            capReport.uvMode = modes.length > 1 ? "mixed" : (modes[0] || "none");
+            delete capReport.uvModes;
+            result.capped = capReport;
+            const skippedTotal = capReport.part.skippedEdges
+                + capReport.remaining.skippedEdges;
+            result.note = "Cut faces were CAPPED (flat rim-sampled color; "
+                + "openEdges above are the measured post-cap counts"
+                + (skippedTotal > 0
+                    ? ` — ${skippedTotal} rim edge(s) could NOT be walked into `
+                      + "cap loops (complex junctions) and remain open"
+                    : " — nonzero means the source had pre-existing open "
+                      + "boundaries, which capping deliberately never seals")
+                + "). suggestedPivot = the cut region centroid — set_pivot "
+                + "there, then rotate. Old describe_scene mesh ids are void; "
+                + "reset restores the SPLIT state, not the pre-split mesh.";
+        } else {
+            result.note = "Cut faces are HOLLOW (pass cap:true to close them "
+                + "with flat rim-sampled caps). Keep articulation sweeps small "
+                + "(≲30°) or orient cuts away from the camera. suggestedPivot "
+                + "= the cut region centroid — set_pivot there, then rotate. "
+                + "Old describe_scene mesh ids are void; reset now restores "
+                + "the SPLIT state, not the pre-split mesh.";
+        }
     } else {
         result.note = "Old detect_parts partIds and describe_scene mesh ids are "
             + "void after a split. reset restores the SPLIT state.";
