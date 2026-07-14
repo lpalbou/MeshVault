@@ -41,7 +41,14 @@ export function meshStatistics(viewer, opts = {}) {
     if (totalTris > TRIANGLE_BUDGET) {
         return {
             loaded: true, skipped: true, triangles: totalTris,
-            note: `Statistics skipped: ${totalTris.toLocaleString()} triangles exceeds the ${TRIANGLE_BUDGET.toLocaleString()} budget.`,
+            // Shape stability (x-wing v3 field crash): consumers read
+            // `.total.triangles` — keep the cheap counts present even when
+            // the expensive edge/dihedral analysis is skipped.
+            total: { triangles: totalTris },
+            note: `Edge/dihedral statistics skipped: ${totalTris.toLocaleString()} `
+                + `triangles exceeds the ${TRIANGLE_BUDGET.toLocaleString()} budget. `
+                + "Counts are still present; describe_scene reports per-object "
+                + "totals; simplify first for full statistics.",
         };
     }
 

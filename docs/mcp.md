@@ -189,6 +189,32 @@ Rules an agent must know:
   `max_normal_angle` stops paint wrapping around hard edges (≈45° for boxes). Colors
   blend in sRGB and land exactly as requested. Requires UVs (primitives always
   qualify; STL/PLY error clearly). Budgeted at ~16M texels per session.
+- **Material channels** (the realism band between geometry and color):
+  `paint`/`paint_stroke`/`fill_paint` accept `channel: "roughness"|"metalness"`
+  (+`value` 0..1), `"emissive"` (+color) or `"height"` (data) — per-texel light
+  response with the full brush vocabulary. roughness+metalness pack into ONE
+  glTF-native canvas and export losslessly (round-trip verified);
+  `bake_normals {strength}` turns the painted height channel into a
+  tangent-space normal map (relief at zero triangles).
+- **Procedural patterns** (`paint_pattern {type, seed, scale, channel?}`):
+  noise / grunge / cells / speckle / stripes / gradient, evaluated in WORLD
+  space per texel — seam-continuous across UV islands and bit-deterministic
+  per {seed, scale}. Works on material channels (roughness grunge = worn
+  surfaces in one call).
+- **Detail sculpting**: `sculpt {tool:"noise", wavelength, octaves, seed,
+  ridged, bias}` = seeded fBm micro-relief along weld normals (feathers, bark,
+  rock — sampled in object-local coords so replays and placements agree).
+  `sculpt_sweep {points|path, radius, strength, profile:"crease"|"round"|
+  "flat"}` = ONE distance-to-curve weight field: constant cross-section panel
+  lines/creases/ridges with no stamp beading, majority-side guard on thin
+  wings, symmetry support. `deform_region {kind:"taper"|"bend"|"twist"|
+  "stretch", axis:{from,to}, factor|angle_deg}` = closed-form spine
+  deformations (a tail taper in one call instead of nine grabs).
+- **Grounding** (`bake_ao {strength, highlight, contrast}`): curvature-based
+  cavity shading baked into the albedo — concavities darken, convex rims
+  optionally lighten. Bake once AFTER sculpting is final; `undo_paint`
+  reverts; refuses honestly on uniform-curvature surfaces (method reported as
+  `"curvature"` — local crevices, not ray-traced occlusion).
 - **Aim** (`pick`, `raycast`): `pick {x, y, width, height}` converts normalized
   screenshot coordinates (y DOWN, top-left origin) into a surface point — ALWAYS pass
   that screenshot's width/height, and re-pick after camera moves. `raycast {origin,

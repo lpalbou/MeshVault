@@ -345,6 +345,17 @@ The decision loop for "this area is over-detailed for what it represents":
   needsRemesh}, and sculpt {remesh:"auto"} runs this pipeline over the stroke
   region when the trigger fires (default OFF — replay compatibility; morphs
   suppress it loudly).
+- `sculpt_sweep {points: [[x,y,z],...] | path: {type:'circle'|'line'},
+  radius, strength (world; NEGATIVE cuts, positive raises), profile:
+  'crease' (sharp V — panel lines) | 'round' | 'flat' (trench),
+  direction?, symmetry?, remesh?}` — ONE distance-to-curve weight
+  field: constant cross-section, no stamp beading. Majority-side
+  guard skips welds facing away (thin wings safe). refine to
+  ~radius/4 along the curve first.
+- `bake_ao {strength: 0..1, highlight: 0..1, contrast: 0.5..20}` —
+  curvature-based cavity shading baked into the ALBEDO: concavities
+  darken, convex rims lighten. Bake AFTER final geometry;
+  undo_paint reverts. Honest: Laplacian cavity, not ray-traced.
 - `deform_region {kind: "taper"|"bend"|"twist"|"stretch", axis:
   {from: [x,y,z], to: [x,y,z]}, factor? (taper: tip scale; stretch:
   elongation fraction), angle_deg? (bend/twist), direction? (bend's

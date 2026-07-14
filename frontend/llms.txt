@@ -73,7 +73,11 @@ Key facts for agents:
   `deform_region {kind: taper|bend|twist|stretch, axis:{from,to}, factor|
   angle_deg}` = closed-form spine deformers (a limb taper in one call).
   `bake_normals {strength}` = height channel → tangent-space normal map
-  (paint relief with channel:"height", bake, zero triangles). `fix_mesh` (degenerate/normals/
+  (paint relief with channel:"height", bake, zero triangles).
+  `sculpt_sweep {points|path, radius, strength, profile: crease|round|flat}`
+  = ONE weight field along a curve (panel lines/ridges without stamp
+  beading; negative strength cuts). `bake_ao {strength, highlight}` =
+  curvature cavity shading into the albedo (grounds paint into crevices). `fix_mesh` (degenerate/normals/
   flipped-face passes with issue deltas), `inspect_texture` (texel density + worst
   spots), `blur_paint`/`clone_paint`,
   `detect_symmetry`/`mirror_paint` (heal from the object's own mirror counterpart),

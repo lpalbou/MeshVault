@@ -18,12 +18,14 @@ import { describeScene } from "./describe_scene.js";
 import { meshStatistics } from "./mesh_stats.js";
 import { samplePoints } from "./sample_points.js";
 import {
+    bakeAO,
     bakeNormals,
     blurPaint,
     clearPaint,
     clonePaint,
     deformRegion,
     fillPaint,
+    sculptSweep,
     paintPattern,
     paintStamp,
     paintStroke,
@@ -79,7 +81,7 @@ import {
 const MUTATING_ACTIONS = new Set([
     "load", "unload", "add_model", "add_primitive",
     "sculpt", "sculpt_stroke", "paint", "paint_stroke", "fill_paint",
-    "paint_pattern", "bake_normals", "deform_region",
+    "paint_pattern", "bake_normals", "deform_region", "sculpt_sweep", "bake_ao",
     "clear_paint", "blur_paint", "clone_paint", "mirror_paint", "undo_paint",
     "batch",
     "detect_parts", "detect_symmetry",           // reads WITH replay-critical caches
@@ -740,6 +742,36 @@ export class ViewerControlAPI {
                 },
                 requiresModel: true,
                 handler: (p) => deformRegion(v, p),
+            },
+            sculpt_sweep: {
+                description: "Swept stroke: ONE weight field along a whole curve — the beading-free way to cut panel lines, creases and welts or raise ridges (stamp chains scallop because every stamp is an independent radial field; a sweep's cross-section is constant along the path). Curve = points [[x,y,z],...] (world, >=2) or parametric path {type:'circle'|'line', ...}. profile: 'crease' (sharp V center — THE panel-line/groove profile), 'round' (smooth dome), 'flat' (plateau trench). strength in world units: NEGATIVE cuts in, positive raises. Majority-side guard: welds facing away from the stroke's mean normal are skipped (a wing's top panel line won't groove the bottom skin) — override direction:[x,y,z] to force a fixed push axis. symmetry:'x'|'y'|'z' sweeps the mirrored curve too. Supports remesh:'auto'. Returns meshQuality like sculpt. Mesh must resolve the profile: refine_region along the curve to ~radius/4 first.",
+                params: {
+                    points: { type: "array" },
+                    path: { type: "object" },
+                    radius: { type: "number", min: 0.000001 },
+                    radius_rel: { type: "number", min: 0.000001, max: 1 },
+                    strength: { type: "number" },
+                    profile: { type: "string", default: "crease", enum: ["crease", "round", "flat"] },
+                    direction: { type: "array" },
+                    max_normal_angle: { type: "number", min: 1, max: 180 },
+                    symmetry: { type: "string", enum: ["x", "y", "z"] },
+                    remesh: { type: "string", enum: ["auto", "off"] },
+                    max_triangles: { type: "number", min: 1000, max: 300000 },
+                },
+                requiresModel: true,
+                handler: (p) => sculptSweep(v, p),
+            },
+            bake_ao: {
+                description: "Ground the paint INTO the surface: curvature-based cavity shading baked into the albedo — concavities darken (dirt and shadow pool where light can't reach), convex rims optionally lighten (worn edges). The single cheapest 'it sits ON the surface' fix after painting. strength 0..1 = cavity darkening (default 0.5); highlight 0..1 = edge lightening (default 0 — try 0.3 for worn metal/stone); contrast 0.5..20 = curvature saturation (default 4; lower on organic blobs, higher to pick faint detail). Method: per-weld Laplacian curvature (deterministic, instant) — NOT ray-traced occlusion; it reads local crevices, not long-range shadowing. Bake AFTER sculpting is final (later sculpts won't move it). undo_paint reverts.",
+                params: {
+                    strength: { type: "number", min: 0, max: 1 },
+                    highlight: { type: "number", min: 0, max: 1 },
+                    contrast: { type: "number", min: 0.5, max: 20 },
+                    texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+                    undo_group: { type: "string" },
+                },
+                requiresModel: true,
+                handler: (p) => bakeAO(v, p),
             },
             batch: {
                 description: "Execute up to 32 commands sequentially in ONE round-trip (halves latency/tokens for sculpt-stroke sessions). commands: [{action, params}, ...]. Stops at the first failure unless continue_on_error. Returns {results:[{ok,...}], completed}. batch cannot nest.",

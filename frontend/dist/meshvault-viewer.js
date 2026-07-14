@@ -48496,6 +48496,230 @@ function strokePoints(viewer, opts, command) {
 function sculptStroke(viewer, opts) {
   return applyStamps(viewer, opts, strokePoints(viewer, opts, "sculpt_stroke"));
 }
+var SWEEP_PROFILES = {
+  // t = distance/radius in [0,1] → weight in [0,1].
+  round: (t2) => {
+    const u2 = 1 - t2;
+    return u2 * u2 * (3 - 2 * u2);
+  },
+  // smooth dome
+  crease: (t2) => 1 - t2,
+  // sharp V center
+  flat: (t2) => t2 < 0.55 ? 1 : (() => {
+    const u2 = (t2 - 0.55) / 0.45, s = 1 - u2;
+    return s * s * (3 - 2 * s);
+  })()
+};
+function distToSegment(px, py, pz, ax, ay, az, bx, by, bz) {
+  const abx = bx - ax, aby = by - ay, abz = bz - az;
+  const apx = px - ax, apy = py - ay, apz = pz - az;
+  const len2 = abx * abx + aby * aby + abz * abz;
+  let t2 = len2 > 1e-18 ? (apx * abx + apy * aby + apz * abz) / len2 : 0;
+  t2 = Math.max(0, Math.min(1, t2));
+  const dx = px - (ax + abx * t2), dy = py - (ay + aby * t2), dz = pz - (az + abz * t2);
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+function sculptSweep(viewer, opts = {}) {
+  assertNotSkinned(viewer);
+  assertNoMorphInfluence(viewer);
+  const meshes = activeMeshes(viewer);
+  const radius = resolveRadius(viewer, opts, "sculpt");
+  const profileName = opts.profile || "crease";
+  const profile = SWEEP_PROFILES[profileName];
+  if (!profile) {
+    throw new Error(`Unknown profile '${profileName}'. Use ` + Object.keys(SWEEP_PROFILES).join("|") + " (strength sign picks groove vs ridge).");
+  }
+  const strength = opts.strength !== void 0 ? Number(opts.strength) : -radius * 0.3;
+  if (!Number.isFinite(strength) || strength === 0) {
+    throw new Error("sculpt_sweep strength must be non-zero world units (negative cuts a groove, positive raises a ridge).");
+  }
+  let curve;
+  if (opts.points !== void 0 && opts.path !== void 0) {
+    throw new Error("sculpt_sweep: pass either points OR path, not both");
+  }
+  if (opts.path !== void 0) {
+    curve = pathToPoints(opts.path, radius * 0.6);
+  } else {
+    curve = opts.points;
+    if (!Array.isArray(curve) || curve.length < 2 || !curve.every((p) => Array.isArray(p) && p.length === 3)) {
+      throw new Error("sculpt_sweep needs points: [[x,y,z], ...] (\u22652, world) or a parametric path {type: circle|line, ...}.");
+    }
+  }
+  const sym = buildSymmetry(viewer, opts.symmetry);
+  const polylines = [curve];
+  if (sym) polylines.push(curve.map(sym.point));
+  const allPts = polylines.flat();
+  const entry = viewer._activeEntry();
+  viewer._ensureResetSnapshot(entry);
+  const skipSurveys = !!viewer._bulkReplay && opts.remesh !== "auto";
+  const preSurvey = skipSurveys ? null : regionEdgeSurvey(meshes, allPts, radius);
+  const maxAngle = (opts.max_normal_angle !== void 0 ? Number(opts.max_normal_angle) : 75) * Math.PI / 180;
+  const cosMax = Math.cos(maxAngle);
+  let bx0 = Infinity, by0 = Infinity, bz0 = Infinity;
+  let bx1 = -Infinity, by1 = -Infinity, bz1 = -Infinity;
+  for (const p of allPts) {
+    bx0 = Math.min(bx0, p[0]);
+    by0 = Math.min(by0, p[1]);
+    bz0 = Math.min(bz0, p[2]);
+    bx1 = Math.max(bx1, p[0]);
+    by1 = Math.max(by1, p[1]);
+    bz1 = Math.max(bz1, p[2]);
+  }
+  bx0 -= radius;
+  by0 -= radius;
+  bz0 -= radius;
+  bx1 += radius;
+  by1 += radius;
+  bz1 += radius;
+  let affected = 0;
+  let maxDisp = 0;
+  let skippedBackfacing = 0;
+  const touched = /* @__PURE__ */ new Set();
+  const seen = /* @__PURE__ */ new Set();
+  const tmp = new Vector3();
+  const n2 = new Vector3();
+  const fixedDir = opts.direction ? new Vector3(...opts.direction).normalize() : null;
+  for (const mesh of meshes) {
+    if (seen.has(mesh.geometry)) continue;
+    seen.add(mesh.geometry);
+    ensureMutable(mesh.geometry);
+    const weld = getWeld(mesh.geometry);
+    ensureFreshNormals(mesh.geometry);
+    mesh.updateMatrixWorld(true);
+    const m = mesh.matrixWorld;
+    const inv = new Matrix4().copy(m).invert();
+    const nm = new Matrix3().getNormalMatrix(m);
+    const pos = mesh.geometry.getAttribute("position");
+    const cand = [];
+    const meanN = new Vector3();
+    for (const c of weld.members.keys()) {
+      tmp.fromBufferAttribute(pos, c).applyMatrix4(m);
+      if (tmp.x < bx0 || tmp.x > bx1 || tmp.y < by0 || tmp.y > by1 || tmp.z < bz0 || tmp.z > bz1) continue;
+      let d = Infinity;
+      for (const line of polylines) {
+        for (let i = 0; i + 1 < line.length; i++) {
+          const a = line[i], b = line[i + 1];
+          const dd = distToSegment(
+            tmp.x,
+            tmp.y,
+            tmp.z,
+            a[0],
+            a[1],
+            a[2],
+            b[0],
+            b[1],
+            b[2]
+          );
+          if (dd < d) d = dd;
+        }
+      }
+      if (d > radius) continue;
+      const w = profile(Math.min(1, d / radius));
+      if (w <= 4e-3) continue;
+      weldWorldNormal(mesh, weld, c, nm, n2);
+      cand.push({
+        c,
+        w,
+        nx: n2.x,
+        ny: n2.y,
+        nz: n2.z,
+        px: tmp.x,
+        py: tmp.y,
+        pz: tmp.z
+      });
+      meanN.x += n2.x * w;
+      meanN.y += n2.y * w;
+      meanN.z += n2.z * w;
+    }
+    if (cand.length === 0) continue;
+    const ref = fixedDir || (meanN.lengthSq() > 1e-12 ? meanN.normalize() : null);
+    let moved = 0;
+    for (const k of cand) {
+      if (ref) {
+        const dot = k.nx * ref.x + k.ny * ref.y + k.nz * ref.z;
+        if (dot < cosMax) {
+          skippedBackfacing++;
+          continue;
+        }
+      }
+      const d = strength * k.w;
+      const dx = fixedDir ? fixedDir.x : k.nx;
+      const dy = fixedDir ? fixedDir.y : k.ny;
+      const dz = fixedDir ? fixedDir.z : k.nz;
+      tmp.set(k.px + dx * d, k.py + dy * d, k.pz + dz * d);
+      if (Math.abs(d) > maxDisp) maxDisp = Math.abs(d);
+      tmp.applyMatrix4(inv);
+      for (const i of weld.members.get(k.c)) {
+        pos.setXYZ(i, tmp.x, tmp.y, tmp.z);
+      }
+      moved++;
+    }
+    if (moved > 0) {
+      affected += moved;
+      touched.add(mesh.geometry);
+    }
+  }
+  if (touched.size === 0) {
+    throw new Error(
+      "Sweep touched no vertices. Check the curve points/path (world coords \u2014 probe with raycast/pick) and radius; or the mesh is too coarse here \u2014 refine_region along the curve first (target_edge \u2248 radius / 4)." + wrongObjectHint(viewer, allPts[0])
+    );
+  }
+  finalizeSculpt(viewer, touched);
+  const r44 = (v) => Math.round(v * 1e4) / 1e4;
+  const s = entry && entry.stats ? entry.stats : null;
+  const out = {
+    profile: profileName,
+    segments: allPts.length - polylines.length,
+    affected,
+    maxDisplacement: r44(maxDisp),
+    newSize: s ? [r44(s.width), r44(s.height), r44(s.depth)] : null
+  };
+  if (skippedBackfacing > 0) out.skippedBackfacing = skippedBackfacing;
+  const postSurvey = skipSurveys ? null : regionEdgeSurvey(meshes, allPts, radius);
+  let triggerFired = false;
+  if (preSurvey && postSurvey) {
+    const lo = preSurvey.median * 0.8, hi = preSurvey.median * (4 / 3);
+    let out_ = 0;
+    for (const len of postSurvey.lens) {
+      if (len < lo || len > hi) out_++;
+    }
+    const fOut = postSurvey.lens.length > 0 ? out_ / postSurvey.lens.length : 0;
+    const maxOverMedian = preSurvey.median > 0 ? postSurvey.max / preSurvey.median : 0;
+    triggerFired = fOut >= 0.25 || maxOverMedian >= 2;
+    out.meshQuality = {
+      medianEdge: { before: r44(preSurvey.median), after: r44(postSurvey.median) },
+      outOfBandFraction: Math.round(fOut * 1e3) / 1e3,
+      maxOverMedian: Math.round(maxOverMedian * 100) / 100,
+      needsRemesh: triggerFired
+    };
+  }
+  if (opts.remesh === "auto" && triggerFired) {
+    const cx = allPts.reduce((a, p) => a + p[0], 0) / allPts.length;
+    const cy = allPts.reduce((a, p) => a + p[1], 0) / allPts.length;
+    const cz = allPts.reduce((a, p) => a + p[2], 0) / allPts.length;
+    let maxD = 0;
+    for (const p of allPts) {
+      const d = Math.sqrt((p[0] - cx) ** 2 + (p[1] - cy) ** 2 + (p[2] - cz) ** 2);
+      if (d > maxD) maxD = d;
+    }
+    try {
+      out.remesh = regularizeRegion(viewer, {
+        center: [cx, cy, cz],
+        radius: maxD + radius,
+        target_edge: preSurvey ? preSurvey.median : void 0,
+        iterations: 2,
+        max_triangles: opts.max_triangles
+      });
+    } catch (err2) {
+      out.note = (out.note ? out.note + " " : "") + `remesh:auto skipped: ${String(err2.message).slice(0, 140)}`;
+    }
+  }
+  const perSeg = affected / Math.max(1, out.segments);
+  if (perSeg < 4) {
+    out.note = (out.note ? out.note + " " : "") + `Only ~${Math.round(perSeg * 10) / 10} vertices per curve segment \u2014 the profile cannot form. refine_region along the curve (target_edge \u2248 radius / 4), then re-sweep.`;
+  }
+  return out;
+}
 var PAINT_DEFAULT_SIZE = 1024;
 var PAINT_MAX_SIZE = 4096;
 var PAINT_TEXEL_BUDGET = 32 * 1024 * 1024;
@@ -48538,7 +48762,7 @@ function ensurePaintLayer(viewer, mesh, size) {
   const dim = Math.min(PAINT_MAX_SIZE, Math.max(64, size || PAINT_DEFAULT_SIZE));
   if (paintTexelsAllocated + dim * dim > PAINT_TEXEL_BUDGET) {
     throw new Error(
-      `Paint memory budget exceeded (${Math.round(PAINT_TEXEL_BUDGET / 1e6)}M texels). Use a smaller texture_size, paint fewer meshes, or clear_paint unused layers.`
+      `Paint memory budget exceeded (${Math.round(PAINT_TEXEL_BUDGET / 1e6)}M texels). resize_texture {size} shrinks existing layers WITHOUT losing the paint (the usual fix); or use a smaller texture_size tier; clear_paint only for layers you can afford to lose.`
     );
   }
   const canvas = document.createElement("canvas");
@@ -48594,7 +48818,7 @@ function ensureChannelLayer(viewer, mesh, channel, albedoLayer) {
   const dim = albedoLayer.size;
   if (paintTexelsAllocated + dim * dim > PAINT_TEXEL_BUDGET) {
     throw new Error(
-      `Paint memory budget exceeded (${Math.round(PAINT_TEXEL_BUDGET / 1e6)}M texels) while creating the channel layer \u2014 clear_paint unused layers or use a smaller texture_size.`
+      `Paint memory budget exceeded (${Math.round(PAINT_TEXEL_BUDGET / 1e6)}M texels) while creating the channel layer \u2014 resize_texture {size} shrinks existing layers without losing paint; clear_paint only for layers you can afford to lose.`
     );
   }
   const canvas = document.createElement("canvas");
@@ -49407,6 +49631,131 @@ function bakeNormals(viewer, opts = {}) {
     bakedMeshes: baked,
     strength,
     note: "Tangent-space normal map derived from the height channel (exports as a standard glTF normalMap). Re-run after further height painting; height features crossing UV island borders can seam."
+  };
+}
+function bakeAO(viewer, opts = {}) {
+  assertNotSkinned(viewer);
+  const meshes = activeMeshes(viewer);
+  const strength = Math.max(0, Math.min(
+    1,
+    opts.strength !== void 0 ? Number(opts.strength) : 0.5
+  ));
+  const highlight = Math.max(0, Math.min(
+    1,
+    opts.highlight !== void 0 ? Number(opts.highlight) : 0
+  ));
+  const contrast = Math.max(0.5, Math.min(
+    20,
+    opts.contrast !== void 0 ? Number(opts.contrast) : 4
+  ));
+  if (strength === 0 && highlight === 0) {
+    throw new Error("bake_ao with strength 0 and highlight 0 is a no-op \u2014 set strength (cavity darkening) and/or highlight (edge lightening).");
+  }
+  beginPaintOp("bake_ao", opts.undo_group);
+  const tmp = new Vector3();
+  const nb = new Vector3();
+  const nrm = new Vector3();
+  let shaded = 0;
+  let appliedTexels = 0;
+  const seen = /* @__PURE__ */ new Set();
+  for (const mesh of meshes) {
+    const geometry = mesh.geometry;
+    if (seen.has(geometry)) continue;
+    seen.add(geometry);
+    const uvAttr = geometry.getAttribute("uv");
+    if (!uvAttr) continue;
+    ensureMutable(geometry);
+    const weld = getWeld(geometry);
+    ensureFreshNormals(geometry);
+    const pos = geometry.getAttribute("position");
+    const norm = geometry.getAttribute("normal");
+    const shade = /* @__PURE__ */ new Map();
+    for (const [c, members] of weld.members) {
+      const ns = weld.neighbors.get(c);
+      if (!ns || ns.size < 2) continue;
+      tmp.fromBufferAttribute(pos, c);
+      nb.set(0, 0, 0);
+      let meanEdge = 0;
+      for (const o of ns) {
+        nb.x += pos.getX(o);
+        nb.y += pos.getY(o);
+        nb.z += pos.getZ(o);
+        meanEdge += Math.hypot(
+          pos.getX(o) - tmp.x,
+          pos.getY(o) - tmp.y,
+          pos.getZ(o) - tmp.z
+        );
+      }
+      nb.divideScalar(ns.size);
+      meanEdge /= ns.size;
+      if (meanEdge < 1e-12) continue;
+      nrm.fromBufferAttribute(norm, c);
+      const cav = (nb.dot(nrm) - tmp.dot(nrm)) / meanEdge;
+      const s = Math.max(-1, Math.min(1, cav * contrast));
+      if (Math.abs(s) < 0.02) continue;
+      for (const i of members) shade.set(i, s);
+    }
+    if (shade.size === 0) continue;
+    const layer = ensurePaintLayer(viewer, mesh, opts.texture_size);
+    const dim = layer.size;
+    const img = layer.ctx.getImageData(0, 0, dim, dim);
+    const data = img.data;
+    const index = geometry.getIndex();
+    const triCount = Math.floor(index ? index.count / 3 : pos.count / 3);
+    const idxOf = (t2, k) => index ? index.getX(t2 * 3 + k) : t2 * 3 + k;
+    for (let t2 = 0; t2 < triCount; t2++) {
+      const i0 = idxOf(t2, 0), i1 = idxOf(t2, 1), i2 = idxOf(t2, 2);
+      const s0 = shade.get(i0) || 0, s1 = shade.get(i1) || 0, s2 = shade.get(i2) || 0;
+      if (s0 === 0 && s1 === 0 && s2 === 0) continue;
+      const [u0, v0] = uvToPixel(layer, uvAttr.getX(i0), uvAttr.getY(i0));
+      const [u1, v1] = uvToPixel(layer, uvAttr.getX(i1), uvAttr.getY(i1));
+      const [u2, v2] = uvToPixel(layer, uvAttr.getX(i2), uvAttr.getY(i2));
+      const minU = Math.max(0, Math.floor(Math.min(u0, u1, u2)));
+      const maxU = Math.min(dim - 1, Math.ceil(Math.max(u0, u1, u2)));
+      const minV = Math.max(0, Math.floor(Math.min(v0, v1, v2)));
+      const maxV = Math.min(dim - 1, Math.ceil(Math.max(v0, v1, v2)));
+      if (maxU < minU || maxV < minV) continue;
+      const denom = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2);
+      if (Math.abs(denom) < 1e-9) continue;
+      const tol = 0.75 / Math.max(1, Math.min(dim, 2048));
+      for (let py = minV; py <= maxV; py++) {
+        for (let px = minU; px <= maxU; px++) {
+          const w0 = ((v1 - v2) * (px + 0.5 - u2) + (u2 - u1) * (py + 0.5 - v2)) / denom;
+          const w1 = ((v2 - v0) * (px + 0.5 - u2) + (u0 - u2) * (py + 0.5 - v2)) / denom;
+          const w2 = 1 - w0 - w1;
+          if (w0 < -tol || w1 < -tol || w2 < -tol) continue;
+          const s = s0 * w0 + s1 * w1 + s2 * w2;
+          if (Math.abs(s) < 0.01) continue;
+          const o = (py * dim + px) * 4;
+          const f = s > 0 ? 1 - strength * s : 1 + highlight * -s * 0.6;
+          if (Math.abs(f - 1) < 4e-3) continue;
+          data[o] = Math.min(255, Math.round(data[o] * f));
+          data[o + 1] = Math.min(255, Math.round(data[o + 1] * f));
+          data[o + 2] = Math.min(255, Math.round(data[o + 2] * f));
+          appliedTexels++;
+        }
+      }
+    }
+    stashPaintPatch("bake_ao", layer, 0, 0, dim, dim);
+    layer.ctx.putImageData(img, 0, 0);
+    layer.texture.needsUpdate = true;
+    shaded++;
+  }
+  if (shaded === 0 || appliedTexels === 0) {
+    throw new Error("bake_ao shaded nothing \u2014 the meshes need UVs and curvature VARIATION (a perfect sphere/plane has none \u2014 its uniform Laplacian is not a crevice). Sculpt or refine first, then bake; raise contrast to pick up faint detail.");
+  }
+  const entry = viewer._activeEntry();
+  if (entry) entry.modified = true;
+  viewer.invalidate();
+  return {
+    shadedMeshes: shaded,
+    shadedTexels: appliedTexels,
+    strength,
+    highlight,
+    contrast,
+    method: "curvature",
+    // honest: Laplacian cavity, not ray-traced AO
+    note: "Cavity shading baked into the ALBEDO (undo_paint reverts). Bake AFTER geometry is final \u2014 later sculpts won't move it."
   };
 }
 function deformRegion(viewer, opts = {}) {
@@ -57724,7 +58073,11 @@ function meshStatistics(viewer, opts = {}) {
       loaded: true,
       skipped: true,
       triangles: totalTris,
-      note: `Statistics skipped: ${totalTris.toLocaleString()} triangles exceeds the ${TRIANGLE_BUDGET.toLocaleString()} budget.`
+      // Shape stability (x-wing v3 field crash): consumers read
+      // `.total.triangles` — keep the cheap counts present even when
+      // the expensive edge/dihedral analysis is skipped.
+      total: { triangles: totalTris },
+      note: `Edge/dihedral statistics skipped: ${totalTris.toLocaleString()} triangles exceeds the ${TRIANGLE_BUDGET.toLocaleString()} budget. Counts are still present; describe_scene reports per-object totals; simplify first for full statistics.`
     };
   }
   let id = 0;
@@ -61860,6 +62213,8 @@ var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "paint_pattern",
   "bake_normals",
   "deform_region",
+  "sculpt_sweep",
+  "bake_ao",
   "clear_paint",
   "blur_paint",
   "clone_paint",
@@ -62527,6 +62882,36 @@ var ViewerControlAPI = class {
         },
         requiresModel: true,
         handler: (p) => deformRegion(v, p)
+      },
+      sculpt_sweep: {
+        description: "Swept stroke: ONE weight field along a whole curve \u2014 the beading-free way to cut panel lines, creases and welts or raise ridges (stamp chains scallop because every stamp is an independent radial field; a sweep's cross-section is constant along the path). Curve = points [[x,y,z],...] (world, >=2) or parametric path {type:'circle'|'line', ...}. profile: 'crease' (sharp V center \u2014 THE panel-line/groove profile), 'round' (smooth dome), 'flat' (plateau trench). strength in world units: NEGATIVE cuts in, positive raises. Majority-side guard: welds facing away from the stroke's mean normal are skipped (a wing's top panel line won't groove the bottom skin) \u2014 override direction:[x,y,z] to force a fixed push axis. symmetry:'x'|'y'|'z' sweeps the mirrored curve too. Supports remesh:'auto'. Returns meshQuality like sculpt. Mesh must resolve the profile: refine_region along the curve to ~radius/4 first.",
+        params: {
+          points: { type: "array" },
+          path: { type: "object" },
+          radius: { type: "number", min: 1e-6 },
+          radius_rel: { type: "number", min: 1e-6, max: 1 },
+          strength: { type: "number" },
+          profile: { type: "string", default: "crease", enum: ["crease", "round", "flat"] },
+          direction: { type: "array" },
+          max_normal_angle: { type: "number", min: 1, max: 180 },
+          symmetry: { type: "string", enum: ["x", "y", "z"] },
+          remesh: { type: "string", enum: ["auto", "off"] },
+          max_triangles: { type: "number", min: 1e3, max: 3e5 }
+        },
+        requiresModel: true,
+        handler: (p) => sculptSweep(v, p)
+      },
+      bake_ao: {
+        description: "Ground the paint INTO the surface: curvature-based cavity shading baked into the albedo \u2014 concavities darken (dirt and shadow pool where light can't reach), convex rims optionally lighten (worn edges). The single cheapest 'it sits ON the surface' fix after painting. strength 0..1 = cavity darkening (default 0.5); highlight 0..1 = edge lightening (default 0 \u2014 try 0.3 for worn metal/stone); contrast 0.5..20 = curvature saturation (default 4; lower on organic blobs, higher to pick faint detail). Method: per-weld Laplacian curvature (deterministic, instant) \u2014 NOT ray-traced occlusion; it reads local crevices, not long-range shadowing. Bake AFTER sculpting is final (later sculpts won't move it). undo_paint reverts.",
+        params: {
+          strength: { type: "number", min: 0, max: 1 },
+          highlight: { type: "number", min: 0, max: 1 },
+          contrast: { type: "number", min: 0.5, max: 20 },
+          texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
+          undo_group: { type: "string" }
+        },
+        requiresModel: true,
+        handler: (p) => bakeAO(v, p)
       },
       batch: {
         description: "Execute up to 32 commands sequentially in ONE round-trip (halves latency/tokens for sculpt-stroke sessions). commands: [{action, params}, ...]. Stops at the first failure unless continue_on_error. Returns {results:[{ok,...}], completed}. batch cannot nest.",

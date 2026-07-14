@@ -347,6 +347,10 @@ UV seams, scale-consistent, bit-deterministic per {seed, scale}:
 - `cells` (Worley) — cracks, scales, dry earth.
 - `speckle {density}` — dots, rivets-ish, stone grain.
 - `stripes {direction, density}` / `gradient {direction}` — bands and ramps.
+  ANTI-PATTERN (owl v3): stripes on ORGANIC surfaces — geometrically
+  perfect world-space bands read mechanical on plumage/fur/skin. Organic
+  banding wants hand `paint_stroke` paths with wobble (probe the surface,
+  vary spacing); save stripes for hulls, decks, awnings.
 - Combine: albedo noise + roughness grunge + a sparse speckle = a hull that
   reads weathered in three calls. `scale` = world units per feature
   (default object/12); same seed replays identically.
@@ -381,6 +385,54 @@ deformation along a spine — `from` is ANCHORED, the effect eases
 - Welded (seams never tear), deterministic, honest refusals (parallel bend
   axis, zero-touch). `regularize_region` after strong tapers/bends —
   compressed cross-sections need re-equalizing.
+
+## Swept strokes (panel lines that don't bead)
+
+`sculpt_sweep {points|path, radius, strength, profile}` computes ONE
+distance-to-curve weight field — the cross-section is constant along the
+path, so grooves and ridges come out clean where stamp chains scallop:
+
+- `profile:"crease"` = sharp V center — THE panel-line profile. strength
+  NEGATIVE cuts (panel lines, seams, mouth lines); positive raises (welts,
+  cables, raised trim). `"round"` = soft dome; `"flat"` = plateau trench.
+- Majority-side guard: welds facing away from the stroke's mean normal are
+  skipped — a top-skin panel line won't groove the wing's bottom skin even
+  when both are within radius. Force `direction:[x,y,z]` to override.
+- `symmetry:"x"` sweeps the mirrored curve as a SEPARATE polyline (verified
+  bit-symmetric crests). `remesh:"auto"` and meshQuality work like sculpt.
+- Resolution rule unchanged: refine along the curve to ≈ radius/4 first, or
+  the profile can't form (the result warns below ~4 verts/segment).
+- **Line-campaign budget (x-wing v3 blowup: 225k → 1.48M triangles)**: the
+  refine formula is per-REGION and a panel-line campaign multiplies it by
+  every strip. Keep refine strips NARROW (strip radius ≈ 1.2× sweep radius,
+  not 2-3×), refine ONE strip covering several parallel lines when they sit
+  within a few radii, and CHECK the triangle count between lines
+  (describe_scene). Recovery is brutal at scale: whole-model `simplify` on
+  ~1.5M tris runs ~20 minutes with no progress output, and
+  `simplify_region` refuses above its 50k-vertex cap — prevention is the
+  only cheap path.
+- Crease DEPTH must match viewing distance: ~0.2-0.5% of hull size reads
+  at close range only; features meant to read in a full-body shot need
+  ~1-2% (the owl's facial disc carried at 1.5%; its 0.4% wing arcs
+  vanished). `bake_ao` roughly doubles perceived depth for free.
+- Sweep beats a dig-stroke for LINES: dig makes craters (flat floor, per-
+  stamp), sweep makes constant profiles (per-curve). Use dig for pockets.
+
+## Cavity grounding (paint that sits IN the surface)
+
+`bake_ao {strength, highlight, contrast}` darkens concavities and
+optionally lightens convex rims, baked into the albedo:
+
+- The single cheapest "painted-on → carved-in" fix: run it ONCE after
+  sculpting is final (later sculpts won't move the shading).
+- `strength 0.5-0.8` pools shadow/dirt in seams, folds, nostrils, panel
+  lines; `highlight 0.2-0.4` = worn edges (metal, stone). `contrast` lower
+  on soft organic curvature, higher to pick faint detail.
+- Honest method note: Laplacian curvature (local crevices), NOT ray-traced
+  occlusion — it won't shade one part's shadow onto another. Refuses when
+  curvature is uniform (perfect sphere) instead of pretending.
+- Order matters: albedo/patterns → bake_ao → roughness/metalness channels
+  (AO multiplies albedo only). undo_paint reverts a bad bake.
 
 ## Height → normal baking (relief that costs no triangles)
 
@@ -491,13 +543,15 @@ When painting features onto a blanked model, measure — never guess:
   skin/material from the symmetric or adjacent region.
 - `undo_paint` reverts the last brush; group multi-call gestures with
   `undo_group` tokens.
-- **Decorative fields (panel plates, window dots): use `batch`** (≤32
-  commands per round trip) with deterministic pseudo-random layouts (seeded
-  LCG — replays stay identical). Expect 1-2 misses per batch near clamped
-  edges ("Brush touched no surface" in sub-results) — scan sub-results
-  rather than treating the batch as failed. Judge paint contrast under
-  neutral lighting (`set_lighting {exposure, ambient}` or the `neutral`
-  preset) — the studio look washes out light grays.
+- **Decorative fields (panel plates, window dots): use `batch`** — hard cap
+  32 commands per call, PROBES INCLUDED (a 60-raycast batch refuses; split
+  probe batteries into ≤32 chunks). Deterministic pseudo-random layouts
+  (seeded LCG — replays stay identical). Expect 1-2 misses per batch near
+  clamped edges ("Brush touched no surface" in sub-results) — scan
+  sub-results rather than treating the batch as failed. Judge paint
+  contrast under neutral lighting: `set_lighting {exposure, ambient}` has
+  NO preset param — lighting presets live on `screenshot {preset:
+  "neutral"}` — and the studio look washes out light grays.
 - After `regularize_region`, texture in the region drifts slightly
   (vertices slide within the surface) — `blur_paint` or repaint to tidy.
 
