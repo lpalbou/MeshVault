@@ -31,10 +31,20 @@
 
 import * as THREE from "three";
 
+import { clearPaintUndo } from "./viewer/sculpt.js";
+
 // Field-test polish: 450 ms made a fast stroke "a blink"; labels were
 // borderline legible at 0.14× model scale.
 const GHOST_FADE_MS = 750;
 const FOLLOW_LERP = 0.35;
+
+// Fast-forward scheduler TIME BUDGET (perf gauntlet: the old scheduler
+// yielded every N commands, which is meaningless when one command takes
+// seconds and N cheap ones fit in a frame — measured 8.5 s main-thread
+// blocks on a 233-command catch-up). Process commands until the budget is
+// spent, then yield a real frame: progress paints, input (Cancel/Leave)
+// runs, and Firefox's "page is slowing down" detector stays quiet.
+const REPLAY_BUDGET_MS = 80;
 
 export class ObserveSeat {
     /**
@@ -65,6 +75,14 @@ export class ObserveSeat {
         this._es = null;
         this._expectedSeq = 0;
         this._queue = Promise.resolve();
+        // Run generation: bumped on every join/leave. Long replay loops and
+        // queued replay continuations capture it and bail when it moved —
+        // leave() must interrupt a running catch-up PROMPTLY (the old loop
+        // kept reading an emptied log and threw), and a leave→re-join must
+        // never let session A's stale queue leak commands into session B.
+        this._runId = 0;
+        // Time-budget scheduler bookkeeping (see REPLAY_BUDGET_MS).
+        this._lastYieldAt = 0;
         this._ghosts = [];
         this._ghostGroup = null;
         this._banner = null;
@@ -85,6 +103,15 @@ export class ObserveSeat {
         this._pos = 0;             // entries applied so far (playhead)
         this._playTimer = null;
         this._seekBusy = false;
+        // CHECKPOINTS (the x-wing freeze fix): performer-captured state
+        // snapshots let the seat RESTORE at seq S instead of re-executing
+        // the whole build (a recorded ~20-minute simplify re-runs for ~20
+        // minutes in the observer's tab — re-execution cannot be made fast).
+        // List comes from /api/observe/sessions at join; live markers from
+        // the stream keep it fresh.
+        this._checkpoints = [];
+        this._joinCheckpoint = null;   // chosen for live join (stream from=seq+1)
+        this._restoredFrom = null;     // seq of the checkpoint the replica stands on
         // The PERSISTENT tool cursor: one ring+disc that is always on the mesh
         // while the performer holds a brush — its radius IS the current area
         // of influence; it glides between stamp points instead of blinking.
@@ -113,6 +140,7 @@ export class ObserveSeat {
         // unload on a stale/unknown session id wiped the user's scene, and the
         // unhandled `unknown_session` meta left the seat locked forever). The
         // scene is only cleared once the stream says `hello` (joinable).
+        let sessionInfo = null;
         try {
             const sessions = await this.sessions();
             const s = sessions.find((x) => x.id === sessionId);
@@ -120,17 +148,21 @@ export class ObserveSeat {
                 this._toast("That session no longer exists — refresh the list.", "error");
                 return;
             }
-            if (!s.joinable && !s.replayable) {
+            const hasCheckpoint = (s.checkpoints || []).some(
+                (c) => c.seq + 1 >= (s.first_seq || 0));
+            if (!s.joinable && !s.replayable && !hasCheckpoint) {
                 this._toast("Cannot join: the session outgrew its log — "
                     + "replay-from-zero is impossible.", "error");
                 return;
             }
+            sessionInfo = s;
         } catch (err) {
             this._toast(`Observe hub unreachable: ${err.message}`, "error");
             return;
         }
 
         this.observing = true;
+        this._runId++;
         this._session = sessionId;
         this._expectedSeq = 0;
         this._caughtUp = false;
@@ -142,12 +174,33 @@ export class ObserveSeat {
         this._log = [];
         this._pos = 0;
         this._lastCam = null;
+        this._restoredFrom = null;
+        // Checkpoint plan: LIVE sessions restore the newest usable snapshot
+        // and stream only the tail (from = seq+1); recordings buffer the
+        // whole entry log (cheap — no execution) and use checkpoints for
+        // SEEKS instead. `alive` is the recording discriminator available
+        // before hello.
+        this._checkpoints = (sessionInfo.checkpoints || [])
+            .filter((c) => c.seq + 1 >= (sessionInfo.first_seq || 0))
+            .sort((a, b) => a.seq - b.seq);
+        this._joinCheckpoint = null;
+        let fromSeq = 0;
+        if (sessionInfo.alive && this._checkpoints.length
+            && this.replaySpeed === "instant") {
+            this._joinCheckpoint = this._checkpoints[this._checkpoints.length - 1];
+            fromSeq = this._joinCheckpoint.seq + 1;
+        }
+        // The single-slot brush undo must not straddle the seat boundary:
+        // a pre-join stash points at layers the replica unload disposes, and
+        // "undo" restoring ancient texels into a replica is a trust bug.
+        clearPaintUndo();
         this._setUiLocked(true);
         this._pauseBridge(true);
         this._onObservingChange(true);
 
         this._es = new EventSource(
-            `/api/observe/stream?session=${encodeURIComponent(sessionId)}`);
+            `/api/observe/stream?session=${encodeURIComponent(sessionId)}`
+            + (fromSeq > 0 ? `&from=${fromSeq}` : ""));
         this._es.onmessage = (e) => {
             let msg;
             try { msg = JSON.parse(e.data); } catch { return; }
@@ -162,13 +215,24 @@ export class ObserveSeat {
     leave(keepScene = true) {
         if (this._es) { this._es.close(); this._es = null; }
         this.observing = false;
+        // Abort any in-flight catch-up/seek loop and orphan the queued replay
+        // continuations of THIS session (they check the run id after every
+        // await) — the seat must come back the moment the user clicks Leave.
+        this._runId++;
         this._session = null;
         this.playbackPause();
         this._log = [];
         this._pos = 0;
         this._recording = false;
+        this._checkpoints = [];
+        this._joinCheckpoint = null;
+        this._restoredFrom = null;
         this._onPlayback(0, 0, false, false);   // hide the replay bar
         this._viewer.endBulkReplay();   // never leave rendering suspended
+        // Replay may have overwritten (or, under bulk suppression, skipped)
+        // the brush-undo stash — either way it no longer describes anything
+        // the USER did. Their own next paint re-arms undo normally.
+        clearPaintUndo();
         this._clearGhosts();
         this._hideBanner();
         this._setUiLocked(false);
@@ -193,6 +257,24 @@ export class ObserveSeat {
             this._recording = !!msg.recording;
             const s = msg.session || {};
             this._totalAtHello = s.commands || 0;
+            // A checkpoint join assumed a LIVE session; if it ended between
+            // the list snapshot and the hello, the stream is now a recording
+            // whose scrubber needs the WHOLE entry log — reopen from zero
+            // (buffering is cheap; checkpoints still accelerate the seeks).
+            if (this._recording && this._joinCheckpoint) {
+                this._joinCheckpoint = null;
+                this._expectedSeq = 0;
+                if (this._es) { this._es.close(); }
+                this._es = new EventSource(
+                    `/api/observe/stream?session=${encodeURIComponent(this._session)}`);
+                this._es.onmessage = (e) => {
+                    let m;
+                    try { m = JSON.parse(e.data); } catch { return; }
+                    this._handle(m);
+                };
+                this._helloSeen = false;
+                return;
+            }
             // Fast-forward LIVE catch-up: suspend rendering — per-command
             // frames re-upload painted canvas textures every time, which is
             // what made 1000+-command replays crawl. Recordings instead
@@ -200,22 +282,71 @@ export class ObserveSeat {
             if (!this._recording
                 && this.replaySpeed === "instant" && this._totalAtHello > 20) {
                 this._viewer.beginBulkReplay();
-                this._showBanner(
-                    `Replaying ${this._totalAtHello} commands (fast-forward)…`, "info");
+                this._lastYieldAt = performance.now();
+                this._showProgress(0, this._totalAtHello);
             }
-            this._queue = this._api.execute({ action: "unload" }).then(() => {});
+            if (this._joinCheckpoint) {
+                // RESTORE instead of re-executing history: the stream begins
+                // at seq+1, so the entry contiguity check must too.
+                const ck = this._joinCheckpoint;
+                this._expectedSeq = ck.seq + 1;
+                const run = this._runId;
+                this._viewer.beginBulkReplay();
+                this._queue = this._restoreFromCheckpoint(ck, run).catch((err) => {
+                    if (run !== this._runId) return;
+                    // Fallback: replay from zero when the ring still has it.
+                    this._showBanner(`Checkpoint restore failed (${String(err.message).slice(0, 90)}) `
+                        + "— replaying from the start instead.", "warn");
+                    this._joinCheckpoint = null;
+                    this._expectedSeq = 0;
+                    if (this._es) this._es.close();
+                    this._es = new EventSource(
+                        `/api/observe/stream?session=${encodeURIComponent(this._session)}`);
+                    this._es.onmessage = (e) => {
+                        let m;
+                        try { m = JSON.parse(e.data); } catch { return; }
+                        this._handle(m);
+                    };
+                    this._helloSeen = false;
+                });
+            } else {
+                this._queue = this._api.execute({ action: "unload" }).then(() => {});
+            }
             if (s.lossy) this._showBanner(
                 "Performer reported LOST publishes — the replica may diverge.", "warn");
+            return;
+        }
+        if (msg.type === "checkpoint") {
+            // Marker events do NOT consume an entry seq. Keep the list fresh
+            // (live sessions checkpoint as they work; `late` markers describe
+            // seqs the cursor already passed — still valid for future seeks).
+            if (!this._checkpoints.some((c) => c.seq === msg.seq)) {
+                this._checkpoints.push({ seq: msg.seq, bytes: msg.bytes,
+                    exec_ms_since_start: msg.exec_ms_since_start || 0 });
+                this._checkpoints.sort((a, b) => a.seq - b.seq);
+            }
             return;
         }
         if (msg.type === "caught_up") {
             if (this._recording) return;   // recordings finish on `ended`
             // All engine work up to here is already queued; finish it, then
             // resume rendering and paint the accumulated state at once.
+            // (run-guarded: after a leave, this stale continuation must not
+            // touch the viewer or toast over the next session.)
+            const run = this._runId;
             this._queue = this._queue.then(() => {
+                if (run !== this._runId) return;
                 this._viewer.endBulkReplay();
                 this._caughtUp = true;
-                this._hideBanner();
+                // Divergence stays VISIBLE: progress updates overwrote any
+                // per-error warning during catch-up, so the standing state
+                // must be re-asserted once the dust settles (honesty rule).
+                if (this._replayErrors > 0) {
+                    this._showBanner(`Caught up with ${this._replayErrors} replay `
+                        + "error(s) — the replica may have diverged.", "warn");
+                } else {
+                    this._hideBanner();
+                }
                 this._toast("Caught up — watching live.", "info");
             });
             return;
@@ -240,8 +371,10 @@ export class ObserveSeat {
                         + "scrub or replay it from the bar below.", "info");
                 } else {
                     // Queue behind the live replay so the banner doesn't beat
-                    // the work.
+                    // the work (run-guarded like caught_up).
+                    const run = this._runId;
                     this._queue = this._queue.then(() => {
+                        if (run !== this._runId) return;
                         this._viewer.endBulkReplay();
                         this._showBanner(text, "info");
                     });
@@ -288,7 +421,11 @@ export class ObserveSeat {
 
         if (msg.kind === "command") {
             const cmd = msg.command || {};
-            this._queue = this._queue.then(() => this._replay(cmd));
+            // Capture the run id NOW: a leave→re-join between queueing and
+            // execution must orphan this continuation, not run session A's
+            // command inside session B's scene.
+            const run = this._runId;
+            this._queue = this._queue.then(() => this._replay(cmd, run));
         } else if (msg.kind === "camera") {
             // Keep the latest performer camera even while follow is OFF so
             // re-checking the box snaps to the agent's CURRENT view instead
@@ -348,34 +485,121 @@ export class ObserveSeat {
         this._onPlayback(this._pos, this._log.length, false, true);
     }
 
-    /** Seek the playhead. Forward = apply the delta fast; backward = rebuild
-     *  from zero (deterministic replay makes every position reconstructible). */
+    /** Command-entry engine cost (exec_ms telemetry) in log range [a, b). */
+    _execCost(a, b) {
+        let ms = 0;
+        for (let i = Math.max(0, a); i < Math.min(b, this._log.length); i++) {
+            const e = this._log[i];
+            if (e.kind === "command") ms += (e.exec_ms || 25);
+        }
+        return ms;
+    }
+
+    /** Newest checkpoint at or before absolute seq S, with its log index. */
+    _checkpointBefore(seq) {
+        let best = null;
+        for (const c of this._checkpoints) {
+            if (c.seq <= seq) best = c;
+        }
+        if (!best) return null;
+        let idx = 0;
+        while (idx < this._log.length && this._log[idx].seq <= best.seq) idx++;
+        return { ck: best, idx };
+    }
+
+    /** Seek the playhead. Routes through the cheapest reconstruction:
+     *  forward = incremental delta; backward or expensive forward = RESTORE
+     *  the nearest checkpoint ≤ target and replay only the tail (the x-wing
+     *  fix: a recorded 20-minute simplify must never re-execute on a scrub). */
     async playbackSeek(target) {
         if (!this._recording || this._seekBusy) return;
         target = Math.max(0, Math.min(this._log.length, Math.round(target)));
         if (target === this._pos) return;
         this.playbackPause();
         this._seekBusy = true;
+        const run = this._runId;
         this._onPlayback(this._pos, this._log.length, false, true);
+        // Brush-undo stashes are pure waste during a seek — observers cannot
+        // invoke undo_paint — UNLESS the log itself replays one (the replica
+        // must then restore the same texels the performer did). The log is
+        // fully buffered here, so the check is exact, not a guess.
+        const logReplaysUndo = this._log.some((e) => {
+            if (e.kind !== "command" || !e.command) return false;
+            if (e.command.action === "undo_paint") return true;
+            if (e.command.action === "batch") {
+                const subs = (e.command.params || {}).commands || [];
+                return subs.some((s) => s && s.action === "undo_paint");
+            }
+            return false;
+        });
+        // Route decision (exec_ms telemetry): restoring a checkpoint costs a
+        // few seconds; re-executing history costs the performer's engine
+        // time. Take the snapshot whenever it wins.
+        const RESTORE_EST_MS = 2500;
+        const targetSeq = target > 0 ? this._log[target - 1].seq : -1;
+        const cp = target > 0 ? this._checkpointBefore(targetSeq) : null;
+        let progressShown = false;
         try {
             this._viewer.beginBulkReplay();
-            if (target < this._pos) {
+            this._viewer._suppressPaintUndo = !logReplaysUndo;
+            let restored = false;
+            if (cp && cp.idx <= target) {
+                const incrementalCost = target >= this._pos
+                    ? this._execCost(this._pos, target)          // forward delta
+                    : RESTORE_EST_MS + this._execCost(0, target); // rebuild-from-zero baseline
+                const checkpointCost = RESTORE_EST_MS + this._execCost(cp.idx, target);
+                if (checkpointCost < incrementalCost) {
+                    try {
+                        await this._restoreFromCheckpoint(cp.ck, run);
+                        if (run !== this._runId) return;
+                        this._pos = cp.idx;
+                        restored = true;
+                    } catch (err) {
+                        if (run !== this._runId) return;
+                        // Fall back to full re-execution below.
+                        this._showBanner("Checkpoint restore failed "
+                            + `(${String(err.message).slice(0, 90)}) — replaying instead.`, "warn");
+                    }
+                }
+            }
+            if (!restored && target < this._pos) {
                 await this._api.execute({ action: "unload" });
+                if (run !== this._runId) return;
                 this._pos = 0;
             }
-            let applied = 0;
+            this._lastYieldAt = performance.now();
             while (this._pos < target) {
+                // leave()/re-join aborts the loop at the next iteration —
+                // the old code kept indexing the emptied log and threw.
+                if (run !== this._runId) return;
                 await this._applyLogEntry(this._log[this._pos++], true);
-                // Yield + advance the scrub thumb periodically: a long
-                // rebuild must LOOK like progress, not a frozen tab.
-                if (++applied % 20 === 0) {
+                // TIME-BUDGET yield (see _replay): a long rebuild must LOOK
+                // like progress and stay cancellable, never a frozen tab.
+                if (performance.now() - this._lastYieldAt >= REPLAY_BUDGET_MS) {
                     this._onPlayback(this._pos, this._log.length, false, true);
-                    await new Promise((res) => setTimeout(res, 0));
+                    this._showProgress(this._pos, target);
+                    progressShown = true;
+                    await this._yieldFrame();
+                    this._lastYieldAt = performance.now();
                 }
             }
         } finally {
-            this._viewer.endBulkReplay();
             this._seekBusy = false;
+            // On abort, leave() already restored the viewer (endBulkReplay
+            // clears the suppression flag too) — and a NEW session may have
+            // re-entered bulk mode by now; touching it here would corrupt it.
+            if (run === this._runId) this._viewer.endBulkReplay();
+        }
+        if (run !== this._runId) return;
+        if (progressShown) {
+            // Same honesty rule as caught_up: progress updates overwrote any
+            // replay-error banner mid-seek — re-assert divergence at the end.
+            if (this._replayErrors > 0) {
+                this._showBanner(`Replayed with ${this._replayErrors} error(s) — `
+                    + "the replica may have diverged.", "warn");
+            } else {
+                this._hideBanner();
+            }
         }
         // Land on the performer's camera at this point when following.
         if (this.follow && this._lastCam) this._applyCamera(this._lastCam);
@@ -389,22 +613,199 @@ export class ObserveSeat {
         if (this.follow && this._lastCam) this._applyCamera(this._lastCam);
     }
 
-    async _replay(cmd) {
-        if (!this.observing) return;
+    // ------------------------------------------------------------------
+    // Checkpoint restore (protocol: /tmp/observe_checkpoint_protocol.md —
+    // port of the reference RESTORE_JS proven by test_observe_checkpoints)
+    // ------------------------------------------------------------------
+
+    /**
+     * Restore the replica to checkpoint `ck` (unload → per-object blobs →
+     * identity alignment → hierarchy/transforms/timeline/display). Throws on
+     * any hard failure INCLUDING a fingerprint mismatch — callers fall back
+     * to replay-from-zero or refuse honestly. A restored replica is
+     * RECONSTRUCTED state, not command-derived: the fingerprint check is the
+     * honesty mechanism.
+     */
+    async _restoreFromCheckpoint(ck, run) {
+        const t0 = performance.now();
+        this._showBanner(`Restoring checkpoint (command ${ck.seq})…`, "info");
+        const base = `/api/observe/checkpoint?session=${encodeURIComponent(this._session)}`;
+        const mr = await fetch(`${base}&seq=${ck.seq}`);
+        if (!mr.ok) throw new Error(`manifest HTTP ${mr.status}`);
+        const manifest = await mr.json();
+        if (run !== this._runId) return null;
+
+        // Blobs in parallel; object URLs so the loader needs no auth.
+        const objs = (manifest.objects || []).slice().sort((a, b) => a.id - b.id);
+        const urls = {};
+        await Promise.all(objs.filter((o) => !o.empty).map(async (o) => {
+            const br = await fetch(`${base}&seq=${ck.seq}&object=${o.id}`);
+            if (!br.ok) throw new Error(`blob ${o.id} HTTP ${br.status}`);
+            urls[o.id] = URL.createObjectURL(await br.blob());
+        }));
+        if (run !== this._runId) return null;
+
+        const exec = async (action, params) => {
+            const r = await this._api.execute({ action, params: params || {} });
+            if (!r.ok) throw new Error(`${action}: ${r.error}`);
+            return r.result;
+        };
+        const soft = async (action, params) => {
+            try { return await exec(action, params); } catch { return null; }
+        };
+        const v = this._viewer;
+        try {
+            await exec("unload");
+            // 1. Blobs + identity (the triple direct assignment is protocol,
+            //    not a hack: no public command can set ids/revs/counter).
+            for (const o of objs) {
+                if (o.empty) continue;
+                if (run !== this._runId) return null;
+                await exec("add_model", { url: urls[o.id], extension: ".glb",
+                                          name: o.name, frame: false });
+                const e = v._objects[v._objects.length - 1];
+                e.id = o.id;
+                e.wrapper.name = "mv_object_" + o.id;
+                e.geometryRev = o.geometryRev || 0;
+                v._activeObjectId = o.id;
+                if (o.pivot) e.pivot.set(o.pivot[0], o.pivot[1], o.pivot[2]);
+            }
+            // 2. Future ids continue the PERFORMER's counter (gaps included).
+            v._nextObjectId = manifest.nextObjectId;
+            // 3. Hierarchy, then parent-relative placements.
+            const present = new Set(objs.filter((o) => !o.empty).map((o) => o.id));
+            for (const o of objs) {
+                if (!o.empty && o.parentId != null && present.has(o.parentId)) {
+                    await exec("set_parent", { id: o.id, parent_id: o.parentId });
+                }
+            }
+            for (const o of objs) {
+                if (o.empty) continue;
+                await exec("set_object_transform", { id: o.id, position: o.position,
+                    quaternion: o.quaternion, scale_xyz: o.scale });
+            }
+            // 4. Tracked model scale (blobs export with it divided out).
+            for (const o of objs) {
+                if (o.empty || !o.modelScale || Math.abs(o.modelScale - 1) < 1e-9) continue;
+                await exec("set_active_object", { id: o.id });
+                await exec("set_scale", { scale: o.modelScale });
+            }
+            // 5. Visibility / opacity / morph weights.
+            for (const o of objs) {
+                if (o.visible === false) await exec("set_object_visible", { id: o.id, visible: false });
+                if (o.opacity !== undefined && o.opacity < 1) {
+                    await exec("set_object_opacity", { id: o.id, opacity: o.opacity });
+                }
+                const names = Object.keys(o.morphs || {});
+                if (names.length) {
+                    await exec("set_active_object", { id: o.id });
+                    for (const n of names) {
+                        if (o.morphs[n] > 0) await soft("set_morph", { name: n, weight: o.morphs[n] });
+                    }
+                }
+            }
+            // 6. Timeline (rotation keys are requested-Euler degrees).
+            const tl = manifest.timeline;
+            if (tl && tl.tracks && tl.tracks.length) {
+                for (const t of tl.tracks) {
+                    for (const ch of ["position", "rotation", "scale"]) {
+                        for (const k of (t[ch] || [])) {
+                            const p = { id: t.objectId, time: k.t };
+                            p[ch] = k.v;
+                            if (k.easing) p.easing = k.easing;
+                            await exec("set_keyframe", p);
+                        }
+                    }
+                    for (const key of Object.keys(t)) {
+                        if (!key.startsWith("morph:")) continue;
+                        for (const k of t[key]) {
+                            const p = { id: t.objectId, time: k.t, morphs: {} };
+                            p.morphs[key.slice(6)] = k.v;
+                            if (k.easing) p.easing = k.easing;
+                            await exec("set_keyframe", p);
+                        }
+                    }
+                }
+                if (tl.duration) await soft("set_timeline", { duration: tl.duration });
+                if (tl.time) await soft("seek_timeline", { time: tl.time });
+                if (tl.playing) await soft("play_timeline", { loop: tl.loop });
+            }
+            // 7. Display + lighting: best-effort visual parity.
+            const d = manifest.display || {};
+            if (d.background) await soft("set_background", { color: d.background });
+            if (d.environment) await soft("set_environment", d.environment);
+            if (d.renderMode === "wireframe" || d.wireframe) {
+                await soft("set_wireframe", { enabled: true });
+            } else if (d.renderMode && d.renderMode !== "textured") {
+                await soft("set_render_mode", { mode: d.renderMode });
+            }
+            if (d.fog) await soft("set_fog", { enabled: true });
+            if (d.clip) await soft("set_clip", { enabled: true, axis: d.clip.axis,
+                position: d.clip.position, flip: d.clip.flip });
+            const L = manifest.lighting || {};
+            if (L.keyIntensity !== undefined) {
+                await soft("set_lighting", { azimuth: L.keyAzimuth, elevation: L.keyElevation,
+                    key_intensity: L.keyIntensity, fill_intensity: L.fillIntensity,
+                    ambient: L.ambientIntensity, exposure: L.exposure });
+            }
+            // 8. Active object LAST (steps above move activation around).
+            if (manifest.activeObjectId != null) {
+                await exec("set_active_object", { id: manifest.activeObjectId });
+            }
+        } finally {
+            for (const id of Object.keys(urls)) URL.revokeObjectURL(urls[id]);
+        }
+        if (run !== this._runId) return null;
+
+        // VERIFY, don't trust: reconstructed state must match the manifest's
+        // fingerprint exactly, or the caller falls back / refuses.
+        if (manifest.fingerprint) {
+            if (v.settleDeferredStats) v.settleDeferredStats();
+            let vertices = 0, triangles = 0;
+            for (const e of v._objects || []) {
+                if (e.stats) { vertices += e.stats.vertices || 0; triangles += e.stats.faces || 0; }
+            }
+            const fp = manifest.fingerprint;
+            if ((fp.objectCount !== undefined && fp.objectCount !== (v._objects || []).length)
+                || (fp.triangles !== undefined && fp.triangles !== triangles)) {
+                throw new Error(`fingerprint mismatch after restore `
+                    + `(${(v._objects || []).length} obj/${triangles} tris vs `
+                    + `${fp.objectCount}/${fp.triangles})`);
+            }
+        }
+        this._restoredFrom = ck.seq;
+        // Live-join progress: the tail is all that remains to replay — the
+        // full-session command count would show "12/588" style nonsense.
+        if (!this._recording && manifest.commands_published) {
+            this._totalAtHello = Math.max(
+                0, this._totalAtHello - manifest.commands_published);
+        }
+        const ms = Math.round(performance.now() - t0);
+        // Honesty: the replica did NOT re-execute the skipped history.
+        this._showBanner(`Restored from checkpoint at command ${ck.seq} in ${(ms / 1000).toFixed(1)} s `
+            + "— earlier steps were not re-executed.", "info");
+        return manifest;
+    }
+
+    async _replay(cmd, run) {
+        if (!this.observing || run !== this._runId) return;
         const fastForward = !this._caughtUp && this._viewer._bulkReplay;
         await this._replayCore(cmd);
+        if (run !== this._runId) return;   // left the seat mid-command
         this._replayedCount++;
         if (fastForward) {
-            // No ghosts, no per-command frames — just a progress pulse. The
-            // yield is what makes it VISIBLE: queued replays chain as
-            // microtasks and never give the browser a frame, so without it
-            // the banner text updates but never paints and the seat reads as
-            // frozen for the whole catch-up (the "extremely slow" report was
-            // partly THIS — invisible progress).
-            if (this._replayedCount % 10 === 0) {
-                this._showBanner(`Replaying ${this._replayedCount}`
-                    + `/${this._totalAtHello || "?"} commands (fast-forward)…`, "info");
-                await new Promise((res) => setTimeout(res, 0));
+            // No ghosts, no per-command frames — just progress. TIME-BUDGET
+            // yield (not command-count): queued replays chain as microtasks
+            // and never give the browser a frame on their own, so without a
+            // real yield the banner never paints and the seat reads as
+            // frozen (the "extremely slow" report was partly THIS). Counting
+            // commands was the wrong unit — ten 300 ms paints blocked 3 s,
+            // while one 30 s refine yielded nothing either way. Elapsed time
+            // is the only honest trigger.
+            if (performance.now() - this._lastYieldAt >= REPLAY_BUDGET_MS) {
+                this._showProgress(this._replayedCount, this._totalAtHello);
+                await this._yieldFrame();
+                this._lastYieldAt = performance.now();
             }
             return;
         }
@@ -413,6 +814,38 @@ export class ObserveSeat {
             await new Promise((res) => setTimeout(res, 25));
         }
         this._ghostFor(cmd.action, cmd.params || {});
+    }
+
+    /**
+     * Yield one REAL frame to the browser between replay slices.
+     *
+     * Visible tab: resume after the next paint (rAF marks the frame; the
+     * 0-timeout lands after that frame's render steps) so the progress
+     * banner/scrub actually reach the screen — a bare setTimeout(0) yield
+     * lets input run but does not guarantee a paint before the next slice
+     * blocks again. The 150 ms timer is the guard for occluded windows,
+     * where rAF can be throttled indefinitely.
+     *
+     * Hidden tab: rAF never fires and setTimeout is clamped to ~1000 ms —
+     * a MessageChannel macrotask is unthrottled, keeps the event loop
+     * responsive, and skips paints nobody can see.
+     */
+    async _yieldFrame() {
+        if (typeof document !== "undefined"
+            && document.visibilityState === "visible") {
+            await new Promise((res) => {
+                let settled = false;
+                const fin = () => { if (!settled) { settled = true; res(); } };
+                requestAnimationFrame(() => setTimeout(fin, 0));
+                setTimeout(fin, 150);
+            });
+        } else {
+            await new Promise((res) => {
+                const mc = new MessageChannel();
+                mc.port1.onmessage = () => res();
+                mc.port2.postMessage(0);
+            });
+        }
     }
 
     /** Execute one replicated command (source rewrite + camera envelope +
@@ -765,17 +1198,55 @@ export class ObserveSeat {
     // Banners / chips
     // ------------------------------------------------------------------
 
+    /** Banner skeleton, built ONCE: spinner + text + cancel. Progress updates
+     *  during catch-up touch only the text node — rebuilding the subtree at
+     *  every ~80 ms yield would be pointless DOM churn. */
+    _ensureBanner() {
+        if (this._banner) return this._banner;
+        const el = document.createElement("div");
+        el.id = "observe-banner";
+        const spin = document.createElement("span");
+        spin.className = "observe-spin";
+        const text = document.createElement("span");
+        text.className = "observe-banner-text";
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.className = "observe-banner-cancel";
+        cancel.textContent = "Cancel";
+        cancel.title = "Stop replaying and leave the observation seat";
+        // The seat must ALWAYS be escapable mid-catch-up: leave() bumps the
+        // run id, which the replay loops check after every await.
+        cancel.addEventListener("click", () => this.leave(true));
+        el.append(spin, text, cancel);
+        this._viewer._container.appendChild(el);
+        this._banner = el;
+        this._bannerText = text;
+        this._bannerSpin = spin;
+        this._bannerCancel = cancel;
+        return el;
+    }
+
     _showBanner(text, kind) {
-        let el = this._banner;
-        if (!el) {
-            el = document.createElement("div");
-            el.id = "observe-banner";
-            this._viewer._container.appendChild(el);
-            this._banner = el;
-        }
-        el.textContent = text;
+        const el = this._ensureBanner();
+        this._bannerText.textContent = text;
+        this._bannerSpin.style.display = "none";
+        this._bannerCancel.style.display = "none";
         el.className = `observe-banner ${kind || "info"}`;
-        el.style.display = "block";
+        el.style.display = "flex";
+    }
+
+    /** Catch-up/seek progress: N/M + %, a spinner that visibly moves (CSS
+     *  animation — compositor-driven, so it keeps spinning between yields),
+     *  and a working Cancel. Updated at every scheduler yield. */
+    _showProgress(done, total) {
+        const el = this._ensureBanner();
+        const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : null;
+        this._bannerText.textContent = `Replaying ${done}/${total || "?"} commands`
+            + (pct !== null ? ` — ${pct}%` : "") + " (fast-forward)";
+        this._bannerSpin.style.display = "inline-block";
+        this._bannerCancel.style.display = "inline-block";
+        el.className = "observe-banner info";
+        el.style.display = "flex";
     }
 
     _hideBanner() {

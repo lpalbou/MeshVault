@@ -70,9 +70,13 @@ class _Runtime:
         # Observation seat: publish executed mutations so a human in the app
         # can WATCH this agent session live (backend/observe_publisher.py).
         # MESHVAULT_SESSION_LABEL names the session in the app's seat list
-        # (the REPL pilot sets it to its model name).
+        # (the REPL pilot sets it to its model name). The page provider lets
+        # the publisher pull staged CHECKPOINT payloads (state snapshots) out
+        # of the page and ship them to the hub — returns None until the
+        # viewer page exists, which the publisher treats as "skip honestly".
         self.observer_pub = ObservePublisher(
-            label=os.environ.get("MESHVAULT_SESSION_LABEL", "mcp"))
+            label=os.environ.get("MESHVAULT_SESSION_LABEL", "mcp"),
+            page_provider=lambda: self.session.viewer.page)
         self._observe_hooked = False
 
     @property

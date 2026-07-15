@@ -2074,9 +2074,25 @@ html, body {
 .observe-banner { position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
     z-index: 60; padding: 8px 16px; border-radius: 10px; font-size: 13px;
     background: rgba(20,24,34,0.92); border: 1px solid rgba(255,255,255,0.12);
-    max-width: 70%; text-align: center; }
+    max-width: 70%; text-align: center;
+    /* Progress layout (spinner · text · cancel). The banner must stay
+       clickable while the rest of the UI is observe-locked: Cancel is the
+       escape hatch during a long catch-up. */
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    pointer-events: auto; }
 .observe-banner.warn { border-color: #e2b93b; color: #ffd980; }
 .observe-banner.error { border-color: #e25b4a; color: #ff9a8c; }
+/* Catch-up spinner: compositor-driven CSS animation — it keeps visibly
+   moving between scheduler yields even while replay JS occupies the main
+   thread, which is the honest "still working, not frozen" signal. */
+.observe-spin { width: 13px; height: 13px; flex: 0 0 auto; border-radius: 50%;
+    border: 2px solid rgba(159,208,255,0.25); border-top-color: #9fd0ff;
+    animation: observe-spin 0.8s linear infinite; will-change: transform; }
+@keyframes observe-spin { to { transform: rotate(360deg); } }
+.observe-banner-cancel { flex: 0 0 auto; padding: 2px 10px; font-size: 12px;
+    border-radius: 6px; cursor: pointer; color: #ffb4a8;
+    background: rgba(226,91,74,0.12); border: 1px solid rgba(226,91,74,0.45); }
+.observe-banner-cancel:hover { background: rgba(226,91,74,0.28); color: #fff; }
 .observe-chip { position: absolute; top: 52px; left: 50%; transform: translateX(-50%);
     z-index: 59; padding: 4px 12px; border-radius: 999px; font-size: 12px;
     background: rgba(20,24,34,0.85); border: 1px solid rgba(255,255,255,0.1);

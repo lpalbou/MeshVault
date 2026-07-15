@@ -718,6 +718,29 @@ const PATCH_TEXEL_CAP = 2048 * 2048;   // don't pin >16 MB of undo bytes
 let _lastPaintOp = null;
 
 /**
+ * Replay-time stash suppression (observe-seat fast-forward): every brush
+ * command copies its pre-write canvas rect(s) for undo — paint_pattern and
+ * bake_ao stash the FULL canvas (a 2048² RGBA layer is a 16 MB read per
+ * command). During a buffered-recording seek the seat sets this viewer flag
+ * when it has PROVEN (exact log scan) that no replayed undo_paint will ever
+ * consume the stash, so the copies are pure waste. Live replay never sets
+ * it: a live performer may still publish an undo_paint that the replica
+ * must honor with the same restored texels.
+ */
+function paintUndoSuppressed(viewer) {
+    return !!(viewer && viewer._suppressPaintUndo);
+}
+
+/** Drop the brush-undo slot (+ gesture ledger). The observe seat calls this
+ *  on join/leave: a stash must never straddle the seat boundary — pre-join
+ *  patches point at layers the replica unload disposed, and post-replay
+ *  patches describe the PERFORMER's work, not the user's. */
+export function clearPaintUndo() {
+    _lastPaintOp = null;
+    _gestureAlpha = null;
+}
+
+/**
  * Start a new undoable brush op. `group` (opts.undo_group) merges CONSECUTIVE
  * calls into one undo unit — the human UI slices a drag into many stroke
  * commands (flush cadence), and "undo" must mean the GESTURE, not the last
@@ -1938,7 +1961,9 @@ function paintPoints(viewer, opts, points) {
     const sym = buildSymmetry(viewer, opts.symmetry);
     if (sym) points = points.concat(points.map(sym.point));
     // One undo unit per COMMAND — or per GESTURE when undo_group is given.
-    beginPaintOp("paint", opts.undo_group);
+    // (Skipped under replay suppression — see paintUndoSuppressed.)
+    const stashUndo = !paintUndoSuppressed(viewer);
+    if (stashUndo) beginPaintOp("paint", opts.undo_group);
     const radius = resolveRadius(viewer, opts, "paint");
     const color = new THREE.Color(opts.color !== undefined ? String(opts.color) : "#ff3333");
     const opacity = opts.opacity !== undefined ? Math.max(0, Math.min(1, opts.opacity)) : 1;
@@ -2201,7 +2226,9 @@ function paintPoints(viewer, opts, points) {
                 alphaSum += alpha;
                 painted++;
             }
-            stashPaintPatch("paint", target, minPX, minPY, img.width, img.height);
+            if (stashUndo) {
+                stashPaintPatch("paint", target, minPX, minPY, img.width, img.height);
+            }
             target.ctx.putImageData(img, minPX, minPY);
             pixels += painted;
             rasterized += acc.size;
@@ -2413,7 +2440,8 @@ export function paintPattern(viewer, opts = {}) {
     if (!PATTERN_TYPES.includes(type)) {
         throw new Error(`paint_pattern type must be one of ${PATTERN_TYPES.join("|")}.`);
     }
-    beginPaintOp("paint_pattern", opts.undo_group);
+    const stashUndo = !paintUndoSuppressed(viewer);
+    if (stashUndo) beginPaintOp("paint_pattern", opts.undo_group);
     const seed = Math.floor(opts.seed !== undefined ? opts.seed : 1);
     const octaves = Math.max(1, Math.min(6, Math.floor(opts.octaves || 3)));
     const opacity = opts.opacity !== undefined
@@ -2577,7 +2605,9 @@ export function paintPattern(viewer, opts = {}) {
                 }
             }
         }
-        stashPaintPatch("paint_pattern", target, 0, 0, dim, dim);
+        // FULL-canvas stash (16 MB on a 2048² layer) — the single most
+        // expensive undo capture; suppressible during proven-safe replays.
+        if (stashUndo) stashPaintPatch("paint_pattern", target, 0, 0, dim, dim);
         target.ctx.putImageData(img, 0, 0);
         target.texture.needsUpdate = true;
         paintedLayers.add(target);
@@ -2703,7 +2733,8 @@ export function bakeAO(viewer, opts = {}) {
         throw new Error("bake_ao with strength 0 and highlight 0 is a no-op — "
             + "set strength (cavity darkening) and/or highlight (edge lightening).");
     }
-    beginPaintOp("bake_ao", opts.undo_group);
+    const stashUndo = !paintUndoSuppressed(viewer);
+    if (stashUndo) beginPaintOp("bake_ao", opts.undo_group);
     const tmp = new THREE.Vector3();
     const nb = new THREE.Vector3();
     const nrm = new THREE.Vector3();
@@ -2788,7 +2819,8 @@ export function bakeAO(viewer, opts = {}) {
                 }
             }
         }
-        stashPaintPatch("bake_ao", layer, 0, 0, dim, dim);
+        // FULL-canvas stash — same suppression rationale as paint_pattern.
+        if (stashUndo) stashPaintPatch("bake_ao", layer, 0, 0, dim, dim);
         layer.ctx.putImageData(img, 0, 0);
         layer.texture.needsUpdate = true;
         shaded++;
@@ -3053,7 +3085,8 @@ export function blurPaint(viewer, opts = {}) {
     assertNotSkinned(viewer);
     assertNoMorphForHeal(viewer, "blur_paint");
     const meshes = activeMeshes(viewer);
-    beginPaintOp("blur_paint", opts.undo_group);
+    const stashUndo = !paintUndoSuppressed(viewer);
+    if (stashUndo) beginPaintOp("blur_paint", opts.undo_group);
     const radius = resolveRadius(viewer, opts, "blur_paint");
     const strength = opts.strength !== undefined ? Math.max(0, Math.min(1, opts.strength)) : 0.5;
     const center = new THREE.Vector3(...(opts.center || []));
@@ -3107,7 +3140,9 @@ export function blurPaint(viewer, opts = {}) {
             blurred++;
             blurAlphaSum += alpha;
         }
-        stashPaintPatch("blur_paint", layer, minX, minY, dstImg.width, dstImg.height);
+        if (stashUndo) {
+            stashPaintPatch("blur_paint", layer, minX, minY, dstImg.width, dstImg.height);
+        }
         layer.ctx.putImageData(dstImg, minX, minY);
         layer.texture.needsUpdate = true;
     }
@@ -3134,7 +3169,8 @@ export function clonePaint(viewer, opts = {}) {
     assertNotSkinned(viewer);
     assertNoMorphForHeal(viewer, "clone_paint");
     const meshes = activeMeshes(viewer);
-    beginPaintOp("clone_paint", opts.undo_group);
+    const stashUndo = !paintUndoSuppressed(viewer);
+    if (stashUndo) beginPaintOp("clone_paint", opts.undo_group);
     const radius = resolveRadius(viewer, opts, "clone_paint");
     if (!opts.from || opts.from.length !== 3 || !opts.to || opts.to.length !== 3) {
         throw new Error("clone_paint requires from:[x,y,z] and to:[x,y,z] "
@@ -3296,7 +3332,9 @@ export function clonePaint(viewer, opts = {}) {
             cloned++;
             alphaSum += alpha;
         }
-        stashPaintPatch("clone_paint", layer, minX, minY, img.width, img.height);
+        if (stashUndo) {
+            stashPaintPatch("clone_paint", layer, minX, minY, img.width, img.height);
+        }
         layer.ctx.putImageData(img, minX, minY);
         layer.texture.needsUpdate = true;
     }

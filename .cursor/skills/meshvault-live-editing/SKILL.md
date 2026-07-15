@@ -557,6 +557,12 @@ When painting features onto a blanked model, measure — never guess:
 
 ## Performing for humans (observation seat)
 
+- Checkpoints are AUTOMATIC: the publisher snapshots scene state after any
+  >2 s command and at session end, so humans join/scrub your session in
+  seconds even when your build contains monster remeshes. You owe them
+  nothing extra — but a `simplify` on a 1.5M-tri mesh still takes ITS OWN
+  20 minutes live; prevention (refine budgets) beats any replay machinery.
+
 - Publish a session (the MCP runtime does this automatically when the app is
   running); the app's eye icon lists joinable sessions.
 - **Wait for your audience.** Poll `/api/observe/sessions` for

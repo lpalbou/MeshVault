@@ -31,6 +31,7 @@ from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
     PlainTextResponse,
+    Response,
     StreamingResponse,
 )
 from pydantic import BaseModel
@@ -48,7 +49,12 @@ from backend.agent_bridge import (
     write_session_file,
 )
 from backend.ai_pilot import AiPilotManager
-from backend.observe_hub import ObserveHub, PUBLISH_MAX_BYTES
+from backend.observe_hub import (
+    CHECKPOINT_MAX_BYTES,
+    ObserveHub,
+    PUBLISH_MAX_BYTES,
+    parse_checkpoint_manifest,
+)
 from backend.security import (
     SecurityConfig,
     PathGuard,
@@ -1002,15 +1008,19 @@ async def observe_delete(body: ObserveDeleteRequest):
 
 
 @app.get("/api/observe/stream")
-async def observe_stream(session: str):
+async def observe_stream(session: str,
+                         from_seq: int = Query(0, alias="from", ge=0)):
     """
-    Cursor-based SSE for ONE observer: full replay from seq 0, `caught_up`,
-    then live entries — a single server-side generator, so there is no
-    client-side log/live stitching and no seq-gap race. Unjoinable and
-    desync conditions arrive as honest meta events, never silence.
+    Cursor-based SSE for ONE observer: replay from seq 0 — or from a
+    checkpoint boundary via `from` (fetch the checkpoint, restore, then
+    stream from=<checkpoint seq>+1) — `caught_up`, then live entries. One
+    server-side generator, so there is no client-side log/live stitching and
+    no seq-gap race. Checkpoint positions arrive as {type:"checkpoint"}
+    marker events (ignored by pre-checkpoint clients). Unjoinable and desync
+    conditions arrive as honest meta events, never silence.
     """
     async def stream():
-        async for event in observe_hub.stream(session):
+        async for event in observe_hub.stream(session, from_seq):
             if event.get("type") == "heartbeat":
                 yield ": heartbeat\n\n"
             else:
@@ -1021,6 +1031,57 @@ async def observe_stream(session: str):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.post("/api/observe/checkpoint")
+async def observe_checkpoint_upload(request: Request, session: str):
+    """
+    Performer upload of ONE state checkpoint: a ZIP of manifest.json +
+    obj_<id>.glb per scene object. Anchored by the hub to the seq of the last
+    appended event — correct because the publisher ships checkpoints through
+    the same ordered pipe as events. Size-capped; refusals return ok:false so
+    the performer can log an honest checkpoint_skipped note.
+    """
+    length = request.headers.get("content-length")
+    if length and int(length) > CHECKPOINT_MAX_BYTES + 4096:
+        raise HTTPException(status_code=413,
+                            detail=f"checkpoint exceeds {CHECKPOINT_MAX_BYTES} bytes")
+    raw = await request.body()
+    if len(raw) > CHECKPOINT_MAX_BYTES + 4096:
+        raise HTTPException(status_code=413,
+                            detail=f"checkpoint exceeds {CHECKPOINT_MAX_BYTES} bytes")
+    try:
+        manifest = parse_checkpoint_manifest(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"malformed checkpoint: {e}")
+    return observe_hub.add_checkpoint(session, raw, manifest)
+
+
+@app.get("/api/observe/checkpoint")
+async def observe_checkpoint_fetch(session: str, seq: int,
+                                   object: Optional[int] = None):
+    """
+    Observer fetch: without `object`, the checkpoint's identity MANIFEST
+    (JSON — ids, names, placements, display state, timeline, fingerprint);
+    with `object=<id>`, that object's GLB blob (model/gltf-binary). Split on
+    purpose: a browser client would otherwise need a JS unzip dependency, and
+    per-object fetches parallelize the restore.
+    """
+    record = observe_hub.get_checkpoint(session, seq)
+    if record is None:
+        raise HTTPException(status_code=404,
+                            detail="no checkpoint at this seq (it may have been "
+                                   "thinned — refetch the session's checkpoint list)")
+    if object is None:
+        return JSONResponse({**record["manifest"], "seq": record["seq"],
+                             "bytes": record["bytes"], "ts": record["ts"]},
+                            headers={"Cache-Control": "no-store"})
+    blob = observe_hub.checkpoint_object(record, object)
+    if blob is None:
+        raise HTTPException(status_code=404,
+                            detail=f"checkpoint has no object {object}")
+    return Response(blob, media_type="model/gltf-binary",
+                    headers={"Cache-Control": "no-store"})
 
 
 # --- In-app AI pilot (Spotlight command bar → local-LLM agent in the tab) ---

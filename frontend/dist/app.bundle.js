@@ -49198,6 +49198,13 @@ function finalizeSculpt(viewer, touchedGeometries) {
 }
 var PATCH_TEXEL_CAP = 2048 * 2048;
 var _lastPaintOp = null;
+function paintUndoSuppressed(viewer) {
+  return !!(viewer && viewer._suppressPaintUndo);
+}
+function clearPaintUndo() {
+  _lastPaintOp = null;
+  _gestureAlpha = null;
+}
 function beginPaintOp(action, group) {
   if (group && _lastPaintOp && _lastPaintOp.group === group) return;
   _lastPaintOp = { action, group: group || null, patches: [] };
@@ -50188,7 +50195,8 @@ function paintPoints(viewer, opts, points) {
   const channel = resolveChannel(opts);
   const sym = buildSymmetry(viewer, opts.symmetry);
   if (sym) points = points.concat(points.map(sym.point));
-  beginPaintOp("paint", opts.undo_group);
+  const stashUndo = !paintUndoSuppressed(viewer);
+  if (stashUndo) beginPaintOp("paint", opts.undo_group);
   const radius = resolveRadius(viewer, opts, "paint");
   const color = new Color(opts.color !== void 0 ? String(opts.color) : "#ff3333");
   const opacity = opts.opacity !== void 0 ? Math.max(0, Math.min(1, opts.opacity)) : 1;
@@ -50398,7 +50406,9 @@ function paintPoints(viewer, opts, points) {
         alphaSum += alpha;
         painted++;
       }
-      stashPaintPatch("paint", target, minPX, minPY, img.width, img.height);
+      if (stashUndo) {
+        stashPaintPatch("paint", target, minPX, minPY, img.width, img.height);
+      }
       target.ctx.putImageData(img, minPX, minPY);
       pixels += painted;
       rasterized += acc.size;
@@ -50563,7 +50573,8 @@ function paintPattern(viewer, opts = {}) {
   if (!PATTERN_TYPES.includes(type)) {
     throw new Error(`paint_pattern type must be one of ${PATTERN_TYPES.join("|")}.`);
   }
-  beginPaintOp("paint_pattern", opts.undo_group);
+  const stashUndo = !paintUndoSuppressed(viewer);
+  if (stashUndo) beginPaintOp("paint_pattern", opts.undo_group);
   const seed = Math.floor(opts.seed !== void 0 ? opts.seed : 1);
   const octaves = Math.max(1, Math.min(6, Math.floor(opts.octaves || 3)));
   const opacity = opts.opacity !== void 0 ? Math.max(0, Math.min(1, opts.opacity)) : 1;
@@ -50710,7 +50721,7 @@ function paintPattern(viewer, opts = {}) {
         }
       }
     }
-    stashPaintPatch("paint_pattern", target, 0, 0, dim, dim);
+    if (stashUndo) stashPaintPatch("paint_pattern", target, 0, 0, dim, dim);
     target.ctx.putImageData(img, 0, 0);
     target.texture.needsUpdate = true;
     paintedLayers.add(target);
@@ -50827,7 +50838,8 @@ function bakeAO(viewer, opts = {}) {
   if (strength === 0 && highlight === 0) {
     throw new Error("bake_ao with strength 0 and highlight 0 is a no-op \u2014 set strength (cavity darkening) and/or highlight (edge lightening).");
   }
-  beginPaintOp("bake_ao", opts.undo_group);
+  const stashUndo = !paintUndoSuppressed(viewer);
+  if (stashUndo) beginPaintOp("bake_ao", opts.undo_group);
   const tmp = new Vector3();
   const nb = new Vector3();
   const nrm = new Vector3();
@@ -50912,7 +50924,7 @@ function bakeAO(viewer, opts = {}) {
         }
       }
     }
-    stashPaintPatch("bake_ao", layer, 0, 0, dim, dim);
+    if (stashUndo) stashPaintPatch("bake_ao", layer, 0, 0, dim, dim);
     layer.ctx.putImageData(img, 0, 0);
     layer.texture.needsUpdate = true;
     shaded++;
@@ -51135,7 +51147,8 @@ function blurPaint(viewer, opts = {}) {
   assertNotSkinned(viewer);
   assertNoMorphForHeal(viewer, "blur_paint");
   const meshes = activeMeshes(viewer);
-  beginPaintOp("blur_paint", opts.undo_group);
+  const stashUndo = !paintUndoSuppressed(viewer);
+  if (stashUndo) beginPaintOp("blur_paint", opts.undo_group);
   const radius = resolveRadius(viewer, opts, "blur_paint");
   const strength = opts.strength !== void 0 ? Math.max(0, Math.min(1, opts.strength)) : 0.5;
   const center = new Vector3(...opts.center || []);
@@ -51194,7 +51207,9 @@ function blurPaint(viewer, opts = {}) {
       blurred++;
       blurAlphaSum += alpha;
     }
-    stashPaintPatch("blur_paint", layer, minX, minY, dstImg.width, dstImg.height);
+    if (stashUndo) {
+      stashPaintPatch("blur_paint", layer, minX, minY, dstImg.width, dstImg.height);
+    }
     layer.ctx.putImageData(dstImg, minX, minY);
     layer.texture.needsUpdate = true;
   }
@@ -51214,7 +51229,8 @@ function clonePaint(viewer, opts = {}) {
   assertNotSkinned(viewer);
   assertNoMorphForHeal(viewer, "clone_paint");
   const meshes = activeMeshes(viewer);
-  beginPaintOp("clone_paint", opts.undo_group);
+  const stashUndo = !paintUndoSuppressed(viewer);
+  if (stashUndo) beginPaintOp("clone_paint", opts.undo_group);
   const radius = resolveRadius(viewer, opts, "clone_paint");
   if (!opts.from || opts.from.length !== 3 || !opts.to || opts.to.length !== 3) {
     throw new Error("clone_paint requires from:[x,y,z] and to:[x,y,z] (world \u2014 use pick on a clean area and on the defect).");
@@ -51356,7 +51372,9 @@ function clonePaint(viewer, opts = {}) {
       cloned++;
       alphaSum += alpha;
     }
-    stashPaintPatch("clone_paint", layer, minX, minY, img.width, img.height);
+    if (stashUndo) {
+      stashPaintPatch("clone_paint", layer, minX, minY, img.width, img.height);
+    }
     layer.ctx.putImageData(img, minX, minY);
     layer.texture.needsUpdate = true;
   }
@@ -58631,6 +58649,7 @@ var _Viewer3D = class _Viewer3D {
   /** Resume drawing after bulk replay and paint the accumulated state. */
   endBulkReplay() {
     this._bulkReplay = false;
+    this._suppressPaintUndo = false;
     for (const e of this._objects || []) {
       e.model.traverse((c) => {
         if (c.isMesh && c.geometry && c.geometry.userData && c.geometry.userData._mvNormalsDirty) {
@@ -58660,6 +58679,16 @@ var _Viewer3D = class _Viewer3D {
     const animate = () => {
       if (!this._renderLoopActive) return;
       this._animationId = requestAnimationFrame(animate);
+      if (this._bulkReplay) {
+        if (++this._idleFrames > 45) {
+          this._renderLoopActive = false;
+          if (this._animationId) {
+            cancelAnimationFrame(this._animationId);
+            this._animationId = null;
+          }
+        }
+        return;
+      }
       const activeAnim = this._activeAnimation;
       const animating = !!(activeAnim && activeAnim.mixer && activeAnim.playing);
       const fpvActive = this._navMode === "fpv" && (this._keysPressed.size > 0 || this._fpvMouseDown);
@@ -67742,6 +67771,7 @@ var EditPanel = class {
 
 // frontend/js/observe_seat.js
 var GHOST_FADE_MS = 750;
+var REPLAY_BUDGET_MS = 80;
 var ObserveSeat = class {
   /**
    * @param {import("./viewer_3d.js").Viewer3D} viewer
@@ -67770,6 +67800,8 @@ var ObserveSeat = class {
     this._es = null;
     this._expectedSeq = 0;
     this._queue = Promise.resolve();
+    this._runId = 0;
+    this._lastYieldAt = 0;
     this._ghosts = [];
     this._ghostGroup = null;
     this._banner = null;
@@ -67785,6 +67817,9 @@ var ObserveSeat = class {
     this._pos = 0;
     this._playTimer = null;
     this._seekBusy = false;
+    this._checkpoints = [];
+    this._joinCheckpoint = null;
+    this._restoredFrom = null;
     this._cursor = null;
     this._cursorAnim = null;
   }
@@ -67801,6 +67836,7 @@ var ObserveSeat = class {
   // ------------------------------------------------------------------
   async join(sessionId) {
     if (this.observing) this.leave(false);
+    let sessionInfo = null;
     try {
       const sessions = await this.sessions();
       const s = sessions.find((x) => x.id === sessionId);
@@ -67808,15 +67844,20 @@ var ObserveSeat = class {
         this._toast("That session no longer exists \u2014 refresh the list.", "error");
         return;
       }
-      if (!s.joinable && !s.replayable) {
+      const hasCheckpoint = (s.checkpoints || []).some(
+        (c) => c.seq + 1 >= (s.first_seq || 0)
+      );
+      if (!s.joinable && !s.replayable && !hasCheckpoint) {
         this._toast("Cannot join: the session outgrew its log \u2014 replay-from-zero is impossible.", "error");
         return;
       }
+      sessionInfo = s;
     } catch (err2) {
       this._toast(`Observe hub unreachable: ${err2.message}`, "error");
       return;
     }
     this.observing = true;
+    this._runId++;
     this._session = sessionId;
     this._expectedSeq = 0;
     this._caughtUp = false;
@@ -67828,11 +67869,20 @@ var ObserveSeat = class {
     this._log = [];
     this._pos = 0;
     this._lastCam = null;
+    this._restoredFrom = null;
+    this._checkpoints = (sessionInfo.checkpoints || []).filter((c) => c.seq + 1 >= (sessionInfo.first_seq || 0)).sort((a, b) => a.seq - b.seq);
+    this._joinCheckpoint = null;
+    let fromSeq = 0;
+    if (sessionInfo.alive && this._checkpoints.length && this.replaySpeed === "instant") {
+      this._joinCheckpoint = this._checkpoints[this._checkpoints.length - 1];
+      fromSeq = this._joinCheckpoint.seq + 1;
+    }
+    clearPaintUndo();
     this._setUiLocked(true);
     this._pauseBridge(true);
     this._onObservingChange(true);
     this._es = new EventSource(
-      `/api/observe/stream?session=${encodeURIComponent(sessionId)}`
+      `/api/observe/stream?session=${encodeURIComponent(sessionId)}` + (fromSeq > 0 ? `&from=${fromSeq}` : "")
     );
     this._es.onmessage = (e) => {
       let msg;
@@ -67854,13 +67904,18 @@ var ObserveSeat = class {
       this._es = null;
     }
     this.observing = false;
+    this._runId++;
     this._session = null;
     this.playbackPause();
     this._log = [];
     this._pos = 0;
     this._recording = false;
+    this._checkpoints = [];
+    this._joinCheckpoint = null;
+    this._restoredFrom = null;
     this._onPlayback(0, 0, false, false);
     this._viewer.endBulkReplay();
+    clearPaintUndo();
     this._clearGhosts();
     this._hideBanner();
     this._setUiLocked(false);
@@ -67879,27 +67934,90 @@ var ObserveSeat = class {
       this._recording = !!msg.recording;
       const s = msg.session || {};
       this._totalAtHello = s.commands || 0;
+      if (this._recording && this._joinCheckpoint) {
+        this._joinCheckpoint = null;
+        this._expectedSeq = 0;
+        if (this._es) {
+          this._es.close();
+        }
+        this._es = new EventSource(
+          `/api/observe/stream?session=${encodeURIComponent(this._session)}`
+        );
+        this._es.onmessage = (e) => {
+          let m;
+          try {
+            m = JSON.parse(e.data);
+          } catch {
+            return;
+          }
+          this._handle(m);
+        };
+        this._helloSeen = false;
+        return;
+      }
       if (!this._recording && this.replaySpeed === "instant" && this._totalAtHello > 20) {
         this._viewer.beginBulkReplay();
-        this._showBanner(
-          `Replaying ${this._totalAtHello} commands (fast-forward)\u2026`,
-          "info"
-        );
+        this._lastYieldAt = performance.now();
+        this._showProgress(0, this._totalAtHello);
       }
-      this._queue = this._api.execute({ action: "unload" }).then(() => {
-      });
+      if (this._joinCheckpoint) {
+        const ck = this._joinCheckpoint;
+        this._expectedSeq = ck.seq + 1;
+        const run = this._runId;
+        this._viewer.beginBulkReplay();
+        this._queue = this._restoreFromCheckpoint(ck, run).catch((err2) => {
+          if (run !== this._runId) return;
+          this._showBanner(`Checkpoint restore failed (${String(err2.message).slice(0, 90)}) \u2014 replaying from the start instead.`, "warn");
+          this._joinCheckpoint = null;
+          this._expectedSeq = 0;
+          if (this._es) this._es.close();
+          this._es = new EventSource(
+            `/api/observe/stream?session=${encodeURIComponent(this._session)}`
+          );
+          this._es.onmessage = (e) => {
+            let m;
+            try {
+              m = JSON.parse(e.data);
+            } catch {
+              return;
+            }
+            this._handle(m);
+          };
+          this._helloSeen = false;
+        });
+      } else {
+        this._queue = this._api.execute({ action: "unload" }).then(() => {
+        });
+      }
       if (s.lossy) this._showBanner(
         "Performer reported LOST publishes \u2014 the replica may diverge.",
         "warn"
       );
       return;
     }
+    if (msg.type === "checkpoint") {
+      if (!this._checkpoints.some((c) => c.seq === msg.seq)) {
+        this._checkpoints.push({
+          seq: msg.seq,
+          bytes: msg.bytes,
+          exec_ms_since_start: msg.exec_ms_since_start || 0
+        });
+        this._checkpoints.sort((a, b) => a.seq - b.seq);
+      }
+      return;
+    }
     if (msg.type === "caught_up") {
       if (this._recording) return;
+      const run = this._runId;
       this._queue = this._queue.then(() => {
+        if (run !== this._runId) return;
         this._viewer.endBulkReplay();
         this._caughtUp = true;
-        this._hideBanner();
+        if (this._replayErrors > 0) {
+          this._showBanner(`Caught up with ${this._replayErrors} replay error(s) \u2014 the replica may have diverged.`, "warn");
+        } else {
+          this._hideBanner();
+        }
         this._toast("Caught up \u2014 watching live.", "info");
       });
       return;
@@ -67917,7 +68035,9 @@ var ObserveSeat = class {
           }
           this._toast(`Recording loaded (${this._log.length} events) \u2014 scrub or replay it from the bar below.`, "info");
         } else {
+          const run = this._runId;
           this._queue = this._queue.then(() => {
+            if (run !== this._runId) return;
             this._viewer.endBulkReplay();
             this._showBanner(text, "info");
           });
@@ -67961,7 +68081,8 @@ var ObserveSeat = class {
     }
     if (msg.kind === "command") {
       const cmd = msg.command || {};
-      this._queue = this._queue.then(() => this._replay(cmd));
+      const run = this._runId;
+      this._queue = this._queue.then(() => this._replay(cmd, run));
     } else if (msg.kind === "camera") {
       this._lastCam = msg.camera || this._lastCam;
       if (this.follow && msg.camera && !this._viewer._bulkReplay) {
@@ -68013,32 +68134,98 @@ var ObserveSeat = class {
     }
     this._onPlayback(this._pos, this._log.length, false, true);
   }
-  /** Seek the playhead. Forward = apply the delta fast; backward = rebuild
-   *  from zero (deterministic replay makes every position reconstructible). */
+  /** Command-entry engine cost (exec_ms telemetry) in log range [a, b). */
+  _execCost(a, b) {
+    let ms = 0;
+    for (let i = Math.max(0, a); i < Math.min(b, this._log.length); i++) {
+      const e = this._log[i];
+      if (e.kind === "command") ms += e.exec_ms || 25;
+    }
+    return ms;
+  }
+  /** Newest checkpoint at or before absolute seq S, with its log index. */
+  _checkpointBefore(seq) {
+    let best = null;
+    for (const c of this._checkpoints) {
+      if (c.seq <= seq) best = c;
+    }
+    if (!best) return null;
+    let idx = 0;
+    while (idx < this._log.length && this._log[idx].seq <= best.seq) idx++;
+    return { ck: best, idx };
+  }
+  /** Seek the playhead. Routes through the cheapest reconstruction:
+   *  forward = incremental delta; backward or expensive forward = RESTORE
+   *  the nearest checkpoint ≤ target and replay only the tail (the x-wing
+   *  fix: a recorded 20-minute simplify must never re-execute on a scrub). */
   async playbackSeek(target) {
     if (!this._recording || this._seekBusy) return;
     target = Math.max(0, Math.min(this._log.length, Math.round(target)));
     if (target === this._pos) return;
     this.playbackPause();
     this._seekBusy = true;
+    const run = this._runId;
     this._onPlayback(this._pos, this._log.length, false, true);
+    const logReplaysUndo = this._log.some((e) => {
+      if (e.kind !== "command" || !e.command) return false;
+      if (e.command.action === "undo_paint") return true;
+      if (e.command.action === "batch") {
+        const subs = (e.command.params || {}).commands || [];
+        return subs.some((s) => s && s.action === "undo_paint");
+      }
+      return false;
+    });
+    const RESTORE_EST_MS = 2500;
+    const targetSeq = target > 0 ? this._log[target - 1].seq : -1;
+    const cp = target > 0 ? this._checkpointBefore(targetSeq) : null;
+    let progressShown = false;
     try {
       this._viewer.beginBulkReplay();
-      if (target < this._pos) {
+      this._viewer._suppressPaintUndo = !logReplaysUndo;
+      let restored = false;
+      if (cp && cp.idx <= target) {
+        const incrementalCost = target >= this._pos ? this._execCost(this._pos, target) : RESTORE_EST_MS + this._execCost(0, target);
+        const checkpointCost = RESTORE_EST_MS + this._execCost(cp.idx, target);
+        if (checkpointCost < incrementalCost) {
+          try {
+            await this._restoreFromCheckpoint(cp.ck, run);
+            if (run !== this._runId) return;
+            this._pos = cp.idx;
+            restored = true;
+          } catch (err2) {
+            if (run !== this._runId) return;
+            this._showBanner(`Checkpoint restore failed (${String(err2.message).slice(0, 90)}) \u2014 replaying instead.`, "warn");
+          }
+        }
+      }
+      if (!restored && target < this._pos) {
         await this._api.execute({ action: "unload" });
+        if (run !== this._runId) return;
         this._pos = 0;
       }
-      let applied = 0;
+      this._lastYieldAt = performance.now();
       while (this._pos < target) {
+        if (run !== this._runId) return;
         await this._applyLogEntry(this._log[this._pos++], true);
-        if (++applied % 20 === 0) {
+        if (performance.now() - this._lastYieldAt >= REPLAY_BUDGET_MS) {
           this._onPlayback(this._pos, this._log.length, false, true);
-          await new Promise((res) => setTimeout(res, 0));
+          this._showProgress(this._pos, target);
+          progressShown = true;
+          await this._yieldFrame();
+          this._lastYieldAt = performance.now();
         }
       }
     } finally {
-      this._viewer.endBulkReplay();
       this._seekBusy = false;
+      if (run === this._runId) this._viewer.endBulkReplay();
+    }
+    if (run !== this._runId) return;
+    if (progressShown) {
+      if (this._replayErrors > 0) {
+        this._showBanner(`Replayed with ${this._replayErrors} error(s) \u2014 the replica may have diverged.`, "warn");
+      } else {
+        this._hideBanner();
+      }
     }
     if (this.follow && this._lastCam) this._applyCamera(this._lastCam);
     this._onPlayback(this._pos, this._log.length, false, true);
@@ -68049,15 +68236,193 @@ var ObserveSeat = class {
     this.follow = !!on;
     if (this.follow && this._lastCam) this._applyCamera(this._lastCam);
   }
-  async _replay(cmd) {
-    if (!this.observing) return;
+  // ------------------------------------------------------------------
+  // Checkpoint restore (protocol: /tmp/observe_checkpoint_protocol.md —
+  // port of the reference RESTORE_JS proven by test_observe_checkpoints)
+  // ------------------------------------------------------------------
+  /**
+   * Restore the replica to checkpoint `ck` (unload → per-object blobs →
+   * identity alignment → hierarchy/transforms/timeline/display). Throws on
+   * any hard failure INCLUDING a fingerprint mismatch — callers fall back
+   * to replay-from-zero or refuse honestly. A restored replica is
+   * RECONSTRUCTED state, not command-derived: the fingerprint check is the
+   * honesty mechanism.
+   */
+  async _restoreFromCheckpoint(ck, run) {
+    const t0 = performance.now();
+    this._showBanner(`Restoring checkpoint (command ${ck.seq})\u2026`, "info");
+    const base = `/api/observe/checkpoint?session=${encodeURIComponent(this._session)}`;
+    const mr = await fetch(`${base}&seq=${ck.seq}`);
+    if (!mr.ok) throw new Error(`manifest HTTP ${mr.status}`);
+    const manifest = await mr.json();
+    if (run !== this._runId) return null;
+    const objs = (manifest.objects || []).slice().sort((a, b) => a.id - b.id);
+    const urls = {};
+    await Promise.all(objs.filter((o) => !o.empty).map(async (o) => {
+      const br = await fetch(`${base}&seq=${ck.seq}&object=${o.id}`);
+      if (!br.ok) throw new Error(`blob ${o.id} HTTP ${br.status}`);
+      urls[o.id] = URL.createObjectURL(await br.blob());
+    }));
+    if (run !== this._runId) return null;
+    const exec = async (action, params) => {
+      const r = await this._api.execute({ action, params: params || {} });
+      if (!r.ok) throw new Error(`${action}: ${r.error}`);
+      return r.result;
+    };
+    const soft = async (action, params) => {
+      try {
+        return await exec(action, params);
+      } catch {
+        return null;
+      }
+    };
+    const v = this._viewer;
+    try {
+      await exec("unload");
+      for (const o of objs) {
+        if (o.empty) continue;
+        if (run !== this._runId) return null;
+        await exec("add_model", {
+          url: urls[o.id],
+          extension: ".glb",
+          name: o.name,
+          frame: false
+        });
+        const e = v._objects[v._objects.length - 1];
+        e.id = o.id;
+        e.wrapper.name = "mv_object_" + o.id;
+        e.geometryRev = o.geometryRev || 0;
+        v._activeObjectId = o.id;
+        if (o.pivot) e.pivot.set(o.pivot[0], o.pivot[1], o.pivot[2]);
+      }
+      v._nextObjectId = manifest.nextObjectId;
+      const present = new Set(objs.filter((o) => !o.empty).map((o) => o.id));
+      for (const o of objs) {
+        if (!o.empty && o.parentId != null && present.has(o.parentId)) {
+          await exec("set_parent", { id: o.id, parent_id: o.parentId });
+        }
+      }
+      for (const o of objs) {
+        if (o.empty) continue;
+        await exec("set_object_transform", {
+          id: o.id,
+          position: o.position,
+          quaternion: o.quaternion,
+          scale_xyz: o.scale
+        });
+      }
+      for (const o of objs) {
+        if (o.empty || !o.modelScale || Math.abs(o.modelScale - 1) < 1e-9) continue;
+        await exec("set_active_object", { id: o.id });
+        await exec("set_scale", { scale: o.modelScale });
+      }
+      for (const o of objs) {
+        if (o.visible === false) await exec("set_object_visible", { id: o.id, visible: false });
+        if (o.opacity !== void 0 && o.opacity < 1) {
+          await exec("set_object_opacity", { id: o.id, opacity: o.opacity });
+        }
+        const names = Object.keys(o.morphs || {});
+        if (names.length) {
+          await exec("set_active_object", { id: o.id });
+          for (const n2 of names) {
+            if (o.morphs[n2] > 0) await soft("set_morph", { name: n2, weight: o.morphs[n2] });
+          }
+        }
+      }
+      const tl2 = manifest.timeline;
+      if (tl2 && tl2.tracks && tl2.tracks.length) {
+        for (const t2 of tl2.tracks) {
+          for (const ch of ["position", "rotation", "scale"]) {
+            for (const k of t2[ch] || []) {
+              const p = { id: t2.objectId, time: k.t };
+              p[ch] = k.v;
+              if (k.easing) p.easing = k.easing;
+              await exec("set_keyframe", p);
+            }
+          }
+          for (const key of Object.keys(t2)) {
+            if (!key.startsWith("morph:")) continue;
+            for (const k of t2[key]) {
+              const p = { id: t2.objectId, time: k.t, morphs: {} };
+              p.morphs[key.slice(6)] = k.v;
+              if (k.easing) p.easing = k.easing;
+              await exec("set_keyframe", p);
+            }
+          }
+        }
+        if (tl2.duration) await soft("set_timeline", { duration: tl2.duration });
+        if (tl2.time) await soft("seek_timeline", { time: tl2.time });
+        if (tl2.playing) await soft("play_timeline", { loop: tl2.loop });
+      }
+      const d = manifest.display || {};
+      if (d.background) await soft("set_background", { color: d.background });
+      if (d.environment) await soft("set_environment", d.environment);
+      if (d.renderMode === "wireframe" || d.wireframe) {
+        await soft("set_wireframe", { enabled: true });
+      } else if (d.renderMode && d.renderMode !== "textured") {
+        await soft("set_render_mode", { mode: d.renderMode });
+      }
+      if (d.fog) await soft("set_fog", { enabled: true });
+      if (d.clip) await soft("set_clip", {
+        enabled: true,
+        axis: d.clip.axis,
+        position: d.clip.position,
+        flip: d.clip.flip
+      });
+      const L = manifest.lighting || {};
+      if (L.keyIntensity !== void 0) {
+        await soft("set_lighting", {
+          azimuth: L.keyAzimuth,
+          elevation: L.keyElevation,
+          key_intensity: L.keyIntensity,
+          fill_intensity: L.fillIntensity,
+          ambient: L.ambientIntensity,
+          exposure: L.exposure
+        });
+      }
+      if (manifest.activeObjectId != null) {
+        await exec("set_active_object", { id: manifest.activeObjectId });
+      }
+    } finally {
+      for (const id of Object.keys(urls)) URL.revokeObjectURL(urls[id]);
+    }
+    if (run !== this._runId) return null;
+    if (manifest.fingerprint) {
+      if (v.settleDeferredStats) v.settleDeferredStats();
+      let vertices = 0, triangles = 0;
+      for (const e of v._objects || []) {
+        if (e.stats) {
+          vertices += e.stats.vertices || 0;
+          triangles += e.stats.faces || 0;
+        }
+      }
+      const fp = manifest.fingerprint;
+      if (fp.objectCount !== void 0 && fp.objectCount !== (v._objects || []).length || fp.triangles !== void 0 && fp.triangles !== triangles) {
+        throw new Error(`fingerprint mismatch after restore (${(v._objects || []).length} obj/${triangles} tris vs ${fp.objectCount}/${fp.triangles})`);
+      }
+    }
+    this._restoredFrom = ck.seq;
+    if (!this._recording && manifest.commands_published) {
+      this._totalAtHello = Math.max(
+        0,
+        this._totalAtHello - manifest.commands_published
+      );
+    }
+    const ms = Math.round(performance.now() - t0);
+    this._showBanner(`Restored from checkpoint at command ${ck.seq} in ${(ms / 1e3).toFixed(1)} s \u2014 earlier steps were not re-executed.`, "info");
+    return manifest;
+  }
+  async _replay(cmd, run) {
+    if (!this.observing || run !== this._runId) return;
     const fastForward = !this._caughtUp && this._viewer._bulkReplay;
     await this._replayCore(cmd);
+    if (run !== this._runId) return;
     this._replayedCount++;
     if (fastForward) {
-      if (this._replayedCount % 10 === 0) {
-        this._showBanner(`Replaying ${this._replayedCount}/${this._totalAtHello || "?"} commands (fast-forward)\u2026`, "info");
-        await new Promise((res) => setTimeout(res, 0));
+      if (performance.now() - this._lastYieldAt >= REPLAY_BUDGET_MS) {
+        this._showProgress(this._replayedCount, this._totalAtHello);
+        await this._yieldFrame();
+        this._lastYieldAt = performance.now();
       }
       return;
     }
@@ -68065,6 +68430,41 @@ var ObserveSeat = class {
       await new Promise((res) => setTimeout(res, 25));
     }
     this._ghostFor(cmd.action, cmd.params || {});
+  }
+  /**
+   * Yield one REAL frame to the browser between replay slices.
+   *
+   * Visible tab: resume after the next paint (rAF marks the frame; the
+   * 0-timeout lands after that frame's render steps) so the progress
+   * banner/scrub actually reach the screen — a bare setTimeout(0) yield
+   * lets input run but does not guarantee a paint before the next slice
+   * blocks again. The 150 ms timer is the guard for occluded windows,
+   * where rAF can be throttled indefinitely.
+   *
+   * Hidden tab: rAF never fires and setTimeout is clamped to ~1000 ms —
+   * a MessageChannel macrotask is unthrottled, keeps the event loop
+   * responsive, and skips paints nobody can see.
+   */
+  async _yieldFrame() {
+    if (typeof document !== "undefined" && document.visibilityState === "visible") {
+      await new Promise((res) => {
+        let settled = false;
+        const fin = () => {
+          if (!settled) {
+            settled = true;
+            res();
+          }
+        };
+        requestAnimationFrame(() => setTimeout(fin, 0));
+        setTimeout(fin, 150);
+      });
+    } else {
+      await new Promise((res) => {
+        const mc = new MessageChannel();
+        mc.port1.onmessage = () => res();
+        mc.port2.postMessage(0);
+      });
+    }
   }
   /** Execute one replicated command (source rewrite + camera envelope +
    *  divergence accounting) — shared by live replay and recording playback. */
@@ -68418,17 +68818,50 @@ var ObserveSeat = class {
   // ------------------------------------------------------------------
   // Banners / chips
   // ------------------------------------------------------------------
+  /** Banner skeleton, built ONCE: spinner + text + cancel. Progress updates
+   *  during catch-up touch only the text node — rebuilding the subtree at
+   *  every ~80 ms yield would be pointless DOM churn. */
+  _ensureBanner() {
+    if (this._banner) return this._banner;
+    const el = document.createElement("div");
+    el.id = "observe-banner";
+    const spin = document.createElement("span");
+    spin.className = "observe-spin";
+    const text = document.createElement("span");
+    text.className = "observe-banner-text";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "observe-banner-cancel";
+    cancel.textContent = "Cancel";
+    cancel.title = "Stop replaying and leave the observation seat";
+    cancel.addEventListener("click", () => this.leave(true));
+    el.append(spin, text, cancel);
+    this._viewer._container.appendChild(el);
+    this._banner = el;
+    this._bannerText = text;
+    this._bannerSpin = spin;
+    this._bannerCancel = cancel;
+    return el;
+  }
   _showBanner(text, kind) {
-    let el = this._banner;
-    if (!el) {
-      el = document.createElement("div");
-      el.id = "observe-banner";
-      this._viewer._container.appendChild(el);
-      this._banner = el;
-    }
-    el.textContent = text;
+    const el = this._ensureBanner();
+    this._bannerText.textContent = text;
+    this._bannerSpin.style.display = "none";
+    this._bannerCancel.style.display = "none";
     el.className = `observe-banner ${kind || "info"}`;
-    el.style.display = "block";
+    el.style.display = "flex";
+  }
+  /** Catch-up/seek progress: N/M + %, a spinner that visibly moves (CSS
+   *  animation — compositor-driven, so it keeps spinning between yields),
+   *  and a working Cancel. Updated at every scheduler yield. */
+  _showProgress(done, total) {
+    const el = this._ensureBanner();
+    const pct = total > 0 ? Math.min(100, Math.round(done / total * 100)) : null;
+    this._bannerText.textContent = `Replaying ${done}/${total || "?"} commands` + (pct !== null ? ` \u2014 ${pct}%` : "") + " (fast-forward)";
+    this._bannerSpin.style.display = "inline-block";
+    this._bannerCancel.style.display = "inline-block";
+    el.className = "observe-banner info";
+    el.style.display = "flex";
   }
   _hideBanner() {
     if (this._banner) this._banner.style.display = "none";
@@ -70223,7 +70656,8 @@ Use right-click \u2192 "Add to scene" to compose instead, or Save the scene firs
         row.className = "observe-session-row";
         const label = this._escapeHtml(s.label || s.model || s.id || "agent");
         const watchers = s.observers ? ` \xB7 ${s.observers} watching` : "";
-        const info = `${s.commands} cmd${s.lossy ? " \xB7 lossy" : ""}${watchers}`;
+        const fast = (s.checkpoints || []).length ? " \u26A1" : "";
+        const info = `${s.commands} cmd${s.lossy ? " \xB7 lossy" : ""}${watchers}${fast}`;
         row.innerHTML = `<span class='observe-dot${isLive ? " live" : ""}'></span><span class="observe-name" title="${label}">${label}</span><span class="observe-meta">${info}</span>`;
         const join = document.createElement("button");
         join.className = "btn btn-small";

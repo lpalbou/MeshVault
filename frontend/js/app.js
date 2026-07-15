@@ -1947,7 +1947,10 @@ class App {
                 row.className = "observe-session-row";
                 const label = this._escapeHtml(s.label || s.model || s.id || "agent");
                 const watchers = s.observers ? ` · ${s.observers} watching` : "";
-                const info = `${s.commands} cmd${s.lossy ? " · lossy" : ""}${watchers}`;
+                // ⚡ = checkpoints exist: joins/seeks RESTORE state instead of
+                // re-executing the whole build (fast even for heavy sessions).
+                const fast = (s.checkpoints || []).length ? " ⚡" : "";
+                const info = `${s.commands} cmd${s.lossy ? " · lossy" : ""}${watchers}${fast}`;
                 row.innerHTML = `<span class='observe-dot${isLive ? " live" : ""}'></span>`
                     + `<span class="observe-name" title="${label}">${label}</span>`
                     + `<span class="observe-meta">${info}</span>`;

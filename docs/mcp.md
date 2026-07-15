@@ -351,6 +351,17 @@ and watches your strokes live (persistent influence ring + tool readout).
 Set `MESHVAULT_SESSION_LABEL` in the server's environment to name your session
 in that list (default `mcp`).
 
+Heavy sessions stay watchable through **state checkpoints**: the publisher
+snapshots the full scene after any command that took >2 s of engine time
+(plus periodic and end-of-session captures, all overhead-governed at ≈8% of
+engine time), and observers RESTORE the nearest snapshot instead of
+re-executing your build history — a session containing a 20-minute `simplify`
+joins in seconds (⚡ in the session list; measured: a 45-command session with
+an 11 s remesh mid-history joins to latest in ~2.6 s). Timeline scrubs on
+recordings route through checkpoints the same way. Restored replicas are
+fingerprint-verified against the performer's state; mismatches fall back to
+honest replay-from-zero.
+
 `examples/pilot/` ships a complete local-agent reference: a LangGraph REPL
 agent on LM Studio (Qwen-class models) that drives these tools with
 interruption support — type while it works to redirect it. See

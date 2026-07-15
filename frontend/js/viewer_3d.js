@@ -6566,6 +6566,10 @@ export class Viewer3D {
     /** Resume drawing after bulk replay and paint the accumulated state. */
     endBulkReplay() {
         this._bulkReplay = false;
+        // Brush-undo stash suppression (observe seat, recording seeks) is
+        // strictly a bulk-replay policy — it must never outlive bulk mode,
+        // or a human's own paint undo would silently stop working.
+        this._suppressPaintUndo = false;
         // Settle deferred normals (finalizeSculpt skips the per-command
         // recompute during bulk replay — the dominant catch-up cost on dense
         // meshes). Everything dirty gets exactly one recompute here, BEFORE
@@ -6604,6 +6608,24 @@ export class Viewer3D {
         const animate = () => {
             if (!this._renderLoopActive) return;
             this._animationId = requestAnimationFrame(animate);
+
+            // Bulk replay parks an ALREADY-RUNNING loop: beginBulkReplay()
+            // only gates NEW resumes (via invalidate), but the loop is
+            // almost always live when a catch-up starts — and every frame
+            // it draws re-uploads each replay-dirtied painted texture
+            // (16 MB per 2048² layer) for a scene nobody may see until
+            // endBulkReplay. Idle-park it; endBulkReplay → invalidate()
+            // restarts it and paints the accumulated state once.
+            if (this._bulkReplay) {
+                if (++this._idleFrames > 45) {
+                    this._renderLoopActive = false;
+                    if (this._animationId) {
+                        cancelAnimationFrame(this._animationId);
+                        this._animationId = null;
+                    }
+                }
+                return;
+            }
 
             const activeAnim = this._activeAnimation;
             const animating = !!(activeAnim && activeAnim.mixer && activeAnim.playing);

@@ -48081,6 +48081,9 @@ function finalizeSculpt(viewer, touchedGeometries) {
 }
 var PATCH_TEXEL_CAP = 2048 * 2048;
 var _lastPaintOp = null;
+function paintUndoSuppressed(viewer) {
+  return !!(viewer && viewer._suppressPaintUndo);
+}
 function beginPaintOp(action, group) {
   if (group && _lastPaintOp && _lastPaintOp.group === group) return;
   _lastPaintOp = { action, group: group || null, patches: [] };
@@ -49012,7 +49015,8 @@ function paintPoints(viewer, opts, points) {
   const channel = resolveChannel(opts);
   const sym = buildSymmetry(viewer, opts.symmetry);
   if (sym) points = points.concat(points.map(sym.point));
-  beginPaintOp("paint", opts.undo_group);
+  const stashUndo = !paintUndoSuppressed(viewer);
+  if (stashUndo) beginPaintOp("paint", opts.undo_group);
   const radius = resolveRadius(viewer, opts, "paint");
   const color = new Color(opts.color !== void 0 ? String(opts.color) : "#ff3333");
   const opacity = opts.opacity !== void 0 ? Math.max(0, Math.min(1, opts.opacity)) : 1;
@@ -49222,7 +49226,9 @@ function paintPoints(viewer, opts, points) {
         alphaSum += alpha;
         painted++;
       }
-      stashPaintPatch("paint", target, minPX, minPY, img.width, img.height);
+      if (stashUndo) {
+        stashPaintPatch("paint", target, minPX, minPY, img.width, img.height);
+      }
       target.ctx.putImageData(img, minPX, minPY);
       pixels += painted;
       rasterized += acc.size;
@@ -49387,7 +49393,8 @@ function paintPattern(viewer, opts = {}) {
   if (!PATTERN_TYPES.includes(type)) {
     throw new Error(`paint_pattern type must be one of ${PATTERN_TYPES.join("|")}.`);
   }
-  beginPaintOp("paint_pattern", opts.undo_group);
+  const stashUndo = !paintUndoSuppressed(viewer);
+  if (stashUndo) beginPaintOp("paint_pattern", opts.undo_group);
   const seed = Math.floor(opts.seed !== void 0 ? opts.seed : 1);
   const octaves = Math.max(1, Math.min(6, Math.floor(opts.octaves || 3)));
   const opacity = opts.opacity !== void 0 ? Math.max(0, Math.min(1, opts.opacity)) : 1;
@@ -49534,7 +49541,7 @@ function paintPattern(viewer, opts = {}) {
         }
       }
     }
-    stashPaintPatch("paint_pattern", target, 0, 0, dim, dim);
+    if (stashUndo) stashPaintPatch("paint_pattern", target, 0, 0, dim, dim);
     target.ctx.putImageData(img, 0, 0);
     target.texture.needsUpdate = true;
     paintedLayers.add(target);
@@ -49651,7 +49658,8 @@ function bakeAO(viewer, opts = {}) {
   if (strength === 0 && highlight === 0) {
     throw new Error("bake_ao with strength 0 and highlight 0 is a no-op \u2014 set strength (cavity darkening) and/or highlight (edge lightening).");
   }
-  beginPaintOp("bake_ao", opts.undo_group);
+  const stashUndo = !paintUndoSuppressed(viewer);
+  if (stashUndo) beginPaintOp("bake_ao", opts.undo_group);
   const tmp = new Vector3();
   const nb = new Vector3();
   const nrm = new Vector3();
@@ -49736,7 +49744,7 @@ function bakeAO(viewer, opts = {}) {
         }
       }
     }
-    stashPaintPatch("bake_ao", layer, 0, 0, dim, dim);
+    if (stashUndo) stashPaintPatch("bake_ao", layer, 0, 0, dim, dim);
     layer.ctx.putImageData(img, 0, 0);
     layer.texture.needsUpdate = true;
     shaded++;
@@ -49959,7 +49967,8 @@ function blurPaint(viewer, opts = {}) {
   assertNotSkinned(viewer);
   assertNoMorphForHeal(viewer, "blur_paint");
   const meshes = activeMeshes(viewer);
-  beginPaintOp("blur_paint", opts.undo_group);
+  const stashUndo = !paintUndoSuppressed(viewer);
+  if (stashUndo) beginPaintOp("blur_paint", opts.undo_group);
   const radius = resolveRadius(viewer, opts, "blur_paint");
   const strength = opts.strength !== void 0 ? Math.max(0, Math.min(1, opts.strength)) : 0.5;
   const center = new Vector3(...opts.center || []);
@@ -50018,7 +50027,9 @@ function blurPaint(viewer, opts = {}) {
       blurred++;
       blurAlphaSum += alpha;
     }
-    stashPaintPatch("blur_paint", layer, minX, minY, dstImg.width, dstImg.height);
+    if (stashUndo) {
+      stashPaintPatch("blur_paint", layer, minX, minY, dstImg.width, dstImg.height);
+    }
     layer.ctx.putImageData(dstImg, minX, minY);
     layer.texture.needsUpdate = true;
   }
@@ -50038,7 +50049,8 @@ function clonePaint(viewer, opts = {}) {
   assertNotSkinned(viewer);
   assertNoMorphForHeal(viewer, "clone_paint");
   const meshes = activeMeshes(viewer);
-  beginPaintOp("clone_paint", opts.undo_group);
+  const stashUndo = !paintUndoSuppressed(viewer);
+  if (stashUndo) beginPaintOp("clone_paint", opts.undo_group);
   const radius = resolveRadius(viewer, opts, "clone_paint");
   if (!opts.from || opts.from.length !== 3 || !opts.to || opts.to.length !== 3) {
     throw new Error("clone_paint requires from:[x,y,z] and to:[x,y,z] (world \u2014 use pick on a clean area and on the defect).");
@@ -50180,7 +50192,9 @@ function clonePaint(viewer, opts = {}) {
       cloned++;
       alphaSum += alpha;
     }
-    stashPaintPatch("clone_paint", layer, minX, minY, img.width, img.height);
+    if (stashUndo) {
+      stashPaintPatch("clone_paint", layer, minX, minY, img.width, img.height);
+    }
     layer.ctx.putImageData(img, minX, minY);
     layer.texture.needsUpdate = true;
   }
@@ -57455,6 +57469,7 @@ var _Viewer3D = class _Viewer3D {
   /** Resume drawing after bulk replay and paint the accumulated state. */
   endBulkReplay() {
     this._bulkReplay = false;
+    this._suppressPaintUndo = false;
     for (const e of this._objects || []) {
       e.model.traverse((c) => {
         if (c.isMesh && c.geometry && c.geometry.userData && c.geometry.userData._mvNormalsDirty) {
@@ -57484,6 +57499,16 @@ var _Viewer3D = class _Viewer3D {
     const animate = () => {
       if (!this._renderLoopActive) return;
       this._animationId = requestAnimationFrame(animate);
+      if (this._bulkReplay) {
+        if (++this._idleFrames > 45) {
+          this._renderLoopActive = false;
+          if (this._animationId) {
+            cancelAnimationFrame(this._animationId);
+            this._animationId = null;
+          }
+        }
+        return;
+      }
       const activeAnim = this._activeAnimation;
       const animating = !!(activeAnim && activeAnim.mixer && activeAnim.playing);
       const fpvActive = this._navMode === "fpv" && (this._keysPressed.size > 0 || this._fpvMouseDown);
