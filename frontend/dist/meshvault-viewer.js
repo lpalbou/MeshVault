@@ -49427,12 +49427,24 @@ function paintPattern(viewer, opts = {}) {
   const dir = new Vector3(...opts.direction || [0, 1, 0]);
   if (dir.lengthSq() < 1e-12) throw new Error("direction must be non-zero.");
   dir.normalize();
+  const stretch = Math.max(1, Math.min(
+    20,
+    opts.stretch !== void 0 ? Number(opts.stretch) : 4
+  ));
+  const aniso = (type === "noise" || type === "grunge") && !!opts.direction;
+  const anisoK = aniso ? 1 - 1 / stretch : 0;
   let gFrom = null, gLen = 1;
   if (type === "gradient") {
     const bb2 = entry && entry.stats ? entry.stats : { width: 1, height: 1, depth: 1 };
     gLen = Math.abs(dir.x) * bb2.width + Math.abs(dir.y) * bb2.height + Math.abs(dir.z) * bb2.depth || 1;
   }
   const patternValue = (x, y, z) => {
+    if (anisoK > 0) {
+      const d = (x * dir.x + y * dir.y + z * dir.z) * anisoK;
+      x -= dir.x * d;
+      y -= dir.y * d;
+      z -= dir.z * d;
+    }
     switch (type) {
       case "noise":
         return fbm3(x * inv, y * inv, z * inv, seed, octaves, false);
@@ -62866,7 +62878,7 @@ var ViewerControlAPI = class {
         handler: () => clearPaint(v)
       },
       paint_pattern: {
-        description: "Fill the ACTIVE object (or a world-sphere `region`) with a PROCEDURAL pattern in ONE call \u2014 replaces hundred-stamp batteries (a falcon hull mosaic was 160 stamps; this is one). Patterns evaluate in WORLD space per texel: continuous across UV seams/islands, scale-consistent everywhere, and bit-deterministic given {seed, scale} (replays identical \u2014 integer-hash noise, no randomness). type: noise (fBm blend color\u2192color2)| grunge (ridged fBm streaks; `contrast`)| cells (Worley cracks)| speckle (dot field; `density`)| stripes (bands along `direction`; `density` = duty)| gradient (color ramp along `direction`). scale = world units per feature (default: object size / 12). Works on material channels too: channel:'roughness' {value, value2} varies gloss procedurally (THE cheap realism move: worn metal = metalness pattern + roughness grunge), 'emissive', 'height'. opacity blends over the existing layer. Returns {painted, seed, scale}.",
+        description: "Fill the ACTIVE object (or a world-sphere `region`) with a PROCEDURAL pattern in ONE call \u2014 replaces hundred-stamp batteries (a falcon hull mosaic was 160 stamps; this is one). Patterns evaluate in WORLD space per texel: continuous across UV seams/islands, scale-consistent everywhere, and bit-deterministic given {seed, scale} (replays identical \u2014 integer-hash noise, no randomness). type: noise (fBm blend color\u2192color2)| grunge (ridged fBm streaks; `contrast`)| cells (Worley cracks)| speckle (dot field; `density`)| stripes (bands along `direction`; `density` = duty)| gradient (color ramp along `direction`). noise/grunge with `direction` STREAK along it (rust runs, airflow grime \u2014 `stretch` 1-20, default 4, elongates features). scale = world units per feature (default: object size / 12). Works on material channels too: channel:'roughness' {value, value2} varies gloss procedurally (THE cheap realism move: worn metal = metalness pattern + roughness grunge), 'emissive', 'height'. opacity blends over the existing layer. Returns {painted, seed, scale}.",
         params: {
           type: { type: "string", required: true, enum: ["noise", "grunge", "cells", "speckle", "stripes", "gradient"] },
           color: { type: "string" },
@@ -62880,6 +62892,7 @@ var ViewerControlAPI = class {
           density: { type: "number", min: 0, max: 1 },
           contrast: { type: "number", min: 0.1, max: 10 },
           direction: { type: "array" },
+          stretch: { type: "number", min: 1, max: 20 },
           opacity: { type: "number", min: 0, max: 1 },
           region: { type: "object" },
           texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
@@ -62999,7 +63012,7 @@ var ViewerControlAPI = class {
             if (p.name === void 0) {
               throw new Error("set_active_object needs `id` or `name`");
             }
-            const objs = v.listObjects().objects || [];
+            const objs = v.listObjects() || [];
             const exact = objs.filter((o) => o.name === p.name);
             const loose = exact.length ? exact : objs.filter(
               (o) => String(o.name).toLowerCase() === String(p.name).toLowerCase()

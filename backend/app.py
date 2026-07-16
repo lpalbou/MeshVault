@@ -810,8 +810,20 @@ def scan_textures(request: ScanTexturesRequest):
 
 @app.get("/api/default_path")
 async def get_default_path():
-    """Return the default browse path (user home)."""
-    return {"path": DEFAULT_ROOT}
+    """
+    Return the default browse path and the best available "home" target.
+
+    `path` is where the browser opens (primary root when confined, else the user
+    home). `home` is what the Home button should navigate to: the OS home
+    directory whenever the trust boundary permits it, otherwise the default
+    browse path — Home must never point somewhere the guard would then 403.
+    """
+    home = str(Path.home().resolve())
+    try:
+        path_guard.resolve(home, require_dir=True)
+    except (PermissionError, FileNotFoundError, ValueError):
+        home = DEFAULT_ROOT
+    return {"path": DEFAULT_ROOT, "home": home}
 
 
 # --- Agent bridge (shared session between headless agents and the app UI) ---

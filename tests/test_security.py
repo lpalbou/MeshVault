@@ -55,6 +55,25 @@ def test_default_path_route_is_fixed(app_env):
     assert resp.json()["path"] == str(root.resolve())
 
 
+def test_home_falls_back_when_outside_roots(app_env):
+    """Confined server: the OS home is outside the sandbox, so the Home target
+    must fall back to the default browse path — never a 403-bound directory."""
+    client, root, _ = app_env
+    data = client.get("/api/default_path").json()
+    assert data["home"] == data["path"] == str(root.resolve())
+
+
+def test_home_returned_when_within_roots(app_env, monkeypatch):
+    """When the OS home lies inside an allowed root, Home targets the real home."""
+    client, root, _ = app_env
+    fake_home = root / "home_dir"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    data = client.get("/api/default_path").json()
+    assert data["home"] == str(fake_home.resolve())
+    assert data["path"] == str(root.resolve())
+
+
 def test_arbitrary_read_is_blocked(app_env):
     """S1: reading a file outside the root must be denied."""
     client, _, outside = app_env

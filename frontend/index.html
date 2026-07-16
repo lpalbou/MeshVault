@@ -182,12 +182,19 @@
                     </div>
                 </div>
                 <div class="path-bar">
-                    <button id="btn-go-up" class="btn btn-icon" title="Go up">
+                    <button id="btn-go-up" class="btn btn-icon" title="Go up to parent folder">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="19" x2="12" y2="7"/>
+                            <polyline points="6 13 12 7 18 13"/>
+                            <line x1="5" y1="3" x2="19" y2="3"/>
+                        </svg>
+                    </button>
+                    <button id="btn-go-back" class="btn btn-icon" title="Back to previous folder">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <polyline points="15 18 9 12 15 6"/>
                         </svg>
                     </button>
-                    <button id="btn-go-home" class="btn btn-icon" title="Go home">
+                    <button id="btn-go-home" class="btn btn-icon" title="Go to home folder">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
                             <polyline points="9 22 9 12 15 12 15 22"/>
@@ -469,14 +476,19 @@
                     <button id="observe-close" class="btn btn-icon btn-mini" title="Close">✕</button>
                 </div>
                 <div id="observe-sessions" class="observe-sessions"></div>
+                <!-- LIVE catch-up policy only — recordings always open on the
+                     final state; the replay bar's ▶ is the watch control. -->
                 <div class="observe-speed-row">
-                    <label for="observe-speed">Catch-up / replay</label>
+                    <label for="observe-speed">Live catch-up</label>
                     <select id="observe-speed" class="observe-speed">
                         <option value="instant" selected>Instant (jump to latest)</option>
                         <option value="paced">Time-lapse (see the strokes)</option>
                     </select>
                 </div>
                 <div id="observe-live" class="observe-live" style="display:none">
+                    <!-- Broadcast-delay honesty: live watching deliberately runs a
+                         few seconds behind so bursts replay at a watchable pace -->
+                    <span id="observe-lag" class="observe-lag" style="display:none" title="Live smoothing: the seat replays a few seconds behind the agent so strokes stay watchable"></span>
                     <div id="observe-tool" class="observe-tool">
                         <span id="observe-tool-swatch" class="observe-tool-swatch" style="display:none"></span>
                         <span id="observe-tool-name">—</span>
@@ -621,14 +633,24 @@
             </div>
 
             <!-- Recording replay bar (observation seat) — playback over a
-                 buffered session log; record/key controls have no place here -->
+                 buffered session log; record/key controls have no place here.
+                 The ▶ is the ONE obvious control: a recording opens on its
+                 final state, this replays HOW it was built (paced ghosts +
+                 narration). ◆ ticks on the scrubber mark instant landings. -->
             <div id="observe-replay-bar" class="animation-bar timeline-bar" style="display: none;">
-                <span class="timeline-label" title="Recorded agent session">⏵ Replay</span>
-                <button id="observe-play" class="btn btn-sm anim-play" title="Play / pause the recording">▶</button>
+                <button id="observe-play" class="btn btn-sm observe-play" title="Replay the agent's build from the start — paced ghost brushes + narration">▶ Watch how it was built</button>
+                <select id="observe-play-rate" class="observe-speed observe-play-rate" title="Playback speed">
+                    <option value="0.5">0.5×</option>
+                    <option value="1" selected>1×</option>
+                    <option value="2">2×</option>
+                    <option value="4">4×</option>
+                </select>
                 <div class="timeline-scrub-wrap">
-                    <input type="range" id="observe-scrub" class="anim-scrub" min="0" max="0" value="0" step="1" title="Scrub through the recorded commands" />
+                    <div id="observe-ticks" class="observe-ticks"></div>
+                    <input type="range" id="observe-scrub" class="anim-scrub" min="0" max="0" value="0" step="1" title="Scrub the recording — ◆ marks land instantly (checkpoints / visited positions)" />
                 </div>
                 <span id="observe-pos" class="anim-time">0 / 0</span>
+                <span id="observe-ticker" class="observe-ticker"></span>
             </div>
 
             <!-- Viewer info -->

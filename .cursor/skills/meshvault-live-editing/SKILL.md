@@ -218,7 +218,9 @@ Mickey and X-Wing builds:
 
 - `add_primitive {kind, params, name, transform: {position, rotation, scale},
   frame: false}` places the part in one command. `frame: false` keeps the
-  camera yours. NAME every part; keep an id map — `set_active_object` before
+  camera yours. NAME every part; keep an id map (`set_active_object {name}`
+  also works — exact match, then case-insensitive; ambiguity errors with
+  the roster) — `set_active_object` before
   every per-part fill/paint/sculpt (paint always lands on the ACTIVE object).
 - **`set_object_transform`'s `scale` is a NUMBER (uniform); per-axis arrays
   go in `scale_xyz`.** An array passed to `scale` fails validation loudly —
@@ -351,6 +353,11 @@ UV seams, scale-consistent, bit-deterministic per {seed, scale}:
   perfect world-space bands read mechanical on plumage/fur/skin. Organic
   banding wants hand `paint_stroke` paths with wobble (probe the surface,
   vary spacing); save stripes for hulls, decks, awnings.
+- `noise`/`grunge` with `direction` STREAK along it (falcon field ask):
+  the noise domain compresses along the axis so features elongate — rust
+  runs under gravity `[0,-1,0]`, airflow grime along the fuselage axis.
+  `stretch` 1-20 (default 4) sets elongation; works on channels (streaky
+  roughness = the wet-run look).
 - Combine: albedo noise + roughness grunge + a sparse speckle = a hull that
   reads weathered in three calls. `scale` = world units per feature
   (default object/12); same seed replays identically.
@@ -411,6 +418,10 @@ path, so grooves and ridges come out clean where stamp chains scallop:
   ~1.5M tris runs ~20 minutes with no progress output, and
   `simplify_region` refuses above its 50k-vertex cap — prevention is the
   only cheap path.
+- **Ring sweeps (falcon v3)**: a CIRCLE-path refine strip costs by its
+  ANNULUS area ≈ 2πR·2w (w = strip radius), far less than the enclosing
+  disc — but a TIGHT ring (R ≲ 3w) is effectively a disc: budget with
+  πR² instead, or the refusal will surprise you mid-campaign.
 - Crease DEPTH must match viewing distance: ~0.2-0.5% of hull size reads
   at close range only; features meant to read in a full-body shot need
   ~1-2% (the owl's facial disc carried at 1.5%; its 0.4% wing arcs

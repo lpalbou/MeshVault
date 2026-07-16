@@ -110,6 +110,8 @@ export class FileBrowser {
         this._thumbObserver = null;
         this._currentPath = null;
         this._parentPath = null;
+        // Previously visited directories (Back button), most recent last.
+        this._history = [];
         this._selectedElement = null;
         // Cached data for filtering
         this._currentFolders = [];
@@ -138,6 +140,16 @@ export class FileBrowser {
     /** Get the current browsing path */
     get currentPath() {
         return this._currentPath;
+    }
+
+    /** Whether the current directory has a reachable parent (up is possible). */
+    get hasParent() {
+        return Boolean(this._parentPath);
+    }
+
+    /** Whether there is a previously visited folder to go back to. */
+    get hasBack() {
+        return this._history.length > 0;
     }
 
     /**
@@ -194,9 +206,14 @@ export class FileBrowser {
     /**
      * Browse to a specific directory.
      * Fetches the directory contents from the API and renders them.
+     * @param {string|null} path - Directory to open (null = server default).
+     * @param {boolean} recordHistory - false when invoked by goBack(), so the
+     *     Back navigation itself never pollutes the history it consumes.
      * @returns {Promise<boolean>} true on success (errors render in the sidebar).
      */
-    async browse(path) {
+    async browse(path, recordHistory = true) {
+        // Captured before navigation: on success this becomes the Back target.
+        const prevPath = this._currentPath;
         try {
             this._onStatusUpdate("Loading...");
 
@@ -214,6 +231,13 @@ export class FileBrowser {
             this._currentPath = data.current_path;
             this._parentPath = data.parent_path;
 
+            // Record where we came from — only real moves (refreshes of the
+            // same directory, e.g. after rename/delete, are not "back" steps).
+            if (recordHistory && prevPath && prevPath !== this._currentPath) {
+                this._history.push(prevPath);
+                if (this._history.length > 100) this._history.shift();
+            }
+
             // Remember last directory for next session
             localStorage.setItem("meshvault_lastDir", this._currentPath);
 
@@ -225,9 +249,8 @@ export class FileBrowser {
             this._filterText = "";
             if (this._filterInput) this._filterInput.value = "";
 
-            // Update the path display
-            this._pathDisplay.textContent = this._currentPath;
-            this._pathDisplay.title = this._currentPath;
+            // Update the path display (clickable breadcrumb)
+            this._renderPathBar();
 
             // Render the file list
             this._renderFiltered();
@@ -255,10 +278,63 @@ export class FileBrowser {
         }
     }
 
+    /**
+     * Render the current path as a clickable breadcrumb: every ancestor segment
+     * navigates to that directory. The deepest segments stay visible (the bar
+     * scrolls to its end); earlier ones are reachable by horizontal scroll.
+     */
+    _renderPathBar() {
+        const el = this._pathDisplay;
+        el.innerHTML = "";
+        el.title = this._currentPath;
+
+        // Split into ancestor prefixes: "/a/b/c" → ["/", "/a", "/a/b", "/a/b/c"].
+        // Works for any absolute POSIX path, including the filesystem root itself.
+        const parts = this._currentPath.split("/").filter(Boolean);
+        const prefixes = ["/"];
+        for (const part of parts) {
+            const prev = prefixes[prefixes.length - 1];
+            prefixes.push(prev === "/" ? `/${part}` : `${prev}/${part}`);
+        }
+
+        prefixes.forEach((prefix, i) => {
+            const isLast = i === prefixes.length - 1;
+            const seg = document.createElement("span");
+            seg.className = `path-seg${isLast ? " current" : ""}`;
+            seg.textContent = i === 0 ? "/" : parts[i - 1];
+            if (!isLast) {
+                seg.title = prefix;
+                seg.addEventListener("click", () => this.browse(prefix));
+            }
+            el.appendChild(seg);
+            if (!isLast && i > 0) {
+                const sep = document.createElement("span");
+                sep.className = "path-sep";
+                sep.textContent = "/";
+                el.appendChild(sep);
+            }
+        });
+
+        // Keep the tail (current folder) in view on deep paths.
+        el.scrollLeft = el.scrollWidth;
+    }
+
     /** Navigate to the parent directory */
     goUp() {
         if (this._parentPath) {
             this.browse(this._parentPath);
+        }
+    }
+
+    /**
+     * Navigate back to the previously selected folder. Entries that became
+     * stale (deleted/unmounted since the visit) are skipped transparently.
+     */
+    async goBack() {
+        while (this._history.length > 0) {
+            const prev = this._history.pop();
+            if (prev === this._currentPath) continue;
+            if (await this.browse(prev, false)) return;
         }
     }
 
@@ -267,7 +343,9 @@ export class FileBrowser {
         try {
             const response = await fetch("/api/default_path");
             const data = await response.json();
-            this.browse(data.path);
+            // `home` is the OS home dir whenever the server's trust boundary
+            // allows it; `path` (default browse root) is the fallback.
+            this.browse(data.home || data.path);
         } catch {
             this.browse(null);
         }

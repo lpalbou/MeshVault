@@ -380,7 +380,9 @@ The decision loop for "this area is over-detailed for what it represents":
   density?, contrast?, direction?, opacity?, region?: {center, radius}}`
   — procedural fills evaluated in WORLD space per texel: continuous
   across UV seams, scale-consistent, bit-deterministic per {seed,
-  scale}. One call replaces hundred-stamp batteries.
+  scale}. One call replaces hundred-stamp batteries. noise/grunge with
+  `direction` + `stretch` (1-20, default 4) STREAK along the axis
+  (rust runs, airflow grime).
 - `sculpt {tool: "noise", wavelength, octaves: 1-6, seed, ridged?,
   bias: -1..1}` — seeded fBm displacement along weld normals, sampled
   at object-LOCAL coords (pattern sticks to the object; same seed =

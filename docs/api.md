@@ -379,13 +379,19 @@ and embedded textures. Sent as `multipart/form-data`.
 
 ## `GET /api/default_path`
 
-Returns the default browse path (the primary allowed root, typically the user's home directory).
+Returns the default browse path and the Home-button target.
+
+- `path` — where the browser opens: the primary allowed root when confined
+  (`MESHVAULT_ROOT`), otherwise the user's home directory.
+- `home` — the OS home directory whenever it lies within the allowed roots,
+  otherwise `path` (Home never points at a directory the guard would `403`).
 
 ### Response `200 OK`
 
 ```json
 {
-    "path": "/Users/me"
+    "path": "/Users/me",
+    "home": "/Users/me"
 }
 ```
 

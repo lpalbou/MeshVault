@@ -1649,8 +1649,14 @@ function paintTargetMaterial(mesh) {
  * Ensure a mesh has its OWN paintable CanvasTexture layer. Shared materials are
  * cloned on first paint (painting one mesh must not repaint its siblings). The
  * pre-paint map/color are kept for clear_paint.
+ *
+ * Exported for the observation seat's snapshot restore ONLY: a checkpoint
+ * (GLB blob) restore bakes paint into plain textures, so scrubbing back to a
+ * pre-checkpoint snapshot must RECREATE the canvas layer through this exact
+ * engine path (budget accounting, shared-material cloning, base-map seeding)
+ * before overwriting its texels with the snapshot's copy.
  */
-function ensurePaintLayer(viewer, mesh, size) {
+export function ensurePaintLayer(viewer, mesh, size) {
     let material = paintTargetMaterial(mesh);
     if (material.userData._mvPaint) return material.userData._mvPaint;
 
@@ -2481,10 +2487,17 @@ export function paintPattern(viewer, opts = {}) {
     }
     const inv = 1 / scale;
 
-    // Stripes/gradient direction.
+    // Stripes/gradient direction — and ANISOTROPY for noise/grunge (falcon
+    // field ask: rust streaks run ALONG airflow/gravity; isotropic grunge
+    // cannot streak). With `direction`, the noise domain compresses along it
+    // by `stretch` (default 4): features elongate into streaks along the axis.
     const dir = new THREE.Vector3(...(opts.direction || [0, 1, 0]));
     if (dir.lengthSq() < 1e-12) throw new Error("direction must be non-zero.");
     dir.normalize();
+    const stretch = Math.max(1, Math.min(20,
+        opts.stretch !== undefined ? Number(opts.stretch) : 4));
+    const aniso = (type === "noise" || type === "grunge") && !!opts.direction;
+    const anisoK = aniso ? (1 - 1 / stretch) : 0;
     let gFrom = null, gLen = 1;
     if (type === "gradient") {
         // Project along `direction` across the object's bounds by default.
@@ -2494,6 +2507,12 @@ export function paintPattern(viewer, opts = {}) {
     }
 
     const patternValue = (x, y, z) => {
+        // Anisotropic domain: compress the along-`direction` coordinate so
+        // noise features stretch into streaks (deterministic, same hash).
+        if (anisoK > 0) {
+            const d = (x * dir.x + y * dir.y + z * dir.z) * anisoK;
+            x -= dir.x * d; y -= dir.y * d; z -= dir.z * d;
+        }
         switch (type) {
             case "noise":
                 return fbm3(x * inv, y * inv, z * inv, seed, octaves, false);

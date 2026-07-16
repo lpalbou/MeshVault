@@ -633,16 +633,49 @@ html, body {
     gap: 4px;
 }
 
+/* Clickable breadcrumb: segments are ancestor folders, the last one is the
+   current dir. The bar scrolls horizontally; JS keeps its end (deepest
+   segments) in view after navigation. */
 .current-path {
     font-size: 12px;
     color: var(--text-muted);
     font-family: var(--font-mono);
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-x: auto;
     white-space: nowrap;
     flex: 1;
-    direction: rtl;
-    text-align: left;
+    scrollbar-width: none;      /* trackpad/wheel scroll still works */
+}
+
+.current-path::-webkit-scrollbar {
+    display: none;
+}
+
+.path-seg {
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    padding: 1px 2px;
+}
+
+.path-seg:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+}
+
+.path-seg.current {
+    color: var(--text-secondary);
+    cursor: default;
+}
+
+.path-sep {
+    color: var(--text-muted);
+    opacity: 0.6;
+}
+
+/* Navigation buttons grey out when the action is impossible (e.g. no parent). */
+.path-bar .btn-icon:disabled {
+    opacity: 0.35;
+    cursor: default;
+    pointer-events: none;
 }
 
 /* --- File List --- */
@@ -2048,8 +2081,34 @@ html, body {
 /* While observing, the scene timeline is locked AND hidden — the recording
    replay bar takes its spot (same bottom slot, no overlap). */
 #timeline-bar.observe-locked { display: none !important; }
-#observe-replay-bar { z-index: 41; }
+#observe-replay-bar { z-index: 41; max-width: min(760px, 92vw); }
 #observe-replay-bar .anim-time { min-width: 76px; text-align: right; }
+/* THE control: replays the build. White-space nowrap keeps the label from
+   wrapping when it grows to "Watch how it was built" at the end position. */
+.observe-play { white-space: nowrap; }
+.observe-play-attract { color: #9fd0ff; border-color: rgba(74,163,255,0.55);
+    background: rgba(74,163,255,0.12); box-shadow: 0 0 10px rgba(74,163,255,0.25); }
+.observe-play-attract:hover { background: rgba(74,163,255,0.22); }
+.observe-play-rate { max-width: 62px; flex: 0 0 auto; }
+/* Narration ticker: one line of "what the agent is doing right now". */
+.observe-ticker { display: none; font-size: 11px; opacity: 0.75; max-width: 180px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #9fd0ff; }
+/* Live broadcast-delay readout — the honest "you are N s behind" line. */
+.observe-lag { align-items: center; gap: 5px; font-size: 11px; color: #7fe3a8;
+    padding: 3px 8px; border-radius: 999px; background: rgba(55,214,122,0.08);
+    border: 1px solid rgba(55,214,122,0.3); width: fit-content; }
+.observe-lag.rushing { color: #ffd980; background: rgba(226,185,59,0.1);
+    border-color: rgba(226,185,59,0.4); }
+/* Scrub-bar landing marks: ◆ checkpoints (server state), · visited snapshots.
+   pointer-events none — they annotate the range input, never intercept it. */
+.observe-ticks { position: absolute; left: 0; right: 0; top: -7px; height: 8px;
+    pointer-events: none; }
+.observe-tick { position: absolute; transform: translateX(-50%); width: 7px;
+    height: 7px; border-radius: 2px; }
+.observe-tick.ck { background: #9fd0ff; transform: translateX(-50%) rotate(45deg);
+    box-shadow: 0 0 4px rgba(159,208,255,0.6); }
+.observe-tick.snap { background: rgba(255,255,255,0.55); width: 5px; height: 5px;
+    border-radius: 50%; top: 1px; }
 
 .observe-speed-row { display: flex; align-items: center; justify-content: space-between;
     gap: 8px; margin-top: 8px; font-size: 12px; opacity: 0.9; }

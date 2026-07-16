@@ -701,7 +701,7 @@ export class ViewerControlAPI {
                 handler: () => clearPaint(v),
             },
             paint_pattern: {
-                description: "Fill the ACTIVE object (or a world-sphere `region`) with a PROCEDURAL pattern in ONE call — replaces hundred-stamp batteries (a falcon hull mosaic was 160 stamps; this is one). Patterns evaluate in WORLD space per texel: continuous across UV seams/islands, scale-consistent everywhere, and bit-deterministic given {seed, scale} (replays identical — integer-hash noise, no randomness). type: noise (fBm blend color→color2)| grunge (ridged fBm streaks; `contrast`)| cells (Worley cracks)| speckle (dot field; `density`)| stripes (bands along `direction`; `density` = duty)| gradient (color ramp along `direction`). scale = world units per feature (default: object size / 12). Works on material channels too: channel:'roughness' {value, value2} varies gloss procedurally (THE cheap realism move: worn metal = metalness pattern + roughness grunge), 'emissive', 'height'. opacity blends over the existing layer. Returns {painted, seed, scale}.",
+                description: "Fill the ACTIVE object (or a world-sphere `region`) with a PROCEDURAL pattern in ONE call — replaces hundred-stamp batteries (a falcon hull mosaic was 160 stamps; this is one). Patterns evaluate in WORLD space per texel: continuous across UV seams/islands, scale-consistent everywhere, and bit-deterministic given {seed, scale} (replays identical — integer-hash noise, no randomness). type: noise (fBm blend color→color2)| grunge (ridged fBm streaks; `contrast`)| cells (Worley cracks)| speckle (dot field; `density`)| stripes (bands along `direction`; `density` = duty)| gradient (color ramp along `direction`). noise/grunge with `direction` STREAK along it (rust runs, airflow grime — `stretch` 1-20, default 4, elongates features). scale = world units per feature (default: object size / 12). Works on material channels too: channel:'roughness' {value, value2} varies gloss procedurally (THE cheap realism move: worn metal = metalness pattern + roughness grunge), 'emissive', 'height'. opacity blends over the existing layer. Returns {painted, seed, scale}.",
                 params: {
                     type: { type: "string", required: true, enum: ["noise", "grunge", "cells", "speckle", "stripes", "gradient"] },
                     color: { type: "string" },
@@ -715,6 +715,7 @@ export class ViewerControlAPI {
                     density: { type: "number", min: 0, max: 1 },
                     contrast: { type: "number", min: 0.1, max: 10 },
                     direction: { type: "array" },
+                    stretch: { type: "number", min: 1, max: 20 },
                     opacity: { type: "number", min: 0, max: 1 },
                     region: { type: "object" },
                     texture_size: { type: "number", min: 64, max: 4096, aliases: { low: 512, medium: 1024, high: 2048, xhigh: 4096 } },
@@ -838,7 +839,10 @@ export class ViewerControlAPI {
                         // Name lookup is a convenience for conversational
                         // agents ("activate the ball") — exact match first,
                         // then case-insensitive, ambiguity is an error.
-                        const objs = v.listObjects().objects || [];
+                        // (Field bug, falcon v3: listObjects() returns the
+                        // ARRAY itself — reading `.objects` off it made the
+                        // roster permanently empty and every name miss.)
+                        const objs = v.listObjects() || [];
                         const exact = objs.filter((o) => o.name === p.name);
                         const loose = exact.length ? exact : objs.filter(
                             (o) => String(o.name).toLowerCase() === String(p.name).toLowerCase());

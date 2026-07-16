@@ -26,6 +26,7 @@ class App {
             fileList: document.getElementById("file-list"),
             currentPath: document.getElementById("current-path"),
             btnGoUp: document.getElementById("btn-go-up"),
+            btnGoBack: document.getElementById("btn-go-back"),
             btnGoHome: document.getElementById("btn-go-home"),
             viewerContainer: document.getElementById("viewer-3d"),
             viewerPlaceholder: document.getElementById("viewer-placeholder"),
@@ -107,6 +108,10 @@ class App {
                 if (btn) btn.classList.toggle("active", on);
                 const live = document.getElementById("observe-live");
                 if (live) live.style.display = on ? "flex" : "none";
+                // Follow resets to ON at every join — sync the checkbox
+                // (a stale unchecked box misreported the seat's state).
+                const follow = document.getElementById("observe-follow");
+                if (follow) follow.checked = this._observeSeat.follow;
             },
             // Recording replay bar (bottom, timeline-style): pos/total drive
             // the scrubber; hidden outside recording playback.
@@ -118,12 +123,56 @@ class App {
                 const scrub = document.getElementById("observe-scrub");
                 const posEl = document.getElementById("observe-pos");
                 const play = document.getElementById("observe-play");
-                if (scrub && !scrub.matches(":active")) {
+                const dragging = scrub && scrub.matches(":active");
+                if (scrub && !dragging) {
                     scrub.max = String(total);
                     scrub.value = String(pos);
                 }
-                if (posEl) posEl.textContent = `${pos} / ${total}`;
-                if (play) play.textContent = playing ? "⏸" : "▶";
+                // Never fight the drag preview ("→ N / M") mid-drag.
+                if (posEl && !dragging) posEl.textContent = `${pos} / ${total}`;
+                if (play) {
+                    // THE control: at the end (where recordings open) it
+                    // advertises the watchable replay; elsewhere plain
+                    // play/pause. Restart-from-zero is the seat's behavior
+                    // when pressed at the end.
+                    if (playing) {
+                        play.textContent = "⏸ Pause";
+                        play.classList.remove("observe-play-attract");
+                    } else if (pos >= total) {
+                        play.textContent = "▶ Watch how it was built";
+                        play.classList.add("observe-play-attract");
+                    } else {
+                        play.textContent = "▶ Play";
+                        play.classList.remove("observe-play-attract");
+                    }
+                }
+                this._renderObserveTicks();
+            },
+            // Replay-bar narration ticker (one line per replayed command;
+            // the seat batches these to ≤ ~5/s).
+            onTicker: (text) => {
+                const t = document.getElementById("observe-ticker");
+                if (t) {
+                    t.textContent = text || "";
+                    t.style.display = text ? "inline" : "none";
+                }
+            },
+            // Live broadcast-delay readout ("live · Ns behind"): honest
+            // smoothing — the seat deliberately runs a few seconds behind
+            // so bursts replay at a watchable cadence.
+            onLag: (lagS, rushing) => {
+                const el = document.getElementById("observe-lag");
+                if (!el) return;
+                if (lagS === null) {
+                    el.style.display = "none";
+                    return;
+                }
+                el.style.display = "inline-flex";
+                el.classList.toggle("rushing", !!rushing);
+                el.textContent = rushing
+                    ? `⏩ catching up · ${lagS.toFixed(0)}s behind`
+                    : (lagS < 0.75 ? "● live"
+                       : `● live · ${lagS.toFixed(1)}s behind`);
             },
             // The tool readout lives in the observe panel (tool, size = area
             // of influence, strength/opacity, paint color swatch).
@@ -245,6 +294,9 @@ class App {
         this._elements.btnGoUp.addEventListener("click", () => {
             this._fileBrowser.goUp();
         });
+        this._elements.btnGoBack.addEventListener("click", () => {
+            this._fileBrowser.goBack();
+        });
         this._elements.btnGoHome.addEventListener("click", () => {
             this._fileBrowser.goHome();
         });
@@ -292,7 +344,13 @@ class App {
                 this._lastLoadedAsset ? assetKey(this._lastLoadedAsset) : null,
             showToast: (m, t) => this._showToast(m, t),
         });
-        this._fileBrowser.setNavigateListener((path) => this._agentLink.syncDir(path));
+        this._fileBrowser.setNavigateListener((path) => {
+            this._agentLink.syncDir(path);
+            // Grey out impossible navigation: up at the top of the browsable
+            // hierarchy, back when no folder was visited before this one.
+            this._elements.btnGoUp.disabled = !this._fileBrowser.hasParent;
+            this._elements.btnGoBack.disabled = !this._fileBrowser.hasBack;
+        });
 
         // In-app AI: Spotlight bar (⌘K) + progress panel; its commands execute
         // on THIS tab's control API via the agent-events stream.
@@ -2031,11 +2089,24 @@ class App {
             playBtn.addEventListener("click", () => {
                 const seat = this._observeSeat;
                 if (seat._playTimer) seat.playbackPause();
-                else seat.playbackPlay();
+                else seat.playbackPlay();   // at the end = restart from 0
+            });
+        }
+        const rate = document.getElementById("observe-play-rate");
+        if (rate) {
+            rate.addEventListener("change", () => {
+                this._observeSeat.setPlayRate(rate.value);
             });
         }
         const scrub = document.getElementById("observe-scrub");
         if (scrub) {
+            // Drag = preview only (the thumb + a target readout); the seek
+            // COMMITS on release ('change'). Seeking on every drag event
+            // re-executed a log segment per pixel of mouse travel.
+            scrub.addEventListener("input", () => {
+                const posEl = document.getElementById("observe-pos");
+                if (posEl) posEl.textContent = `→ ${scrub.value} / ${scrub.max}`;
+            });
             scrub.addEventListener("change", () => {
                 this._observeSeat.playbackSeek(Number(scrub.value));
             });
@@ -2048,10 +2119,11 @@ class App {
             // re-enabling look dead while the performer's camera was static.
             this._observeSeat.setFollow(follow.checked);
         });
-        // Grabbing the view detaches the follow camera (free-look wins).
+        // Grabbing the view detaches the follow camera (free-look wins) —
+        // setFollow also cancels any in-flight playback camera glide.
         this._viewer._renderer.domElement.addEventListener("pointerdown", () => {
             if (this._observeSeat.observing && this._observeSeat.follow) {
-                this._observeSeat.follow = false;
+                this._observeSeat.setFollow(false);
                 follow.checked = false;
                 this._showToast("Follow camera off — free-look (re-enable in the panel)", "info");
             }
@@ -2064,6 +2136,36 @@ class App {
                 `An agent session is live${msg.label ? ` (${msg.label})` : ""} — `
                 + "watch it from the eye button.", "info");
         };
+    }
+
+    /**
+     * Scrub-bar tick marks: ◆ at checkpoint positions, · at client-snapshot
+     * positions — the honest "these landings are instant" UI (the scrubber
+     * itself never snaps: you land exactly where you release).
+     */
+    _renderObserveTicks() {
+        const wrap = document.getElementById("observe-ticks");
+        if (!wrap) return;
+        const marks = this._observeSeat.replayMarks();
+        const sig = `${marks.total}|${marks.checkpoints.join(",")}|${marks.snapshots.join(",")}`;
+        if (sig === this._observeTicksSig) return;   // avoid per-update churn
+        this._observeTicksSig = sig;
+        wrap.innerHTML = "";
+        if (!marks.total) return;
+        const add = (pos, cls, title) => {
+            const el = document.createElement("span");
+            el.className = `observe-tick ${cls}`;
+            el.style.left = `${Math.min(100, (pos / marks.total) * 100)}%`;
+            el.title = title;
+            wrap.appendChild(el);
+        };
+        const ckSet = new Set(marks.checkpoints);
+        for (const p of marks.checkpoints) {
+            add(p, "ck", "Checkpoint — landing here is instant");
+        }
+        for (const p of marks.snapshots) {
+            if (!ckSet.has(p)) add(p, "snap", "Visited — landing here is instant");
+        }
     }
 
     /**
