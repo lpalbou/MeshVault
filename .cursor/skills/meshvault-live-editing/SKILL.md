@@ -6,9 +6,21 @@ description: >-
   an agent must edit meshes through the meshvault-mcp tools: sculpting brushes,
   texture painting/healing, refine/regularize/simplify regions, raycast-probe
   targeting, or staging a watchable live editing session.
+license: MIT
+metadata:
+  requires_mcp:
+    - meshvault-mcp
 ---
 
 # MeshVault Live Editing (agent over MCP)
+
+## Prerequisites
+
+Every recipe here presupposes a reachable `meshvault-mcp` server (stdio MCP;
+install: `pip install "meshvault[mcp]"` + `playwright install chromium`).
+Verify the server answers BEFORE following any recipe — spawn it and call
+`list_viewer_commands`. If it is absent or fails to spawn, STOP and say so;
+do not improvise against a different tool surface.
 
 Field-tested recipe for editing 3D objects through MeshVault's control
 surface. Distilled from live sessions (tattoo painting, haircut resculpts on a
