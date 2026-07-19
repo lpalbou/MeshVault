@@ -17,7 +17,8 @@ metadata:
 ## Prerequisites
 
 Every recipe here presupposes a reachable `meshvault-mcp` server (stdio MCP;
-install: `pip install "meshvault[mcp]"` + `playwright install chromium`).
+operator installs: `pip install "meshvault[mcp]"` + `playwright install
+chromium` — agents must never self-install, report the absence instead).
 Verify the server answers BEFORE following any recipe — spawn it and call
 `list_viewer_commands`. If it is absent or fails to spawn, STOP and say so;
 do not improvise against a different tool surface.
@@ -25,20 +26,20 @@ do not improvise against a different tool surface.
 Field-tested recipe for editing 3D objects through MeshVault's control
 surface. Distilled from live sessions (tattoo painting, haircut resculpts on a
 120k-face photogrammetry portrait, primitive-assembly character and vehicle
-builds). Complements `examples/t23d_pipeline.md` (the generate → export
-chain); this skill is about the interactive editing loop itself.
+builds). Scope: the interactive editing loop (a separate generate → export
+pipeline walkthrough ships with the MeshVault repo, not with this skill).
 
 ## Golden rules
 
 1. **Never guess coordinates.** Every brush lands at world coords you must
    earn: `pick {x, y}` from a screenshot, `raycast {origin, direction}`, or
    `inspect_region`. A miss names the object actually hit — read the error.
-0. **Never repeat a failing call verbatim.** An error is a verdict, not a
+2. **Never repeat a failing call verbatim.** An error is a verdict, not a
    flake: the same action + params returns the same error forever. Change the
    action or the params (the message usually names the fix), or report the
    blocker. A local pilot burned 60 steps ping-ponging two invented actions;
    colors are CSS hex STRINGS ("#ff0000"), never [1,0,0] arrays.
-2. **Look after every meaningful mutation — with your eyes if you have
+3. **Look after every meaningful mutation — with your eyes if you have
    them.** `screenshot` after each phase, not each stamp. If you are a
    vision model, actually LOOKING at the render is the highest-value action
    in this entire skill: judge shape, proportions, and paint contrast
@@ -60,13 +61,13 @@ chain); this skill is about the interactive editing loop itself.
      all reads — one 30-probe batch costs half the wall time of 30 calls
      through MCP (and probes are now BVH-accelerated engine-side: ~1 ms
      each even on 240k-triangle meshes). Probe-batch → compute → act-batch.
-3. **Quantified results are the truth.** Trust `stretchedEdges`, `meanAlpha`,
+4. **Quantified results are the truth.** Trust `stretchedEdges`, `meanAlpha`,
    `painted`, `openEdges` deltas over your intention. If `meanAlpha` ≈ 0 the
    paint is invisible; if `painted` is tiny the brush missed.
-4. **The sculpt loop is: probe → sculpt → regularize → paint.** Heavy grabs
+5. **The sculpt loop is: probe → sculpt → regularize → paint.** Heavy grabs
    stretch facets into untexturable slivers — run `regularize_region` on the
    worked area before judging the shape or painting it.
-5. **Announce destruction before you rely on it.** `refine_region`,
+6. **Announce destruction before you rely on it.** `refine_region`,
    `regularize_region`, `simplify_region`, `split_object` REPLACE geometry:
    the reset baseline moves and morphs drop loudly. Read the returned `note`.
 
@@ -173,16 +174,16 @@ gills all brushed) — five takes distilled into these rules:
    with SIDE rays at descending heights (top-down probes fall off the curve),
    `symmetry:"x"`, then `blur_paint` along the transition to melt banding
    into an airbrush gradient.
-7b. **Parametric circle paths are PLANAR** — they ride the surface only
+8. **Parametric circle paths are PLANAR** — they ride the surface only
    where the surface still matches the circle. Dig/paint rings BEFORE doming
    or displacing the area (owl eye discs: rings dug after doming floated and
    missed); afterwards, build ring strokes from re-probed points instead.
-8. **Analytic coordinates die at the first sculpt.** Any formula-derived
+9. **Analytic coordinates die at the first sculpt.** Any formula-derived
    surface point (sphere/ellipsoid math) is a lie once proportions were
    sculpted — a whole 70-stamp paint batch missed on the owl because the
    crown had been flattened 0.05 lower. After EVERY sculpt phase, re-probe
    before painting or digging: batch the raycasts (32 per call) so a full
-   re-probe of 70 points costs two round trips. Order the build
+   re-probe of 70 points costs three round trips. Order the build
    proportions → features → relief → paint so each phase probes once.
 
 ## Fusion: from assembly to ONE sculptable skin (merge_objects)
@@ -611,8 +612,15 @@ else:
 
 1. `screenshot` front/side/back + close-up of the worked region.
 2. `get_mesh_stats` — `openEdges` unchanged unless you split something.
+   Fused-mesh exception: multi-part unions legitimately keep ~50-90 trace
+   open edges (see Fusion section) — compare against the post-fusion
+   baseline, not zero.
 3. `fix_mesh {operations: ["degenerate"]}` — expect `trianglesDropped: 0`
-   after a clean sculpt/regularize loop.
+   after a clean sculpt/regularize loop. SKIP THIS STEP on fused meshes:
+   CSG seams carry legitimate sliver triangles and dropping them punches
+   the seams open (the NEVER rule in the Fusion section — 2006 dropped
+   triangles opened 51 → 570 edges in the field); expect nonzero drops
+   there and do not "repair" them.
 4. `export_model` round-trips paint and geometry; check the file size is sane.
 
 ## Traps
